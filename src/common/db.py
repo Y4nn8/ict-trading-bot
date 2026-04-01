@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
-from src.common.config import DatabaseConfig
 from src.common.exceptions import DatabaseError
 from src.common.logging import get_logger
+
+if TYPE_CHECKING:
+    from src.common.config import DatabaseConfig
 
 logger = get_logger(__name__)
 
@@ -53,14 +55,16 @@ class Database:
     async def execute(self, query: str, *args: Any) -> str:
         """Execute a query and return the status string."""
         try:
-            return await self.pool.execute(query, *args)
+            result: str = await self.pool.execute(query, *args)
+            return result
         except Exception as e:
             raise DatabaseError(f"Query execution failed: {e}") from e
 
-    async def fetch(self, query: str, *args: Any) -> list[asyncpg.Record]:
+    async def fetch(self, query: str, *args: Any) -> list[Any]:
         """Execute a query and return all rows."""
         try:
-            return await self.pool.fetch(query, *args)
+            result: list[Any] = await self.pool.fetch(query, *args)
+            return result
         except Exception as e:
             raise DatabaseError(f"Query fetch failed: {e}") from e
 

@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from enum import Enum
-from typing import Any
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 from pydantic import BaseModel, Field, model_validator
 
 
-class Timeframe(str, Enum):
+class Timeframe(StrEnum):
     """Supported timeframes."""
 
     M5 = "M5"
@@ -19,14 +21,14 @@ class Timeframe(str, Enum):
     D1 = "D1"
 
 
-class Direction(str, Enum):
+class Direction(StrEnum):
     """Trade direction."""
 
     LONG = "LONG"
     SHORT = "SHORT"
 
 
-class ImpactLevel(str, Enum):
+class ImpactLevel(StrEnum):
     """News event impact level."""
 
     LOW = "LOW"
