@@ -1,5 +1,6 @@
--- Enable TimescaleDB extension
+-- Enable required extensions
 CREATE EXTENSION IF NOT EXISTS timescaledb;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- Hypertable for market data
 CREATE TABLE candles (

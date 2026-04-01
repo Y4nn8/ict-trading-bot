@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 
 from src.common.logging import get_logger
 
+_TF_MINUTES: dict[str, int] = {"M5": 5, "H1": 60, "H4": 240, "D1": 1440}
+
 if TYPE_CHECKING:
     from src.common.config import InstrumentConfig
     from src.market_data.ig_client import IGClient
@@ -49,10 +51,10 @@ class MarketDataIngester:
         end = datetime.now(tz=UTC)
         start = end - timedelta(days=days)
 
-        # Resume from last stored candle
+        # Resume from last stored candle (offset by base timeframe interval)
         latest = await self._storage.get_latest_candle_time(instrument.name, timeframe)
         if latest is not None:
-            start = latest + timedelta(minutes=1)
+            start = latest + timedelta(minutes=_TF_MINUTES.get(timeframe, 5))
             await logger.ainfo(
                 "resuming_ingestion",
                 instrument=instrument.name,

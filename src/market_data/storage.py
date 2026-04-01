@@ -165,7 +165,7 @@ class CandleStorage:
         """
         table = _get_table_for_timeframe(timeframe)
         where_clause, params = _build_candle_where(instrument, timeframe, start, end)
-        limit_clause = f" LIMIT {limit}" if limit else ""
+        limit_clause = f" LIMIT {limit}" if limit is not None else ""
 
         query = f"""
             SELECT time, open, high, low, close, volume, spread
