@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime  # noqa: TC003
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from uuid import UUID, uuid4
-
-if TYPE_CHECKING:
-    from datetime import datetime
 
 from pydantic import BaseModel, Field, model_validator
 

@@ -33,6 +33,7 @@ dev = [
     "pytest-cov>=6.0",
     "pytest-mock>=3.14",
     "aioresponses>=0.7",
+    "pandas>=2.0",
     "ruff>=0.8",
     "mypy>=1.13",
     "types-PyYAML>=6.0",
