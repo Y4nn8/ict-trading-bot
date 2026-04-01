@@ -104,13 +104,9 @@ class MarketDataIngester:
         automatically by TimescaleDB policies, but can be called manually
         after bulk inserts.
         """
-        for view, _interval in [
-            ("candles_h1", "2 hours"),
-            ("candles_h4", "8 hours"),
-            ("candles_d1", "2 days"),
-        ]:
+        for view in ("candles_h1", "candles_h4", "candles_d1"):
             try:
-                await self._storage._db.execute(
+                await self._storage.execute_raw(
                     f"CALL refresh_continuous_aggregate('{view}', NULL, NULL)"
                 )
                 await logger.ainfo("aggregate_refreshed", view=view)

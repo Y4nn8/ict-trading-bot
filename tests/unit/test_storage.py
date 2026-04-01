@@ -40,6 +40,7 @@ class TestCandleStorage:
     def mock_db(self) -> Database:
         db = AsyncMock(spec=Database)
         db.execute = AsyncMock(return_value="INSERT 0 1")
+        db.executemany = AsyncMock(return_value=None)
         db.fetch = AsyncMock(return_value=[])
         db.fetchval = AsyncMock(return_value=None)
         return db  # type: ignore[return-value]
@@ -62,7 +63,7 @@ class TestCandleStorage:
         result = await storage.upsert_candles("EUR/USD", "M5", df)
         assert result == 0
 
-    async def test_upsert_calls_execute_per_row(
+    async def test_upsert_batches_with_executemany(
         self, storage: CandleStorage, mock_db: Database
     ) -> None:
         df = pl.DataFrame({
@@ -78,7 +79,10 @@ class TestCandleStorage:
         })
         result = await storage.upsert_candles("EUR/USD", "M5", df)
         assert result == 2
-        assert mock_db.execute.call_count == 2  # type: ignore[union-attr]
+        mock_db.executemany.assert_called_once()  # type: ignore[union-attr]
+        # Verify 2 rows were passed in batch
+        args = mock_db.executemany.call_args[0][1]  # type: ignore[union-attr]
+        assert len(args) == 2
 
     async def test_fetch_candles_returns_empty_df(
         self, storage: CandleStorage

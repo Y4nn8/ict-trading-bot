@@ -43,8 +43,7 @@ def mock_storage() -> AsyncMock:
     storage = AsyncMock()
     storage.get_latest_candle_time = AsyncMock(return_value=None)
     storage.upsert_candles = AsyncMock(return_value=0)
-    storage._db = AsyncMock()
-    storage._db.execute = AsyncMock()
+    storage.execute_raw = AsyncMock(return_value="CALL")
     return storage
 
 
@@ -100,4 +99,4 @@ class TestMarketDataIngester:
     async def test_refresh_aggregates(self, ingester: MarketDataIngester) -> None:
         await ingester.refresh_aggregates()
         # Should attempt to refresh 3 views (h1, h4, d1)
-        assert ingester._storage._db.execute.call_count == 3  # type: ignore[union-attr]
+        assert ingester._storage.execute_raw.call_count == 3  # type: ignore[union-attr]

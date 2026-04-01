@@ -11,13 +11,13 @@ from trading_ig import IGService
 
 from src.common.exceptions import BrokerAuthError, BrokerError, MarketDataError
 from src.common.logging import get_logger
+from src.market_data.storage import CANDLE_SCHEMA
 
 if TYPE_CHECKING:
     from src.common.config import BrokerConfig
 
 logger = get_logger(__name__)
 
-# IG resolution mapping
 _RESOLUTION_MAP: dict[str, str] = {
     "M5": "5Min",
     "H1": "1Hour",
@@ -106,16 +106,7 @@ class IGClient:
             prices = response["prices"]
             if prices is None or prices.empty:
                 logger.warning("no_data_returned", epic=epic, resolution=resolution)
-                return pl.DataFrame(
-                    schema={
-                        "time": pl.Datetime("us", "UTC"),
-                        "open": pl.Float64,
-                        "high": pl.Float64,
-                        "low": pl.Float64,
-                        "close": pl.Float64,
-                        "volume": pl.Float64,
-                    }
-                )
+                return pl.DataFrame(schema=CANDLE_SCHEMA)
 
             # IG returns multi-level columns (bid/ask/last), use bid prices
             records: list[dict[str, object]] = []

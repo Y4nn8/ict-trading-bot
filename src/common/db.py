@@ -81,3 +81,10 @@ class Database:
             return await self.pool.fetchval(query, *args)
         except Exception as e:
             raise DatabaseError(f"Query fetchval failed: {e}") from e
+
+    async def executemany(self, query: str, args: list[tuple[Any, ...]]) -> None:
+        """Execute a query with multiple sets of arguments (batch)."""
+        try:
+            await self.pool.executemany(query, args)
+        except Exception as e:
+            raise DatabaseError(f"Batch execution failed: {e}") from e

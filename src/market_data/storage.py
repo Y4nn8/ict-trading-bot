@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
 from src.common.exceptions import DatabaseError
 from src.common.logging import get_logger
+from src.common.models import Timeframe
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -15,6 +16,58 @@ if TYPE_CHECKING:
     from src.common.db import Database
 
 logger = get_logger(__name__)
+
+CANDLE_SCHEMA: dict[str, Any] = {
+    "time": pl.Datetime("us", "UTC"),
+    "open": pl.Float64,
+    "high": pl.Float64,
+    "low": pl.Float64,
+    "close": pl.Float64,
+    "volume": pl.Float64,
+    "spread": pl.Float64,
+}
+
+_TIMEFRAME_TABLE_MAP: dict[str, str] = {
+    Timeframe.M5: "candles",
+    Timeframe.H1: "candles_h1",
+    Timeframe.H4: "candles_h4",
+    Timeframe.D1: "candles_d1",
+}
+
+
+def _get_table_for_timeframe(timeframe: str) -> str:
+    """Map timeframe to the appropriate table or view name."""
+    table = _TIMEFRAME_TABLE_MAP.get(timeframe)
+    if table is None:
+        raise DatabaseError(f"Unknown timeframe: {timeframe}")
+    return table
+
+
+def _build_candle_where(
+    instrument: str,
+    timeframe: str,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> tuple[str, list[object]]:
+    """Build WHERE clause and params for candle queries."""
+    conditions = ["instrument = $1"]
+    params: list[object] = [instrument]
+    param_idx = 2
+
+    if timeframe == Timeframe.M5:
+        conditions.append("timeframe = 'M5'")
+
+    if start is not None:
+        conditions.append(f"time >= ${param_idx}")
+        params.append(start)
+        param_idx += 1
+
+    if end is not None:
+        conditions.append(f"time < ${param_idx}")
+        params.append(end)
+        param_idx += 1
+
+    return " AND ".join(conditions), params
 
 
 class CandleStorage:
@@ -33,10 +86,7 @@ class CandleStorage:
         timeframe: str,
         df: pl.DataFrame,
     ) -> int:
-        """Insert or update candles into the database.
-
-        Uses ON CONFLICT to upsert. Expects DataFrame columns:
-        time, open, high, low, close, volume.
+        """Insert or update candles into the database (batched).
 
         Args:
             instrument: Instrument identifier.
@@ -45,9 +95,6 @@ class CandleStorage:
 
         Returns:
             Number of rows upserted.
-
-        Raises:
-            DatabaseError: If the database operation fails.
         """
         if df.is_empty():
             return 0
@@ -67,36 +114,31 @@ class CandleStorage:
         """
 
         rows = df.to_dicts()
-        count = 0
-
-        try:
-            for row in rows:
-                await self._db.execute(
-                    query,
-                    row["time"],
-                    instrument,
-                    timeframe,
-                    float(row["open"]),
-                    float(row["high"]),
-                    float(row["low"]),
-                    float(row["close"]),
-                    float(row.get("volume", 0)),
-                    float(row["spread"]) if row.get("spread") is not None else None,
-                )
-                count += 1
-
-            await logger.ainfo(
-                "candles_upserted",
-                instrument=instrument,
-                timeframe=timeframe,
-                count=count,
+        args = [
+            (
+                row["time"],
+                instrument,
+                timeframe,
+                float(row["open"]),
+                float(row["high"]),
+                float(row["low"]),
+                float(row["close"]),
+                float(row.get("volume", 0)),
+                float(row["spread"]) if row.get("spread") is not None else None,
             )
-            return count
+            for row in rows
+        ]
 
-        except DatabaseError:
-            raise
-        except Exception as e:
-            raise DatabaseError(f"Failed to upsert candles: {e}") from e
+        await self._db.executemany(query, args)
+
+        count = len(args)
+        await logger.ainfo(
+            "candles_upserted",
+            instrument=instrument,
+            timeframe=timeframe,
+            count=count,
+        )
+        return count
 
     async def fetch_candles(
         self,
@@ -121,27 +163,8 @@ class CandleStorage:
         Returns:
             Polars DataFrame with candle data.
         """
-        # Use continuous aggregate views for higher timeframes
         table = _get_table_for_timeframe(timeframe)
-
-        conditions = ["instrument = $1"]
-        params: list[object] = [instrument]
-        param_idx = 2
-
-        if timeframe == "M5":
-            conditions.append("timeframe = 'M5'")
-
-        if start is not None:
-            conditions.append(f"time >= ${param_idx}")
-            params.append(start)
-            param_idx += 1
-
-        if end is not None:
-            conditions.append(f"time < ${param_idx}")
-            params.append(end)
-            param_idx += 1
-
-        where_clause = " AND ".join(conditions)
+        where_clause, params = _build_candle_where(instrument, timeframe, start, end)
         limit_clause = f" LIMIT {limit}" if limit else ""
 
         query = f"""
@@ -152,61 +175,28 @@ class CandleStorage:
             {limit_clause}
         """
 
-        try:
-            records = await self._db.fetch(query, *params)
-        except DatabaseError:
-            raise
-        except Exception as e:
-            raise DatabaseError(f"Failed to fetch candles: {e}") from e
+        records = await self._db.fetch(query, *params)
 
         if not records:
-            return pl.DataFrame(
-                schema={
-                    "time": pl.Datetime("us", "UTC"),
-                    "open": pl.Float64,
-                    "high": pl.Float64,
-                    "low": pl.Float64,
-                    "close": pl.Float64,
-                    "volume": pl.Float64,
-                    "spread": pl.Float64,
-                }
-            )
+            return pl.DataFrame(schema=CANDLE_SCHEMA)
 
-        return pl.DataFrame(
-            [dict(r) for r in records],
-            schema={
-                "time": pl.Datetime("us", "UTC"),
-                "open": pl.Float64,
-                "high": pl.Float64,
-                "low": pl.Float64,
-                "close": pl.Float64,
-                "volume": pl.Float64,
-                "spread": pl.Float64,
-            },
-        )
+        return pl.DataFrame([dict(r) for r in records], schema=CANDLE_SCHEMA)
+
+    async def fetch_candles_raw(self, query: str, *args: object) -> pl.DataFrame:
+        """Execute a raw SQL query and return results as a candle DataFrame."""
+        records = await self._db.fetch(query, *args)
+        if not records:
+            return pl.DataFrame(schema=CANDLE_SCHEMA)
+        return pl.DataFrame([dict(r) for r in records], schema=CANDLE_SCHEMA)
 
     async def get_latest_candle_time(
         self,
         instrument: str,
         timeframe: str,
     ) -> datetime | None:
-        """Get the most recent candle timestamp for an instrument/timeframe.
-
-        Args:
-            instrument: Instrument identifier.
-            timeframe: Timeframe string.
-
-        Returns:
-            The latest candle datetime, or None if no data exists.
-        """
+        """Get the most recent candle timestamp for an instrument/timeframe."""
         table = _get_table_for_timeframe(timeframe)
-        conditions = ["instrument = $1"]
-        params: list[object] = [instrument]
-
-        if timeframe == "M5":
-            conditions.append("timeframe = 'M5'")
-
-        where_clause = " AND ".join(conditions)
+        where_clause, params = _build_candle_where(instrument, timeframe)
         query = f"SELECT MAX(time) FROM {table} WHERE {where_clause}"
 
         result = await self._db.fetchval(query, *params)
@@ -219,38 +209,14 @@ class CandleStorage:
         instrument: str,
         timeframe: str,
     ) -> int:
-        """Get the number of candles stored for an instrument/timeframe.
-
-        Args:
-            instrument: Instrument identifier.
-            timeframe: Timeframe string.
-
-        Returns:
-            Count of stored candles.
-        """
+        """Get the number of candles stored for an instrument/timeframe."""
         table = _get_table_for_timeframe(timeframe)
-        conditions = ["instrument = $1"]
-        params: list[object] = [instrument]
-
-        if timeframe == "M5":
-            conditions.append("timeframe = 'M5'")
-
-        where_clause = " AND ".join(conditions)
+        where_clause, params = _build_candle_where(instrument, timeframe)
         query = f"SELECT COUNT(*) FROM {table} WHERE {where_clause}"
 
         result = await self._db.fetchval(query, *params)
         return int(result) if result is not None else 0
 
-
-def _get_table_for_timeframe(timeframe: str) -> str:
-    """Map timeframe to the appropriate table or view name."""
-    mapping = {
-        "M5": "candles",
-        "H1": "candles_h1",
-        "H4": "candles_h4",
-        "D1": "candles_d1",
-    }
-    table = mapping.get(timeframe)
-    if table is None:
-        raise DatabaseError(f"Unknown timeframe: {timeframe}")
-    return table
+    async def execute_raw(self, query: str, *args: object) -> str:
+        """Execute a raw SQL statement through the database connection."""
+        return await self._db.execute(query, *args)
