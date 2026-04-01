@@ -51,8 +51,8 @@ class SessionWindow:
 
 
 SESSION_WINDOWS: dict[Session, SessionWindow] = {
-    Session.ASIAN: SessionWindow(0, 9),
-    Session.LONDON: SessionWindow(7, 16),
+    Session.ASIAN: SessionWindow(0, 7),
+    Session.LONDON: SessionWindow(7, 12),
     Session.NEW_YORK: SessionWindow(12, 21),
 }
 
@@ -107,9 +107,9 @@ def add_session_columns_vectorized(df: pl.DataFrame) -> pl.DataFrame:
 
     # Session classification
     session_expr = (
-        pl.when((hour_col >= 0) & (hour_col < 9))
+        pl.when((hour_col >= 0) & (hour_col < 7))
         .then(pl.lit(Session.ASIAN))
-        .when((hour_col >= 7) & (hour_col < 16))
+        .when((hour_col >= 7) & (hour_col < 12))
         .then(pl.lit(Session.LONDON))
         .when((hour_col >= 12) & (hour_col < 21))
         .then(pl.lit(Session.NEW_YORK))

@@ -81,7 +81,9 @@ def is_in_ote(price: float, levels: PremiumDiscountLevels) -> bool:
     Returns:
         True if price is between OTE high and OTE low.
     """
-    return levels.ote_high >= price >= levels.ote_low
+    lower = min(levels.ote_high, levels.ote_low)
+    upper = max(levels.ote_high, levels.ote_low)
+    return lower <= price <= upper
 
 
 def detect_pd_zones_vectorized(
