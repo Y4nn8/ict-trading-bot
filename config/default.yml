@@ -1,0 +1,87 @@
+# Default configuration for ICT Trading Bot
+
+logging:
+  level: INFO
+  json_format: true
+
+database:
+  url: postgresql://trader:trader_secret@localhost:5432/trading_bot
+  min_connections: 2
+  max_connections: 10
+
+broker:
+  api_key: ""
+  username: ""
+  password: ""
+  acc_number: ""
+  acc_type: DEMO  # DEMO or LIVE
+
+market_data:
+  base_timeframe: M5
+  higher_timeframes:
+    - H1
+    - H4
+    - D1
+  default_history_days: 180  # 6 months
+
+instruments:
+  - name: EUR/USD
+    epic: CS.D.EURUSD.CFD.IP
+    asset_class: forex
+    leverage: 30
+    min_spread: 0.6
+    avg_spread: 0.8
+  - name: GBP/USD
+    epic: CS.D.GBPUSD.CFD.IP
+    asset_class: forex
+    leverage: 30
+    min_spread: 0.9
+    avg_spread: 1.2
+  - name: NAS100
+    epic: IX.D.NASDAQ.IFD.IP
+    asset_class: index
+    leverage: 20
+    min_spread: 1.0
+    avg_spread: 1.5
+  - name: XAUUSD
+    epic: CS.D.USCGC.TODAY.IP
+    asset_class: commodity
+    leverage: 10
+    min_spread: 0.3
+    avg_spread: 0.5
+
+risk:
+  max_risk_per_trade_pct: 1.0  # % of capital
+  max_daily_drawdown_pct: 3.0
+  max_total_drawdown_pct: 10.0
+  max_simultaneous_positions: 5
+  confluence_risk_map:
+    low: 0.5    # confluence < 0.4 -> 0.5% risk
+    medium: 1.0  # 0.4 <= confluence < 0.7 -> 1.0%
+    high: 2.0   # confluence >= 0.7 -> 2.0%
+
+strategy:
+  min_confluence_score: 0.4
+  entry_timeout_candles: 6  # Cancel entry if not filled in N candles
+
+backtest:
+  walk_forward:
+    train_months: 4
+    test_months: 1
+    step_months: 1
+  simulation:
+    slippage_max_pips: 2
+    order_rejection_rate: 0.01
+
+improvement:
+  optuna:
+    n_trials: 100
+    min_improvement_pct: 2.0
+    max_mdd_degradation_pct: 5.0
+  llm:
+    max_iterations: 5
+    max_sharpe_jump_pct: 50.0
+
+news:
+  pre_event_pause_minutes: 30
+  post_event_resume_minutes: 15
