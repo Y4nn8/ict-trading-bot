@@ -44,4 +44,24 @@
 - Fixture datetime generation: `datetime(h, m)` fails when minute >= 60; switched to `timedelta` addition
 
 ### TODO / Open Items
-- Phase 3: Backtest + Strategy (steps 18-30)
+- Phase 4: News module
+
+## Session 3 — 2026-04-02
+
+### Progress
+- Steps completed: [18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
+- Current phase: 3 (Backtest + Strategy) — COMPLETE
+- Next step: Phase 4, step 31 (news base)
+- Active branch: feat/phase3-backtest-strategy (PR pending)
+
+### Decisions Made
+- **Backtest architecture**: two-phase as specified — vectorized pre-computation then M5 event loop
+- **Confluence scoring**: 6 weighted factors (FVG 0.15, OB 0.20, MS 0.25, displacement 0.10, killzone 0.15, P/D 0.15)
+- **Entry evaluation**: requires both minimum confluence score AND a market structure break for direction
+- **Position sizing tiers**: low (<0.4) → 0.5% risk, medium (0.4-0.7) → 1%, high (>0.7) → 2%
+- **ATR proxy for SL**: using candle range (high-low) as simple ATR estimate for entry signals, actual ATR in order blocks/displacement
+- **Walk-forward**: window generation uses 28th-of-month ceiling to avoid month-end issues
+- **Engine coverage**: engine.run() at 26% coverage — needs end-to-end integration test with real fixture data (deferred to step 30)
+
+### Issues Encountered
+- ruff auto-fix removed `close` variable as unused but left dangling `float(candle["close"])` expression — manually cleaned up
