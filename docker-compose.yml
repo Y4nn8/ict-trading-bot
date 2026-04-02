@@ -16,6 +16,16 @@ services:
       timeout: 5s
       retries: 5
 
+  bot:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://trader:trader_secret@db:5432/trading_bot
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
   grafana:
     image: grafana/grafana:latest
     ports:
