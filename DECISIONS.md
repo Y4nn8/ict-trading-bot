@@ -65,3 +65,21 @@
 
 ### Issues Encountered
 - ruff auto-fix removed `close` variable as unused but left dangling `float(candle["close"])` expression — manually cleaned up
+
+## Session 4 — 2026-04-02
+
+### Progress
+- Steps completed: [31, 32, 33, 34, 35, 36, 37, 38, 39]
+- Current phase: 4 (News) — COMPLETE
+- Next step: Phase 5, step 41 (live demo)
+- Active branch: feat/phase4-news (PR pending)
+
+### Decisions Made
+- **NewsSource ABC**: adapter pattern — adding a source = implementing the interface
+- **LLM interpreter**: structured prompt with ACTION/SENTIMENT/IMPACT_SCORE/AFFECTED/REASONING format, parsed line-by-line
+- **Event actions**: 4 types — none, pause (pre/post event window), tighten_stops, trigger_entry
+- **Newsfilter split**: separate realtime (WebSocket) and historical (Query API) classes
+- **News store**: events queryable by time range with tolerance for backtest replay alignment
+
+### Issues Encountered
+- Anthropic SDK content block types: `response.content[0].text` fails mypy due to union with ThinkingBlock etc. — used `hasattr` check
