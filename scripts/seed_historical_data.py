@@ -13,8 +13,6 @@ import sys
 from dotenv import load_dotenv
 
 from src.common.config import load_config
-
-load_dotenv()
 from src.common.db import Database
 from src.common.logging import get_logger, setup_logging
 from src.market_data.ig_client import IGClient
@@ -101,6 +99,7 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    load_dotenv()
     instrument_list = args.instruments.split(",") if args.instruments else None
 
     asyncio.run(seed(days=args.days, instrument_names=instrument_list))
