@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, model_validator
 class Timeframe(StrEnum):
     """Supported timeframes."""
 
+    M1 = "M1"
     M5 = "M5"
     H1 = "H1"
     H4 = "H4"
