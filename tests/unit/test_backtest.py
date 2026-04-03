@@ -257,13 +257,40 @@ class TestPositionSizer:
 
     def test_high_confluence_bigger_size(self) -> None:
         sizer = PositionSizer()
-        small = sizer.compute_size(10000, 0.3, 1.08, 1.077)
-        large = sizer.compute_size(10000, 0.8, 1.08, 1.077)
+        small = sizer.compute_size(10000, 0.3, 1.08, 1.077, value_per_point=1.0, min_size=0.5)
+        large = sizer.compute_size(10000, 0.8, 1.08, 1.077, value_per_point=1.0, min_size=0.5)
         assert large > small
 
     def test_zero_sl_distance(self) -> None:
         sizer = PositionSizer()
         assert sizer.compute_size(10000, 0.5, 1.08, 1.08) == 0.0
+
+    def test_respects_min_size(self) -> None:
+        sizer = PositionSizer()
+        # Even if raw calc gives 0.3, should return min_size=0.5
+        size = sizer.compute_size(5000, 0.5, 23000, 22960, value_per_point=1.0, min_size=0.5)
+        assert size >= 0.5
+
+    def test_returns_zero_if_min_size_exceeds_budget(self) -> None:
+        sizer = PositionSizer()
+        # Capital=100, risk=0.5%=0.50€, SL=40pts, vpp=1€ → min_size risk=0.5*40=20€ > 0.50€
+        size = sizer.compute_size(100, 0.3, 23000, 22960, value_per_point=1.0, min_size=0.5)
+        assert size == 0.0
+
+    def test_rounds_down_to_step(self) -> None:
+        sizer = PositionSizer()
+        # 5000€ capital, 1% risk=50€, SL=40pts, vpp=1€ → 50/40=1.25 → floor to 1.0
+        size = sizer.compute_size(
+            5000, 0.5, 23000, 22960, value_per_point=1.0, min_size=0.5, size_step=0.5
+        )
+        assert size % 0.5 == 0.0
+
+    def test_dax_e1_realistic(self) -> None:
+        """DAX €1/point, 5000€ capital, 1% risk, 40pt SL."""
+        sizer = PositionSizer()
+        size = sizer.compute_size(5000, 0.5, 23000, 22960, value_per_point=1.0, min_size=0.5)
+        # Risk budget: 50€, risk per contract: 40*1=40€, raw=1.25, step=1.0
+        assert size == 1.0
 
 
 class TestRiskManager:

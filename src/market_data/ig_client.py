@@ -93,6 +93,7 @@ class IGClient:
             raise MarketDataError(f"Unsupported resolution: {resolution}")
 
         try:
+            # Use API v1 which passes dates as query params (v2 puts them in URL path)
             start_str = start.strftime("%Y-%m-%dT%H:%M:%S")
             end_str = end.strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -101,6 +102,7 @@ class IGClient:
                 resolution=ig_resolution,
                 start_date=start_str,
                 end_date=end_str,
+                version="1",
             )
 
             prices = response["prices"]

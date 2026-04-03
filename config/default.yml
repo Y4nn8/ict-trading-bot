@@ -26,39 +26,63 @@ market_data:
 
 instruments:
   - name: EUR/USD
-    epic: CS.D.EURUSD.CFD.IP
+    epic: CS.D.EURUSD.MINI.IP
     asset_class: forex
     leverage: 30
+    min_size: 0.5
+    value_per_point: 1.0  # EUR per pip (mini)
     min_spread: 0.6
     avg_spread: 0.8
   - name: GBP/USD
-    epic: CS.D.GBPUSD.CFD.IP
+    epic: CS.D.GBPUSD.MINI.IP
     asset_class: forex
     leverage: 30
+    min_size: 0.5
+    value_per_point: 1.0
     min_spread: 0.9
     avg_spread: 1.2
-  - name: NAS100
-    epic: IX.D.NASDAQ.IFD.IP
+  - name: SPX500
+    epic: IX.D.SPTRD.IFS.IP
     asset_class: index
     leverage: 20
-    min_spread: 1.0
-    avg_spread: 1.5
+    min_size: 0.5
+    value_per_point: 1.0  # £1 per point
+    point_currency: GBP
+    min_spread: 0.4
+    avg_spread: 0.6
+  - name: DOW30
+    epic: IX.D.DOW.IFS.IP
+    asset_class: index
+    leverage: 20
+    min_size: 0.5
+    value_per_point: 1.0  # £1 per point
+    point_currency: GBP
+    min_spread: 1.6
+    avg_spread: 2.4
   - name: DAX40
-    epic: IX.D.DAX.IFD.IP
+    epic: IX.D.DAX.IFE.IP
     asset_class: index
     leverage: 20
+    min_size: 0.5
+    value_per_point: 1.0  # €1 per point
     min_spread: 1.2
     avg_spread: 1.5
   - name: NIKKEI225
-    epic: IX.D.NIKKEI.IFD.IP
+    epic: IX.D.NIKKEI.IFM.IP
     asset_class: index
     leverage: 20
+    min_size: 1.0
+    value_per_point: 1.0  # $1 per point
+    point_currency: USD
     min_spread: 7.0
     avg_spread: 10.0
   - name: XAUUSD
-    epic: CS.D.USCGC.TODAY.IP
+    epic: CS.D.CFDGOLD.CFM.IP
     asset_class: commodity
     leverage: 10
+    min_size: 0.5
+    value_per_point: 10.0  # $10 per point (10oz mini)
+    point_currency: USD
     min_spread: 0.3
     avg_spread: 0.5
 
