@@ -10,7 +10,11 @@ import argparse
 import asyncio
 import sys
 
+from dotenv import load_dotenv
+
 from src.common.config import load_config
+
+load_dotenv()
 from src.common.db import Database
 from src.common.logging import get_logger, setup_logging
 from src.market_data.ig_client import IGClient

@@ -54,6 +54,9 @@ class InstrumentConfig(BaseModel):
     epic: str
     asset_class: str
     leverage: int
+    min_size: float = 0.5
+    value_per_point: float = 1.0
+    point_currency: str = "EUR"  # Currency of the value_per_point
     min_spread: float = 0.0
     avg_spread: float = 0.0
 
@@ -202,6 +205,19 @@ def load_config(
     db_url = os.environ.get("DATABASE_URL")
     if db_url:
         config_data.setdefault("database", {})["url"] = db_url
+
+    # Broker env overrides
+    _env_broker_map = {
+        "IG_API_KEY": "api_key",
+        "IG_USERNAME": "username",
+        "IG_PASSWORD": "password",
+        "IG_ACC_NUMBER": "acc_number",
+        "IG_ACC_TYPE": "acc_type",
+    }
+    for env_var, config_key in _env_broker_map.items():
+        value = os.environ.get(env_var)
+        if value:
+            config_data.setdefault("broker", {})[config_key] = value
 
     try:
         return AppConfig(**config_data)

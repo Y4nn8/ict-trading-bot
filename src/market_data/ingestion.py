@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from src.common.exceptions import MarketDataError
 from src.common.logging import get_logger
 
 _TF_MINUTES: dict[str, int] = {"M5": 5, "H1": 60, "H4": 240, "D1": 1440}
@@ -74,12 +75,22 @@ class MarketDataIngester:
         while chunk_start < end:
             chunk_end = min(chunk_start + chunk_size, end)
 
-            df = self._ig_client.fetch_historical_candles(
-                epic=instrument.epic,
-                resolution=timeframe,
-                start=chunk_start,
-                end=chunk_end,
-            )
+            try:
+                df = self._ig_client.fetch_historical_candles(
+                    epic=instrument.epic,
+                    resolution=timeframe,
+                    start=chunk_start,
+                    end=chunk_end,
+                )
+            except MarketDataError as e:
+                if "exceeded" in str(e).lower() or "allowance" in str(e).lower():
+                    await logger.awarning(
+                        "rate_limit_reached",
+                        instrument=instrument.name,
+                        stored_so_far=total_stored,
+                    )
+                    break
+                raise
 
             if not df.is_empty():
                 stored = await self._storage.upsert_candles(
