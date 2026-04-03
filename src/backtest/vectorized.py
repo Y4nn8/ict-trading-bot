@@ -20,6 +20,8 @@ from src.structure.swings import detect_swings_vectorized
 if TYPE_CHECKING:
     import polars as pl
 
+    from src.strategy.params import StrategyParams
+
 
 @dataclass
 class PrecomputedData:
@@ -41,15 +43,7 @@ def precompute(
     candles: pl.DataFrame,
     instrument: str,
     timeframe: str,
-    swing_left: int = 2,
-    swing_right: int = 2,
-    ob_displacement_factor: float = 2.0,
-    ob_atr_period: int = 14,
-    disp_atr_period: int = 14,
-    disp_threshold: float = 1.5,
-    liq_tolerance_pct: float = 0.02,
-    liq_lookback: int = 50,
-    liq_min_touches: int = 2,
+    params: StrategyParams | None = None,
 ) -> PrecomputedData:
     """Run all vectorized detectors on candle data.
 
@@ -57,41 +51,41 @@ def precompute(
         candles: DataFrame with OHLCV columns.
         instrument: Instrument name.
         timeframe: Timeframe string.
-        swing_left: Swing detection left bars.
-        swing_right: Swing detection right bars.
-        ob_displacement_factor: Order block displacement factor.
-        ob_atr_period: Order block ATR period.
-        disp_atr_period: Displacement ATR period.
-        disp_threshold: Displacement threshold.
-        liq_tolerance_pct: Liquidity tolerance percentage.
-        liq_lookback: Liquidity lookback period.
-        liq_min_touches: Liquidity minimum touches.
+        params: Strategy parameters. Uses defaults if None.
 
     Returns:
         PrecomputedData with all detector results.
     """
-    # Add session/killzone columns
+    if params is None:
+        from src.strategy.params import StrategyParams
+
+        params = StrategyParams()
+
     candles_with_sessions = add_session_columns_vectorized(candles)
 
-    # Run all detectors
-    swings = detect_swings_vectorized(candles, swing_left, swing_right)
+    swings = detect_swings_vectorized(
+        candles, params.swing_left_bars, params.swing_right_bars
+    )
 
     ms_breaks, final_trend = detect_market_structure_vectorized(
-        candles, swing_left, swing_right
+        candles, params.swing_left_bars, params.swing_right_bars
     )
 
     fvgs = detect_fvg_vectorized(candles)
 
     order_blocks = detect_order_blocks_vectorized(
-        candles, ob_displacement_factor, ob_atr_period
+        candles, params.ob_displacement_factor, params.ob_atr_period
     )
 
     liquidity = detect_liquidity_vectorized(
-        candles, liq_tolerance_pct, liq_lookback, liq_min_touches
+        candles,
+        params.liq_tolerance_pct,
+        params.liq_lookback,
+        params.liq_min_touches,
     )
 
     displacements = detect_displacement_vectorized(
-        candles, disp_atr_period, disp_threshold
+        candles, params.disp_atr_period, params.disp_threshold
     )
 
     return PrecomputedData(
