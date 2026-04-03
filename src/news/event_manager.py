@@ -123,6 +123,7 @@ class EventManager:
         if self._state.close_opposing_until is None:
             return {}
         if current_time >= self._state.close_opposing_until:
+            self._state.close_opposing_until = None
             self._state.instrument_sentiments = {}
             return {}
         return self._state.instrument_sentiments

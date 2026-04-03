@@ -176,13 +176,21 @@ class BacktestEngine:
                 "in_killzone": candle.get("in_killzone", False),
             }
 
-            # Check for news-triggered entries
+            # Check for news-triggered entries (per-instrument)
             news_triggers = self._event_manager.pop_triggers()
             for trigger in news_triggers:
-                sentiment = trigger.get("sentiment", "neutral")
-                if sentiment == "bullish":
+                inst_sents = trigger.get("instrument_sentiments", {})
+                if inst_sents:
+                    inst_sent = inst_sents.get(
+                        self._precomputed.instrument,
+                        inst_sents.get("__all__", "none"),
+                    )
+                else:
+                    inst_sent = trigger.get("sentiment", "neutral")
+
+                if inst_sent == "bullish":
                     context["ms_breaks"] = [{"direction": "bullish"}]
-                elif sentiment == "bearish":
+                elif inst_sent == "bearish":
                     context["ms_breaks"] = [{"direction": "bearish"}]
 
             # Score confluence
