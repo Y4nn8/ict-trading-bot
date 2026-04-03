@@ -58,7 +58,7 @@ class NewsStore:
         )
 
     async def save_events(self, events: list[NewsEvent]) -> int:
-        """Save multiple news events.
+        """Save multiple news events (batched).
 
         Args:
             events: List of NewsEvent objects.
@@ -66,12 +66,39 @@ class NewsStore:
         Returns:
             Number of events saved.
         """
-        count = 0
-        for event in events:
-            await self.save_event(event)
-            count += 1
-        await logger.ainfo("news_events_saved", count=count)
-        return count
+        if not events:
+            return 0
+
+        import json
+
+        query = """
+            INSERT INTO news_events
+                (id, time, source, event_type, title, content, currency,
+                 actual, forecast, previous, impact_level, llm_analysis, instruments)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            ON CONFLICT (id) DO NOTHING
+        """
+        args = [
+            (
+                event.id,
+                event.time,
+                event.source,
+                event.event_type,
+                event.title,
+                event.content,
+                event.currency,
+                event.actual,
+                event.forecast,
+                event.previous,
+                event.impact_level.value if event.impact_level else None,
+                json.dumps(event.llm_analysis) if event.llm_analysis else None,
+                event.instruments,
+            )
+            for event in events
+        ]
+        await self._db.executemany(query, args)
+        await logger.ainfo("news_events_saved", count=len(events))
+        return len(events)
 
     async def get_events(
         self,

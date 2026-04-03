@@ -53,7 +53,7 @@ _COUNTRY_CURRENCY_MAP = {
 }
 
 # GDELT rate limit: be conservative (no official limit but be polite)
-_MIN_SECONDS_BETWEEN_REQUESTS = 10  # GDELT requires 5s, we use 10 for safety
+_MIN_SECONDS_BETWEEN_REQUESTS = 10
 
 
 class GDELTNewsSource(NewsSource):

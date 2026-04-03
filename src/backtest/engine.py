@@ -107,14 +107,14 @@ class BacktestEngine:
             pre_event_pause_minutes=news_pause_minutes,
             post_event_resume_minutes=news_resume_minutes,
         )
-        self._news_by_time: dict[str, list[dict[str, Any]]] = {}
+        self._news_by_minute: dict[tuple[int, int, int, int, int], list[dict[str, Any]]] = {}
         if news_events:
             for event in news_events:
-                # Index by minute-rounded time for quick lookup
                 t = event.get("time")
-                if t is not None:
-                    key = str(t)[:16]  # "2026-03-15 13:30"
-                    self._news_by_time.setdefault(key, []).append(event)
+                if t is not None and hasattr(t, "timetuple"):
+                    tt = t.timetuple()
+                    key = (tt.tm_year, tt.tm_mon, tt.tm_mday, tt.tm_hour, tt.tm_min)
+                    self._news_by_minute.setdefault(key, []).append(event)
 
     def run(self) -> BacktestResult:
         """Execute the backtest over all candles.
@@ -366,10 +366,13 @@ class BacktestEngine:
 
     def _replay_news(self, time: Any) -> None:
         """Check for news events at this timestamp and apply actions."""
-        if not self._news_by_time:
+        if not self._news_by_minute:
             return
-        key = str(time)[:16]
-        events = self._news_by_time.get(key, [])
+        if not hasattr(time, "timetuple"):
+            return
+        tt = time.timetuple()
+        key = (tt.tm_year, tt.tm_mon, tt.tm_mday, tt.tm_hour, tt.tm_min)
+        events = self._news_by_minute.get(key, [])
         for event in events:
             analysis = event.get("llm_analysis") or {}
             action_str = analysis.get("action", "none")
