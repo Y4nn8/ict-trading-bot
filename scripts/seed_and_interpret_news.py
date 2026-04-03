@@ -33,54 +33,144 @@ logger = get_logger(__name__)
 async def fetch_finnhub_news(
     start: datetime, end: datetime
 ) -> list[NewsEvent]:
-    """Fetch general market news from Finnhub (free tier).
+    """Fetch historical market news from Finnhub via company-news endpoint.
 
-    The economic calendar endpoint requires a paid plan,
-    but general/forex news is free.
+    Uses ETF proxies to get macro/forex-relevant news:
+    SPY→SPX500, GLD→Gold, EWJ→Japan, DIA→Dow, FXE→EUR.
+
+    Fetches in weekly chunks with rate limiting (55 req/min).
     """
     api_key = os.environ.get("FINNHUB_API_KEY", "")
     if not api_key:
         await logger.awarning("no_finnhub_key_skipping")
         return []
 
+    import asyncio
+    import time
+    from collections import deque
+
     import aiohttp
 
+    # ETF proxies for our instruments
+    etf_tickers = {
+        "SPY": "USD",    # S&P 500 → USD/equities
+        "GLD": "USD",    # Gold ETF → XAUUSD
+        "EWJ": "JPY",    # Japan ETF → NIKKEI/JPY
+        "DIA": "USD",    # Dow Jones ETF → DOW30
+        "EWG": "EUR",    # Germany ETF → DAX40/EUR
+    }
+
     events: list[NewsEvent] = []
+    request_times: deque[float] = deque()
+
     async with aiohttp.ClientSession() as session:
+        for ticker, currency in etf_tickers.items():
+            chunk_start = start
+            while chunk_start < end:
+                chunk_end = min(chunk_start + timedelta(days=7), end)
+
+                # Rate limit: 55 req/min
+                now = time.monotonic()
+                while request_times and now - request_times[0] > 60:
+                    request_times.popleft()
+                if len(request_times) >= 55:
+                    wait = 60 - (now - request_times[0]) + 0.5
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                request_times.append(time.monotonic())
+
+                url = (
+                    f"https://finnhub.io/api/v1/company-news"
+                    f"?symbol={ticker}"
+                    f"&from={chunk_start.strftime('%Y-%m-%d')}"
+                    f"&to={chunk_end.strftime('%Y-%m-%d')}"
+                    f"&token={api_key}"
+                )
+                try:
+                    async with session.get(url) as resp:
+                        if resp.status != 200:
+                            chunk_start = chunk_end
+                            continue
+                        data = await resp.json()
+                except Exception:
+                    chunk_start = chunk_end
+                    continue
+
+                for item in data:
+                    headline = str(item.get("headline", ""))
+                    if not headline:
+                        continue
+
+                    ts = item.get("datetime", 0)
+                    try:
+                        event_time = datetime.fromtimestamp(
+                            int(ts), tz=UTC
+                        )
+                    except (ValueError, TypeError, OSError):
+                        continue
+
+                    events.append(NewsEvent(
+                        time=event_time,
+                        source="finnhub_company",
+                        event_type="market_news",
+                        title=headline,
+                        content=str(item.get("summary", ""))[:500],
+                        currency=currency,
+                    ))
+
+                await logger.ainfo(
+                    "finnhub_chunk",
+                    ticker=ticker,
+                    start=chunk_start.strftime("%Y-%m-%d"),
+                    news=len(data) if isinstance(data, list) else 0,
+                )
+                chunk_start = chunk_end
+
+        # Also fetch recent general news (last 3 days)
         for category in ["general", "forex"]:
             url = f"https://finnhub.io/api/v1/news?category={category}&token={api_key}"
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    continue
-                data = await resp.json()
+            try:
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for item in data:
+                            headline = str(item.get("headline", ""))
+                            ts = item.get("datetime", 0)
+                            if not headline:
+                                continue
+                            try:
+                                event_time = datetime.fromtimestamp(
+                                    int(ts), tz=UTC
+                                )
+                            except (ValueError, TypeError, OSError):
+                                continue
+                            if event_time < start:
+                                continue
+                            events.append(NewsEvent(
+                                time=event_time,
+                                source="finnhub_news",
+                                event_type="market_news",
+                                title=headline,
+                                content=str(item.get("summary", ""))[:500],
+                            ))
+            except Exception:
+                pass
 
-            for item in data:
-                headline = str(item.get("headline", ""))
-                if not headline:
-                    continue
+    # Deduplicate by title (same news from multiple tickers)
+    seen_titles: set[str] = set()
+    unique_events: list[NewsEvent] = []
+    for event in events:
+        title_key = event.title[:60].lower()
+        if title_key not in seen_titles:
+            seen_titles.add(title_key)
+            unique_events.append(event)
 
-                from datetime import UTC
-
-                ts = item.get("datetime", 0)
-                try:
-                    event_time = datetime.fromtimestamp(int(ts), tz=UTC)
-                except (ValueError, TypeError, OSError):
-                    continue
-
-                if event_time < start or event_time > end:
-                    continue
-
-                events.append(NewsEvent(
-                    time=event_time,
-                    source="finnhub_news",
-                    event_type="market_news",
-                    title=headline,
-                    content=str(item.get("summary", "")),
-                    # impact_level set after LLM interpretation
-                ))
-
-    await logger.ainfo("finnhub_news_fetched", count=len(events))
-    return events
+    await logger.ainfo(
+        "finnhub_news_fetched",
+        raw=len(events),
+        deduplicated=len(unique_events),
+    )
+    return unique_events
 
 
 async def fetch_gdelt_events(
@@ -115,16 +205,31 @@ async def interpret_events(
     client = AsyncAnthropic(api_key=api_key)
     interpreter = NewsInterpreter(client)
 
+    # Pre-filter: only interpret news with macro-relevant keywords
+    macro_keywords = {
+        "fed", "ecb", "boj", "boe", "rate", "inflation", "cpi", "gdp",
+        "employment", "nfp", "payroll", "unemployment", "tariff", "trade war",
+        "sanction", "recession", "crash", "crisis", "war", "oil", "gold",
+        "treasury", "bond", "yield", "dollar", "euro", "yen", "pound",
+        "stock market", "wall street", "s&p", "nasdaq", "dow", "dax",
+        "nikkei", "forex", "currency", "central bank", "stimulus",
+    }
+
+    def _is_macro_relevant(title: str) -> bool:
+        lower = title.lower()
+        return any(kw in lower for kw in macro_keywords)
+
     interpreted = []
+    skipped = 0
     for event in events:
-        # Skip events already interpreted (e.g. GDELT with tone)
+        # Skip events already interpreted
         if event.llm_analysis and "action" in event.llm_analysis:
             interpreted.append(event)
             continue
 
-        # Skip LOW impact events that already have a level set
-        if event.impact_level == ImpactLevel.LOW:
-            interpreted.append(event)
+        # Skip non-macro news to limit LLM calls
+        if event.title and not _is_macro_relevant(event.title):
+            skipped += 1
             continue
 
         analysis = await interpreter.interpret(event, instruments)
@@ -157,6 +262,11 @@ async def interpret_events(
             sentiments=analysis.get("instrument_sentiments", {}),
         )
 
+    await logger.ainfo(
+        "interpretation_complete",
+        interpreted=len(interpreted),
+        skipped_irrelevant=skipped,
+    )
     return interpreted
 
 
