@@ -91,7 +91,8 @@ class NewsStore:
                 event.forecast,
                 event.previous,
                 event.impact_level.value if event.impact_level else None,
-                json.dumps(event.llm_analysis) if event.llm_analysis else None,  # asyncpg needs str for jsonb
+                # asyncpg needs str for jsonb
+                json.dumps(event.llm_analysis) if event.llm_analysis else None,
                 event.instruments,
             )
             for event in events

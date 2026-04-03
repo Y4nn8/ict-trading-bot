@@ -88,11 +88,14 @@ async def run_backtest(
         news_events = await news_store.get_events(start, end)
         await logger.ainfo("news_events_loaded", count=len(news_events))
 
+        inst_config = config.get_instrument(instrument)
+        leverage = float(inst_config.leverage) if inst_config else 30.0
+
         # Build strategy components from params
         components = build_strategy(params)
 
         # Run backtest
-        await logger.ainfo("running_backtest", candles=len(candles))
+        await logger.ainfo("running_backtest", candles=len(candles), leverage=leverage)
         engine = BacktestEngine(
             precomputed=precomputed,
             confluence_scorer=components.confluence_scorer,
@@ -103,6 +106,7 @@ async def run_backtest(
             risk_manager=components.risk_manager,
             sim_config=components.sim_config,
             initial_capital=initial_capital,
+            leverage=leverage,
             news_events=news_events,
         )
         result = engine.run()
@@ -111,10 +115,16 @@ async def run_backtest(
             "backtest_complete",
             closed_trades=len(result.trades),
             open_positions=len(result.open_positions),
+            margin_rejected=result.margin_rejected,
+            margin_capped=result.margin_capped,
+            peak_margin_usage_pct=f"{result.peak_margin_usage_pct:.1f}%",
         )
 
         report = generate_report(result.trades, initial_capital)
         print("\n" + format_report(report))
+        print(f"  Margin rejected: {result.margin_rejected}")
+        print(f"  Margin capped: {result.margin_capped}")
+        print(f"  Peak margin usage: {result.peak_margin_usage_pct:.1f}%")
 
         if result.trades:
             print(f"\n--- First 20 of {len(result.trades)} trades ---")

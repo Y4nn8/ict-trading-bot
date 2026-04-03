@@ -64,6 +64,7 @@ def run_single_backtest(
     params: StrategyParams,
     initial_capital: float = 5000.0,
     max_mdd_pct: float = 5.0,
+    leverage: float = 30.0,
 ) -> float:
     """Run one backtest and return a composite score.
 
@@ -77,6 +78,7 @@ def run_single_backtest(
         params: Strategy parameters to test.
         initial_capital: Starting capital.
         max_mdd_pct: Maximum acceptable drawdown in % (hard reject above).
+        leverage: ESMA leverage for this instrument.
 
     Returns:
         Composite score (higher is better). Returns -10 on failure/rejection.
@@ -97,6 +99,7 @@ def run_single_backtest(
         risk_manager=components.risk_manager,
         sim_config=components.sim_config,
         initial_capital=initial_capital,
+        leverage=leverage,
     )
     result = engine.run()
 
@@ -137,15 +140,19 @@ async def optimize(
     config = load_config()
     setup_logging(config.logging.level, json_format=False)
 
+    inst_config = config.get_instrument(instrument)
+    leverage = float(inst_config.leverage) if inst_config else 30.0
+
     await logger.ainfo(
-        "loading_data", instrument=instrument, days=days, max_mdd_pct=max_mdd_pct
+        "loading_data", instrument=instrument, days=days, max_mdd_pct=max_mdd_pct,
+        leverage=leverage,
     )
     candles = await load_candles(instrument, days)
 
     def objective(trial: optuna.Trial) -> float:
         params = StrategyParams.from_optuna_trial(trial)
         return run_single_backtest(
-            candles, instrument, params, initial_capital, max_mdd_pct
+            candles, instrument, params, initial_capital, max_mdd_pct, leverage
         )
 
     study = optuna.create_study(
@@ -185,10 +192,14 @@ async def optimize(
         risk_manager=components.risk_manager,
         sim_config=components.sim_config,
         initial_capital=initial_capital,
+        leverage=leverage,
     )
     result = engine.run()
     report = generate_report(result.trades, initial_capital)
     print(format_report(report))
+    print(f"  Margin rejected: {result.margin_rejected}")
+    print(f"  Margin capped: {result.margin_capped}")
+    print(f"  Peak margin usage: {result.peak_margin_usage_pct:.1f}%")
 
 
 def main() -> None:
