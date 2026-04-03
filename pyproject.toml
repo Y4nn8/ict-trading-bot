@@ -17,6 +17,8 @@ dependencies = [
     "trading-ig",
     "munch",
     "pandas>=2.0",
+    "python-dotenv>=1.0",
+    "yfinance>=1.2",
     # News
     "websockets>=13.0",
     "finnhub-python>=2.4",
