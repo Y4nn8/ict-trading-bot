@@ -1,7 +1,15 @@
-"""Finnhub economic calendar adapter."""
+"""Finnhub economic calendar adapter with rate limiting.
+
+Free tier: 60 requests/minute. This adapter tracks request timestamps
+and sleeps when approaching the limit.
+"""
 
 from __future__ import annotations
 
+import asyncio
+import time
+from collections import deque
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -16,9 +24,22 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_MAX_REQUESTS_PER_MINUTE = 55  # Stay below 60 to be safe
+
+_IMPACT_MAP = {"1": ImpactLevel.LOW, "2": ImpactLevel.MEDIUM, "3": ImpactLevel.HIGH}
+
+_COUNTRY_TO_CURRENCY = {
+    "US": "USD", "EU": "EUR", "GB": "GBP",
+    "JP": "JPY", "DE": "EUR", "FR": "EUR",
+}
+
+_RELEVANT_COUNTRIES = set(_COUNTRY_TO_CURRENCY.keys())
+
 
 class FinnhubCalendarSource(NewsSource):
     """Fetches economic calendar data from Finnhub REST API.
+
+    Includes rate limiting to stay within free tier (60 req/min).
 
     Args:
         api_key: Finnhub API key.
@@ -28,6 +49,7 @@ class FinnhubCalendarSource(NewsSource):
         self._api_key = api_key
         self._base_url = "https://finnhub.io/api/v1"
         self._session: aiohttp.ClientSession | None = None
+        self._request_times: deque[float] = deque()
 
     async def connect(self) -> None:
         """Create HTTP session."""
@@ -43,10 +65,28 @@ class FinnhubCalendarSource(NewsSource):
     async def subscribe(self, instruments: list[str]) -> None:
         """No-op for REST API source."""
 
+    async def _rate_limit(self) -> None:
+        """Wait if we're approaching the rate limit."""
+        now = time.monotonic()
+        while self._request_times and now - self._request_times[0] > 60:
+            self._request_times.popleft()
+
+        if len(self._request_times) >= _MAX_REQUESTS_PER_MINUTE:
+            wait_time = 60 - (now - self._request_times[0]) + 0.5
+            if wait_time > 0:
+                await logger.ainfo(
+                    "finnhub_rate_limit_waiting", seconds=round(wait_time, 1)
+                )
+                await asyncio.sleep(wait_time)
+
+        self._request_times.append(time.monotonic())
+
     async def get_events(
         self, start: datetime, end: datetime
     ) -> list[NewsEvent]:
         """Fetch economic calendar events from Finnhub.
+
+        Fetches in weekly chunks with rate limiting.
 
         Args:
             start: Start date.
@@ -59,34 +99,56 @@ class FinnhubCalendarSource(NewsSource):
             await self.connect()
         assert self._session is not None
 
-        params = {
-            "from": start.strftime("%Y-%m-%d"),
-            "to": end.strftime("%Y-%m-%d"),
-            "token": self._api_key,
-        }
+        all_events: list[NewsEvent] = []
+        chunk_start = start
 
-        async with self._session.get(
-            f"{self._base_url}/calendar/economic", params=params
-        ) as resp:
-            data = await resp.json()
+        while chunk_start < end:
+            chunk_end = min(chunk_start + timedelta(days=7), end)
+            await self._rate_limit()
 
-        events: list[NewsEvent] = []
-        for item in data.get("economicCalendar", []):
-            impact = _map_impact(item.get("impact"))
-            events.append(NewsEvent(
-                time=start,  # Finnhub doesn't always provide exact time
-                source="finnhub",
-                event_type="economic_calendar",
-                title=item.get("event", ""),
-                currency=item.get("country", ""),
-                actual=str(item.get("actual", "")),
-                forecast=str(item.get("estimate", "")),
-                previous=str(item.get("prev", "")),
-                impact_level=impact,
-            ))
+            params = {
+                "from": chunk_start.strftime("%Y-%m-%d"),
+                "to": chunk_end.strftime("%Y-%m-%d"),
+                "token": self._api_key,
+            }
 
-        await logger.ainfo("finnhub_events_fetched", count=len(events))
-        return events
+            try:
+                async with self._session.get(
+                    f"{self._base_url}/calendar/economic", params=params
+                ) as resp:
+                    if resp.status != 200:
+                        text = await resp.text()
+                        await logger.awarning(
+                            "finnhub_request_failed",
+                            status=resp.status,
+                            body=text[:200],
+                        )
+                        chunk_start = chunk_end
+                        continue
+                    data = await resp.json()
+
+                for item in data.get("economicCalendar", []):
+                    event = _parse_event(item)
+                    if event:
+                        all_events.append(event)
+
+                await logger.ainfo(
+                    "finnhub_chunk_fetched",
+                    start=chunk_start.strftime("%Y-%m-%d"),
+                    events=len(data.get("economicCalendar", [])),
+                )
+
+            except Exception as e:
+                await logger.awarning(
+                    "finnhub_chunk_error",
+                    start=chunk_start.strftime("%Y-%m-%d"),
+                    error=str(e),
+                )
+
+            chunk_start = chunk_end
+
+        await logger.ainfo("finnhub_fetch_complete", total=len(all_events))
+        return all_events
 
     async def stream(self) -> AsyncIterator[NewsEvent]:
         """Not supported for REST API."""
@@ -94,9 +156,36 @@ class FinnhubCalendarSource(NewsSource):
         yield
 
 
-def _map_impact(impact_str: str | None) -> ImpactLevel | None:
-    """Map Finnhub impact string to ImpactLevel enum."""
-    if not impact_str:
+def _parse_event(item: dict[str, object]) -> NewsEvent | None:
+    """Parse a Finnhub calendar item into a NewsEvent."""
+    from datetime import UTC, datetime
+
+    country = str(item.get("country", ""))
+    if country not in _RELEVANT_COUNTRIES:
         return None
-    mapping = {"1": ImpactLevel.LOW, "2": ImpactLevel.MEDIUM, "3": ImpactLevel.HIGH}
-    return mapping.get(str(impact_str))
+
+    currency = _COUNTRY_TO_CURRENCY.get(country, country)
+    impact = _IMPACT_MAP.get(str(item.get("impact", "")))
+
+    date_str = str(item.get("date", ""))
+    try:
+        event_time = datetime.fromisoformat(date_str).replace(tzinfo=UTC)
+    except (ValueError, TypeError):
+        try:
+            event_time = datetime.strptime(date_str, "%Y-%m-%d").replace(
+                tzinfo=UTC
+            )
+        except (ValueError, TypeError):
+            return None
+
+    return NewsEvent(
+        time=event_time,
+        source="finnhub",
+        event_type="economic_calendar",
+        title=str(item.get("event", "")),
+        currency=currency,
+        actual=str(item.get("actual", "")),
+        forecast=str(item.get("estimate", "")),
+        previous=str(item.get("prev", "")),
+        impact_level=impact,
+    )

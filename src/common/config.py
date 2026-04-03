@@ -135,6 +135,8 @@ class NewsConfig(BaseModel):
 
     pre_event_pause_minutes: int = 30
     post_event_resume_minutes: int = 15
+    finnhub_api_key: str = ""
+    anthropic_api_key: str = ""
 
 
 class AppConfig(BaseModel):
@@ -218,6 +220,16 @@ def load_config(
         value = os.environ.get(env_var)
         if value:
             config_data.setdefault("broker", {})[config_key] = value
+
+    # API key env overrides
+    _api_key_overrides = [
+        ("FINNHUB_API_KEY", "news", "finnhub_api_key"),
+        ("ANTHROPIC_API_KEY", "news", "anthropic_api_key"),
+    ]
+    for api_env, api_section, api_key in _api_key_overrides:
+        api_value = os.environ.get(api_env)
+        if api_value:
+            config_data.setdefault(api_section, {})[api_key] = api_value
 
     try:
         return AppConfig(**config_data)

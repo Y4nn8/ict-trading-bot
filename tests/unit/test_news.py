@@ -9,7 +9,7 @@ import pytest
 
 from src.common.models import ImpactLevel, NewsEvent
 from src.news.base import NewsSource
-from src.news.calendar.finnhub import FinnhubCalendarSource, _map_impact
+from src.news.calendar.finnhub import FinnhubCalendarSource
 from src.news.event_manager import EventManager
 from src.news.interpreter import NewsAction, NewsInterpreter
 from src.news.store import NewsStore
@@ -26,13 +26,6 @@ class TestNewsSourceABC:
 class TestFinnhubAdapter:
     """Tests for Finnhub calendar adapter."""
 
-    def test_map_impact(self) -> None:
-        assert _map_impact("1") == ImpactLevel.LOW
-        assert _map_impact("2") == ImpactLevel.MEDIUM
-        assert _map_impact("3") == ImpactLevel.HIGH
-        assert _map_impact(None) is None
-        assert _map_impact("unknown") is None
-
     async def test_connect_creates_session(self) -> None:
         source = FinnhubCalendarSource(api_key="test")
         await source.connect()
@@ -46,16 +39,19 @@ class TestNewsInterpreter:
 
     def test_parse_response(self) -> None:
         interpreter = NewsInterpreter(client=MagicMock())
-        text = """ACTION: pause
-SENTIMENT: bearish
+        text = """ACTION: directional
 IMPACT_SCORE: 0.8
-AFFECTED: EUR/USD, GBP/USD
+INSTRUMENTS:
+  EUR/USD: bearish
+  GBP/USD: bearish
+  NIKKEI225: none
 REASONING: NFP much higher than expected"""
         result = interpreter._parse_response(text)
-        assert result["action"] == NewsAction.PAUSE
-        assert result["sentiment"] == "bearish"
+        assert result["action"] == NewsAction.DIRECTIONAL
         assert result["impact_score"] == 0.8
-        assert "EUR/USD" in result["affected_instruments"]
+        assert result["instrument_sentiments"]["EUR/USD"] == "bearish"
+        assert result["instrument_sentiments"]["GBP/USD"] == "bearish"
+        assert result["sentiment"] == "bearish"  # Derived from majority
         assert result["reasoning"] == "NFP much higher than expected"
 
     def test_parse_invalid_action(self) -> None:
@@ -105,18 +101,21 @@ class TestEventManager:
         assert mgr.should_tighten_stops(event_time + timedelta(minutes=5))
         assert not mgr.should_tighten_stops(event_time + timedelta(minutes=20))
 
-    def test_trigger_entry_action(self) -> None:
+    def test_directional_action(self) -> None:
         mgr = EventManager()
         mgr.apply_action(
-            NewsAction.TRIGGER_ENTRY,
+            NewsAction.DIRECTIONAL,
             datetime(2024, 1, 15, tzinfo=UTC),
             {"sentiment": "bullish", "affected_instruments": ["EUR/USD"]},
         )
+        # Should both trigger entry AND set close_opposing
         triggers = mgr.pop_triggers()
         assert len(triggers) == 1
         assert triggers[0]["sentiment"] == "bullish"
-        # Pop clears the list
         assert mgr.pop_triggers() == []
+        # Opposing sentiment should be set
+        sentiments = mgr.get_instrument_sentiments(datetime(2024, 1, 15, tzinfo=UTC))
+        assert sentiments.get("__all__") == "bullish"
 
     def test_none_action(self) -> None:
         mgr = EventManager()

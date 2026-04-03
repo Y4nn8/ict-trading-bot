@@ -1,7 +1,11 @@
 """News event action manager.
 
 Translates news interpretations into trading actions:
-pause trading, tighten stops, trigger entries, or do nothing.
+- pause: stop all trading during uncertain/volatile news
+- trigger_entry: enter in the direction of strong sentiment
+- close_opposing: close positions that go against the news sentiment
+- tighten_stops: reduce risk on open positions
+- none: no action needed
 """
 
 from __future__ import annotations
@@ -23,6 +27,8 @@ class EventActionState:
     paused_until: datetime | None = None
     tighten_stops_until: datetime | None = None
     pending_triggers: list[dict[str, Any]] = field(default_factory=list)
+    close_opposing_until: datetime | None = None
+    instrument_sentiments: dict[str, str] = field(default_factory=dict)
 
 
 class EventManager:
@@ -69,41 +75,61 @@ class EventManager:
                 minutes=self._post_resume
             )
 
-        elif action == NewsAction.TRIGGER_ENTRY:
+        elif action == NewsAction.DIRECTIONAL:
+            # Store per-instrument sentiments for directional action
+            inst_sentiments = analysis.get("instrument_sentiments", {})
+            if inst_sentiments:
+                self._state.instrument_sentiments = dict(inst_sentiments)
+            else:
+                # Fallback to global sentiment for all instruments
+                sentiment = analysis.get("sentiment", "neutral")
+                if sentiment in ("bullish", "bearish"):
+                    self._state.instrument_sentiments = {
+                        "__all__": sentiment
+                    }
+            self._state.close_opposing_until = event_time + timedelta(
+                minutes=self._post_resume
+            )
+            # Also trigger entries
             self._state.pending_triggers.append(analysis)
+            logger.info(
+                "directional_action",
+                sentiments=self._state.instrument_sentiments,
+                reason=analysis.get("reasoning", ""),
+            )
 
     def is_paused(self, current_time: datetime) -> bool:
-        """Check if trading is currently paused.
-
-        Args:
-            current_time: Current timestamp.
-
-        Returns:
-            True if trading should be paused.
-        """
+        """Check if trading is currently paused."""
         if self._state.paused_until is None:
             return False
         return current_time < self._state.paused_until
 
     def should_tighten_stops(self, current_time: datetime) -> bool:
-        """Check if stops should be tightened.
-
-        Args:
-            current_time: Current timestamp.
-
-        Returns:
-            True if stops should be tighter than normal.
-        """
+        """Check if stops should be tightened."""
         if self._state.tighten_stops_until is None:
             return False
         return current_time < self._state.tighten_stops_until
 
-    def pop_triggers(self) -> list[dict[str, Any]]:
-        """Get and clear pending entry triggers.
+    def get_instrument_sentiments(
+        self, current_time: datetime
+    ) -> dict[str, str]:
+        """Get per-instrument sentiments for directional actions.
 
         Returns:
-            List of trigger analysis dicts.
+            Dict of instrument → "bullish"/"bearish".
+            If "__all__" key exists, applies to all instruments.
+            Empty dict if no active directional action.
         """
+        if self._state.close_opposing_until is None:
+            return {}
+        if current_time >= self._state.close_opposing_until:
+            self._state.close_opposing_until = None
+            self._state.instrument_sentiments = {}
+            return {}
+        return self._state.instrument_sentiments
+
+    def pop_triggers(self) -> list[dict[str, Any]]:
+        """Get and clear pending entry triggers."""
         triggers = self._state.pending_triggers
         self._state.pending_triggers = []
         return triggers
