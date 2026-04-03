@@ -26,7 +26,7 @@ class NewsAction(StrEnum):
     NONE = "none"
     PAUSE = "pause"
     TIGHTEN_STOPS = "tighten_stops"
-    TRIGGER_ENTRY = "trigger_entry"
+    DIRECTIONAL = "directional"  # Close opposing + trigger entry in sentiment direction
 
 
 class NewsInterpreter:
@@ -92,7 +92,8 @@ class NewsInterpreter:
 
     def _build_prompt(self, event: NewsEvent, instruments: list[str]) -> str:
         """Build the LLM prompt for news interpretation."""
-        return f"""Analyze this economic news event for forex/CFD trading impact.
+        instruments_str = ", ".join(instruments)
+        return f"""Analyze this news event for forex/CFD trading impact.
 
 Event: {event.title}
 Type: {event.event_type}
@@ -102,24 +103,43 @@ Forecast: {event.forecast or 'N/A'}
 Previous: {event.previous or 'N/A'}
 Impact Level: {event.impact_level or 'N/A'}
 
-Instruments being traded: {', '.join(instruments)}
+Instruments traded: {instruments_str}
 
-Respond with EXACTLY this format:
-ACTION: [none|pause|tighten_stops|trigger_entry]
-SENTIMENT: [bullish|bearish|neutral]
+Choose ACTION:
+- "directional": clear direction — close opposing + enter
+- "pause": unclear/mixed — stop trading
+- "tighten_stops": moderate — reduce risk
+- "none": no action
+
+Give sentiment PER INSTRUMENT (different instruments react
+differently to the same news, e.g. BOJ rate hike is bearish
+for NIKKEI225 but could be neutral for EUR/USD).
+
+Respond EXACTLY:
+ACTION: [none|pause|tighten_stops|directional]
 IMPACT_SCORE: [0.0-1.0]
-AFFECTED: [comma-separated instrument list]
-REASONING: [one line explanation]"""
+INSTRUMENTS:
+  {instruments_str.split(', ')[0]}: [bullish|bearish|none]
+  (repeat for each affected instrument, skip unaffected)
+REASONING: [one line]"""
 
     def _parse_response(self, text: str) -> dict[str, Any]:
-        """Parse the LLM response into structured data."""
+        """Parse the LLM response into structured data.
+
+        New format includes per-instrument sentiment:
+        INSTRUMENTS:
+          EUR/USD: bullish
+          NIKKEI225: bearish
+        """
         result: dict[str, Any] = {
             "action": NewsAction.NONE,
-            "sentiment": "neutral",
+            "sentiment": "neutral",  # Legacy: overall sentiment
+            "instrument_sentiments": {},  # New: per-instrument
             "impact_score": 0.0,
             "reasoning": "",
-            "affected_instruments": [],
         }
+
+        in_instruments_block = False
 
         for line in text.strip().split("\n"):
             line = line.strip()
@@ -129,17 +149,37 @@ REASONING: [one line explanation]"""
                     result["action"] = NewsAction(action_str)
                 except ValueError:
                     result["action"] = NewsAction.NONE
-            elif line.startswith("SENTIMENT:"):
-                result["sentiment"] = line.split(":", 1)[1].strip().lower()
+                in_instruments_block = False
             elif line.startswith("IMPACT_SCORE:"):
                 with contextlib.suppress(ValueError):
                     result["impact_score"] = float(line.split(":", 1)[1].strip())
-            elif line.startswith("AFFECTED:"):
-                instruments_str = line.split(":", 1)[1].strip()
-                result["affected_instruments"] = [
-                    i.strip() for i in instruments_str.split(",") if i.strip()
-                ]
+                in_instruments_block = False
             elif line.startswith("REASONING:"):
                 result["reasoning"] = line.split(":", 1)[1].strip()
+                in_instruments_block = False
+            elif line.startswith("INSTRUMENTS:"):
+                in_instruments_block = True
+            elif in_instruments_block and ":" in line:
+                parts = line.split(":", 1)
+                instrument = parts[0].strip()
+                sentiment = parts[1].strip().lower()
+                if sentiment in ("bullish", "bearish", "none"):
+                    result["instrument_sentiments"][instrument] = sentiment
+            # Legacy: SENTIMENT line (backwards compat)
+            elif line.startswith("SENTIMENT:"):
+                result["sentiment"] = line.split(":", 1)[1].strip().lower()
+                in_instruments_block = False
+
+        # Derive overall sentiment from instrument sentiments if available
+        sentiments = result["instrument_sentiments"]
+        if sentiments:
+            bullish = sum(1 for s in sentiments.values() if s == "bullish")
+            bearish = sum(1 for s in sentiments.values() if s == "bearish")
+            if bullish > bearish:
+                result["sentiment"] = "bullish"
+            elif bearish > bullish:
+                result["sentiment"] = "bearish"
+            else:
+                result["sentiment"] = "neutral"
 
         return result

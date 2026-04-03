@@ -20,6 +20,7 @@ from src.common.config import load_config
 from src.common.db import Database
 from src.common.logging import get_logger, setup_logging
 from src.market_data.storage import CandleStorage
+from src.news.store import NewsStore
 from src.strategy.factory import build_strategy
 from src.strategy.params import StrategyParams
 
@@ -82,6 +83,11 @@ async def run_backtest(
             displacements=len(precomputed.displacements),
         )
 
+        # Load pre-interpreted news events
+        news_store = NewsStore(db)
+        news_events = await news_store.get_events(start, end)
+        await logger.ainfo("news_events_loaded", count=len(news_events))
+
         # Build strategy components from params
         components = build_strategy(params)
 
@@ -97,6 +103,7 @@ async def run_backtest(
             risk_manager=components.risk_manager,
             sim_config=components.sim_config,
             initial_capital=initial_capital,
+            news_events=news_events,
         )
         result = engine.run()
 

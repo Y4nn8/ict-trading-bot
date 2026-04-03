@@ -12,6 +12,8 @@ from uuid import uuid4
 
 from src.common.logging import get_logger
 from src.common.models import Direction, Trade
+from src.news.event_manager import EventManager
+from src.news.interpreter import NewsAction
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -83,6 +85,9 @@ class BacktestEngine:
         risk_manager: RiskManager,
         sim_config: SimulationConfig,
         initial_capital: float = 10000.0,
+        news_events: list[dict[str, Any]] | None = None,
+        news_pause_minutes: int = 30,
+        news_resume_minutes: int = 15,
     ) -> None:
         self._precomputed = precomputed
         self._confluence = confluence_scorer
@@ -98,6 +103,18 @@ class BacktestEngine:
         self._closed_trades: list[Trade] = []
         self._daily_pnl: float = 0.0
         self._current_day: int = -1
+        self._event_manager = EventManager(
+            pre_event_pause_minutes=news_pause_minutes,
+            post_event_resume_minutes=news_resume_minutes,
+        )
+        self._news_by_time: dict[str, list[dict[str, Any]]] = {}
+        if news_events:
+            for event in news_events:
+                # Index by minute-rounded time for quick lookup
+                t = event.get("time")
+                if t is not None:
+                    key = str(t)[:16]  # "2026-03-15 13:30"
+                    self._news_by_time.setdefault(key, []).append(event)
 
     def run(self) -> BacktestResult:
         """Execute the backtest over all candles.
@@ -130,19 +147,26 @@ class BacktestEngine:
                 self._daily_pnl = 0.0
                 self._current_day = day
 
-            # Check circuit breakers
+            # Replay news events at this timestamp
+            self._replay_news(time)
+
+            # Close positions opposing a strong news sentiment
+            inst_sentiments = self._event_manager.get_instrument_sentiments(time)
+            if inst_sentiments:
+                self._close_opposing_positions(candle, inst_sentiments)
+
+            # Check circuit breakers or news pause
             if self._risk.is_circuit_broken(
                 self._daily_pnl, self._capital, self._initial_capital
-            ):
-                # Only manage exits, no new entries
+            ) or self._event_manager.is_paused(time):
                 self._check_exits(candle, i)
                 continue
 
             # Check exits on open positions
             self._check_exits(candle, i)
 
-            # Evaluate entry signals
-            context = {
+            # Build context
+            context: dict[str, Any] = {
                 "fvgs": fvg_by_idx.get(i, []),
                 "order_blocks": ob_by_idx.get(i, []),
                 "ms_breaks": ms_by_idx.get(i, []),
@@ -151,6 +175,15 @@ class BacktestEngine:
                 "killzone": candle.get("killzone", ""),
                 "in_killzone": candle.get("in_killzone", False),
             }
+
+            # Check for news-triggered entries
+            news_triggers = self._event_manager.pop_triggers()
+            for trigger in news_triggers:
+                sentiment = trigger.get("sentiment", "neutral")
+                if sentiment == "bullish":
+                    context["ms_breaks"] = [{"direction": "bullish"}]
+                elif sentiment == "bearish":
+                    context["ms_breaks"] = [{"direction": "bearish"}]
 
             # Score confluence
             score = self._confluence.score(candle, context)
@@ -266,6 +299,80 @@ class BacktestEngine:
         if pos.direction == Direction.LONG:
             return (exit_price - pos.entry_price) * pos.size
         return (pos.entry_price - exit_price) * pos.size
+
+    def _close_opposing_positions(
+        self, candle: dict[str, Any], inst_sentiments: dict[str, str]
+    ) -> None:
+        """Close positions that oppose the news sentiment per instrument.
+
+        Uses per-instrument sentiments. If "__all__" key exists,
+        applies to all instruments.
+        """
+        close_price = float(candle["close"])
+        time = candle["time"]
+        remaining: list[OpenPosition] = []
+
+        for pos in self._open_positions:
+            sentiment = inst_sentiments.get(
+                pos.instrument, inst_sentiments.get("__all__", "")
+            )
+            should_close = (
+                (sentiment == "bullish" and pos.direction == Direction.SHORT)
+                or (sentiment == "bearish" and pos.direction == Direction.LONG)
+            )
+            if should_close:
+                pnl = self._compute_pnl(pos, close_price)
+                pnl_pct = (
+                    (pnl / (pos.entry_price * pos.size)) * 100
+                    if pos.size > 0
+                    else 0
+                )
+                risk = abs(pos.entry_price - pos.stop_loss)
+                r_multiple = (
+                    pnl / (risk * pos.size) if risk > 0 and pos.size > 0 else 0
+                )
+
+                self._closed_trades.append(Trade(
+                    opened_at=pos.entry_time,
+                    closed_at=time,
+                    instrument=pos.instrument,
+                    direction=pos.direction,
+                    entry_price=pos.entry_price,
+                    exit_price=close_price,
+                    stop_loss=pos.stop_loss,
+                    take_profit=pos.take_profit,
+                    size=pos.size,
+                    pnl=pnl,
+                    pnl_percent=pnl_pct,
+                    r_multiple=r_multiple,
+                    confluence_score=pos.confluence_score,
+                    is_backtest=True,
+                    news_context={"close_reason": "news_opposing", "sentiment": sentiment},
+                ))
+                self._capital += pnl
+                self._daily_pnl += pnl
+            else:
+                remaining.append(pos)
+
+        self._open_positions = remaining
+
+    def _replay_news(self, time: Any) -> None:
+        """Check for news events at this timestamp and apply actions."""
+        if not self._news_by_time:
+            return
+        key = str(time)[:16]
+        events = self._news_by_time.get(key, [])
+        for event in events:
+            analysis = event.get("llm_analysis") or {}
+            action_str = analysis.get("action", "none")
+            # Map legacy actions to new ones
+            if action_str in ("trigger_entry", "close_opposing"):
+                action_str = "directional"
+            try:
+                action = NewsAction(action_str)
+            except ValueError:
+                action = NewsAction.NONE
+            self._event_manager.apply_action(action, time, analysis)
 
     @staticmethod
     def _build_index(df: Any) -> dict[int, list[dict[str, Any]]]:
