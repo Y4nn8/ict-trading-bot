@@ -63,17 +63,23 @@ def run_single_backtest(
     instrument: str,
     params: StrategyParams,
     initial_capital: float = 5000.0,
+    max_mdd_pct: float = 5.0,
 ) -> float:
-    """Run one backtest and return the Sharpe ratio.
+    """Run one backtest and return a composite score.
+
+    Objective = PnL_normalized * Sharpe * PF_capped
+
+    Hard constraint: if max drawdown > max_mdd_pct, trial is rejected.
 
     Args:
         candles: Polars DataFrame with candle data.
         instrument: Instrument name.
         params: Strategy parameters to test.
         initial_capital: Starting capital.
+        max_mdd_pct: Maximum acceptable drawdown in % (hard reject above).
 
     Returns:
-        Sharpe ratio (higher is better). Returns -10 on failure.
+        Composite score (higher is better). Returns -10 on failure/rejection.
     """
     if candles.is_empty():
         return -10.0
@@ -95,10 +101,29 @@ def run_single_backtest(
     result = engine.run()
 
     if len(result.trades) < 5:
-        return -10.0  # Too few trades to evaluate
+        return -10.0
 
     metrics = compute_metrics(result.trades, initial_capital)
-    return metrics.sharpe_ratio
+
+    # Hard constraint: reject if MDD exceeds limit
+    if metrics.max_drawdown_pct * 100 > max_mdd_pct:
+        return -10.0
+
+    # Composite score components:
+    # 1. PnL normalized by capital (so +500 on 5000 = 0.1)
+    pnl_norm = metrics.total_pnl / initial_capital
+
+    # 2. Sharpe (already scale-independent)
+    sharpe = max(metrics.sharpe_ratio, 0)
+
+    # 3. Profit factor, capped at 5 to avoid outlier dominance
+    pf = min(metrics.profit_factor, 5.0) if metrics.profit_factor > 0 else 0
+
+    # Combined: PnL drives magnitude, Sharpe rewards consistency,
+    # PF rewards efficiency
+    score = pnl_norm * (1 + sharpe) * (1 + pf * 0.2)
+
+    return score
 
 
 async def optimize(
