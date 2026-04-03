@@ -37,6 +37,9 @@ coverage.xml
 # Docker volumes
 pgdata/
 
+# Downloaded data
+data/
+
 # OS
 .DS_Store
 Thumbs.db
