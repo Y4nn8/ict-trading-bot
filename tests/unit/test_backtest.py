@@ -122,6 +122,14 @@ class TestMetrics:
         metrics = compute_metrics(sample_trades, initial_capital=10000)
         assert metrics.max_drawdown >= 0
 
+    def test_avg_risk_pct(self, sample_trades: list[Trade]) -> None:
+        metrics = compute_metrics(sample_trades, initial_capital=10000)
+        # Trade 1: |1.0800 - 1.0770| * 1.0 = 0.003 → 0.003/10000*100 = 0.03%
+        # Trade 2: |1.0850 - 1.0870| * 1.0 = 0.002 → 0.002/10050*100 ≈ 0.0199%
+        # Trade 3: |1.0820 - 1.0800| * 1.0 = 0.002 → 0.002/10030*100 ≈ 0.0199%
+        assert metrics.avg_risk_pct > 0
+        assert metrics.avg_risk_pct < 1.0  # Very small risk on these trades
+
 
 class TestWalkForward:
     """Tests for walk-forward validation."""
@@ -408,7 +416,7 @@ class TestMarginTracking:
         assert capped < 50000
         assert capped == pytest.approx(280 * 30 / 1.08)
 
-    def test_cap_size_zero_when_no_margin(self) -> None:
+    def test_cap_size_to_remaining_margin(self) -> None:
         engine = self._make_engine(initial_capital=100, leverage=30)
         # Position uses nearly all margin: 1.08 * 2700 / 30 = 97.2
         engine._open_positions.append(OpenPosition(
@@ -422,9 +430,10 @@ class TestMarginTracking:
             size=2700,
             confluence_score=0.5,
         ))
-        # Remaining margin ≈ 2.8 → can still fit a tiny size
+        # Available margin ≈ 100 - 97.2 = 2.8
+        # Max size = 2.8 * 30 / 1.08 ≈ 77.8
         capped, _, _ = engine._cap_size_to_margin(1.08, 50000, 1.08)
-        assert capped < 50000
+        assert capped == pytest.approx(2.8 * 30 / 1.08, rel=0.01)
 
     def test_margin_counters_tracked(self) -> None:
         """Engine tracks margin_rejected and margin_capped counters."""

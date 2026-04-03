@@ -97,6 +97,8 @@ class BacktestEngine:
         news_pause_minutes: int = 30,
         news_resume_minutes: int = 15,
     ) -> None:
+        if leverage <= 0:
+            raise ValueError(f"leverage must be positive, got {leverage}")
         self._precomputed = precomputed
         self._confluence = confluence_scorer
         self._entry = entry_evaluator
