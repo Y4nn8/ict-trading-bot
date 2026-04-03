@@ -188,15 +188,77 @@ async def fetch_gdelt_events(
         await source.disconnect()
 
 
-async def interpret_events(
+_MACRO_KEYWORDS = {
+    "fed", "ecb", "boj", "boe", "rate", "inflation", "cpi", "gdp",
+    "employment", "nfp", "payroll", "unemployment", "tariff", "trade war",
+    "sanction", "recession", "crash", "crisis", "war", "oil", "gold",
+    "treasury", "bond", "yield", "dollar", "euro", "yen", "pound",
+    "stock market", "wall street", "s&p", "nasdaq", "dow", "dax",
+    "nikkei", "forex", "currency", "central bank", "stimulus",
+}
+
+
+def _is_macro_relevant(title: str) -> bool:
+    lower = title.lower()
+    return any(kw in lower for kw in _MACRO_KEYWORDS)
+
+
+async def _interpret_one(
+    event: NewsEvent,
+    interpreter: object,
+    instruments: list[str],
+) -> NewsEvent:
+    """Interpret a single event with the LLM."""
+    from src.news.interpreter import NewsInterpreter
+
+    assert isinstance(interpreter, NewsInterpreter)
+    analysis = await interpreter.interpret(event, instruments)
+
+    score = float(analysis.get("impact_score", 0))
+    if score >= 0.7:
+        derived_impact = ImpactLevel.HIGH
+    elif score >= 0.4:
+        derived_impact = ImpactLevel.MEDIUM
+    else:
+        derived_impact = ImpactLevel.LOW
+
+    inst_sentiments = analysis.get("instrument_sentiments", {})
+    affected = [k for k, v in inst_sentiments.items() if v != "none"]
+
+    return event.model_copy(update={
+        "llm_analysis": analysis,
+        "impact_level": derived_impact,
+        "instruments": affected if affected else event.instruments,
+    })
+
+
+async def interpret_and_store(
     events: list[NewsEvent],
     instruments: list[str],
-) -> list[NewsEvent]:
-    """Run Claude Haiku interpretation on High/Medium impact events."""
+    store: NewsStore,
+    concurrency: int = 10,
+) -> int:
+    """Interpret events with LLM (parallel) and store immediately.
+
+    Processes events in batches of `concurrency`, writing each batch
+    to DB as soon as it's done. No large in-memory accumulation.
+
+    Args:
+        events: News events to process.
+        instruments: Traded instruments.
+        store: DB store for immediate writes.
+        concurrency: Number of parallel LLM calls.
+
+    Returns:
+        Total events stored.
+    """
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         await logger.awarning("no_anthropic_key_skipping_interpretation")
-        return events
+        # Store uninterpreted events
+        return await store.save_events(events)
+
+    import asyncio
 
     from anthropic import AsyncAnthropic
 
@@ -205,69 +267,59 @@ async def interpret_events(
     client = AsyncAnthropic(api_key=api_key)
     interpreter = NewsInterpreter(client)
 
-    # Pre-filter: only interpret news with macro-relevant keywords
-    macro_keywords = {
-        "fed", "ecb", "boj", "boe", "rate", "inflation", "cpi", "gdp",
-        "employment", "nfp", "payroll", "unemployment", "tariff", "trade war",
-        "sanction", "recession", "crash", "crisis", "war", "oil", "gold",
-        "treasury", "bond", "yield", "dollar", "euro", "yen", "pound",
-        "stock market", "wall street", "s&p", "nasdaq", "dow", "dax",
-        "nikkei", "forex", "currency", "central bank", "stimulus",
-    }
+    # Split events into: to_interpret (macro-relevant) and skip (store as-is)
+    to_interpret: list[NewsEvent] = []
+    to_skip: list[NewsEvent] = []
 
-    def _is_macro_relevant(title: str) -> bool:
-        lower = title.lower()
-        return any(kw in lower for kw in macro_keywords)
-
-    interpreted = []
-    skipped = 0
     for event in events:
-        # Skip events already interpreted
-        if event.llm_analysis and "action" in event.llm_analysis:
-            interpreted.append(event)
-            continue
-
-        # Skip non-macro news to limit LLM calls
-        if event.title and not _is_macro_relevant(event.title):
-            skipped += 1
-            continue
-
-        analysis = await interpreter.interpret(event, instruments)
-
-        # Derive impact_level from LLM impact_score
-        score = float(analysis.get("impact_score", 0))
-        if score >= 0.7:
-            derived_impact = ImpactLevel.HIGH
-        elif score >= 0.4:
-            derived_impact = ImpactLevel.MEDIUM
+        already_done = event.llm_analysis and "action" in event.llm_analysis
+        irrelevant = event.title and not _is_macro_relevant(event.title)
+        if already_done or irrelevant:
+            to_skip.append(event)
         else:
-            derived_impact = ImpactLevel.LOW
-
-        # Derive instruments list from LLM instrument_sentiments
-        inst_sentiments = analysis.get("instrument_sentiments", {})
-        affected = [k for k, v in inst_sentiments.items() if v != "none"]
-
-        interpreted.append(
-            event.model_copy(update={
-                "llm_analysis": analysis,
-                "impact_level": derived_impact,
-                "instruments": affected if affected else event.instruments,
-            })
-        )
-        await logger.ainfo(
-            "event_interpreted",
-            title=event.title,
-            action=analysis.get("action", "none"),
-            impact=derived_impact,
-            sentiments=analysis.get("instrument_sentiments", {}),
-        )
+            to_interpret.append(event)
 
     await logger.ainfo(
-        "interpretation_complete",
-        interpreted=len(interpreted),
-        skipped_irrelevant=skipped,
+        "interpretation_plan",
+        to_interpret=len(to_interpret),
+        skipped=len(to_skip),
     )
-    return interpreted
+
+    # Store skipped events immediately
+    stored = 0
+    if to_skip:
+        stored += await store.save_events(to_skip)
+
+    # Process interpretable events in parallel batches
+    for batch_start in range(0, len(to_interpret), concurrency):
+        batch = to_interpret[batch_start : batch_start + concurrency]
+
+        tasks = [
+            _interpret_one(event, interpreter, instruments)
+            for event in batch
+        ]
+        interpreted_batch = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Filter out exceptions, store successes
+        good: list[NewsEvent] = []
+        for result in interpreted_batch:
+            if isinstance(result, NewsEvent):
+                good.append(result)
+            else:
+                await logger.awarning("interpret_error", error=str(result))
+
+        if good:
+            stored += await store.save_events(good)
+
+        await logger.ainfo(
+            "batch_complete",
+            batch=batch_start // concurrency + 1,
+            stored=len(good),
+            total_stored=stored,
+            remaining=len(to_interpret) - batch_start - concurrency,
+        )
+
+    return stored
 
 
 async def seed_news(weeks: int) -> None:
@@ -303,12 +355,11 @@ async def seed_news(weeks: int) -> None:
             await logger.awarning("no_events_found")
             return
 
-        # 2. Interpret with LLM
-        await logger.ainfo("interpreting_events")
-        interpreted = await interpret_events(all_events, instruments)
-
-        # 3. Store
-        count = await store.save_events(interpreted)
+        # 2. Interpret (parallel, 10 at a time) + store (streaming)
+        await logger.ainfo("interpreting_and_storing", total=len(all_events))
+        count = await interpret_and_store(
+            all_events, instruments, store, concurrency=10
+        )
         await logger.ainfo("news_seed_complete", stored=count)
 
     finally:
