@@ -374,7 +374,15 @@ class BacktestEngine:
         key = (tt.tm_year, tt.tm_mon, tt.tm_mday, tt.tm_hour, tt.tm_min)
         events = self._news_by_minute.get(key, [])
         for event in events:
-            analysis = event.get("llm_analysis") or {}
+            raw_analysis = event.get("llm_analysis") or {}
+            if isinstance(raw_analysis, str):
+                import json
+                try:
+                    analysis: dict[str, Any] = json.loads(raw_analysis)
+                except json.JSONDecodeError:
+                    analysis = {}
+            else:
+                analysis = raw_analysis
             action_str = analysis.get("action", "none")
             # Map legacy actions to new ones
             if action_str in ("trigger_entry", "close_opposing"):
