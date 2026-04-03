@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from src.backtest.engine import OpenPosition
+from src.backtest.engine import BacktestEngine, OpenPosition
 from src.backtest.metrics import compute_metrics
 from src.backtest.report import format_report, generate_report
 from src.backtest.simulator import SimulationConfig, compute_swap_cost, simulate_fill
@@ -312,3 +312,134 @@ class TestRiskManager:
         rm = RiskManager(max_positions=3)
         assert rm.can_open_position(2)
         assert not rm.can_open_position(3)
+
+
+class TestMarginTracking:
+    """Tests for margin tracking in BacktestEngine."""
+
+    def _make_engine(
+        self, initial_capital: float = 10000.0, leverage: float = 30.0
+    ) -> BacktestEngine:
+        """Create a minimal engine for margin testing."""
+        precomputed = precompute(SWING_FIXTURE, "EUR/USD", "M5")
+        return BacktestEngine(
+            precomputed=precomputed,
+            confluence_scorer=ConfluenceScorer(),
+            entry_evaluator=EntryEvaluator(),
+            exit_evaluator=ExitEvaluator(),
+            trade_filter=TradeFilter(),
+            position_sizer=PositionSizer(),
+            risk_manager=RiskManager(),
+            sim_config=SimulationConfig(),
+            initial_capital=initial_capital,
+            leverage=leverage,
+        )
+
+    def test_used_margin_empty(self) -> None:
+        engine = self._make_engine()
+        assert engine._compute_used_margin() == 0.0
+
+    def test_used_margin_with_positions(self) -> None:
+        engine = self._make_engine(initial_capital=10000, leverage=30)
+        engine._open_positions.append(OpenPosition(
+            trade_id="t1",
+            instrument="EUR/USD",
+            direction=Direction.LONG,
+            entry_price=1.08,
+            entry_time=datetime(2024, 1, 15, tzinfo=UTC),
+            stop_loss=1.077,
+            take_profit=1.086,
+            size=10000,  # ~1 mini lot
+            confluence_score=0.5,
+        ))
+        # margin = 1.08 * 10000 / 30 = 360
+        assert engine._compute_used_margin() == pytest.approx(360.0)
+
+    def test_equity_with_unrealized_pnl(self) -> None:
+        engine = self._make_engine(initial_capital=10000, leverage=30)
+        engine._open_positions.append(OpenPosition(
+            trade_id="t1",
+            instrument="EUR/USD",
+            direction=Direction.LONG,
+            entry_price=1.0800,
+            entry_time=datetime(2024, 1, 15, tzinfo=UTC),
+            stop_loss=1.077,
+            take_profit=1.086,
+            size=10000,
+            confluence_score=0.5,
+        ))
+        # Price moved up: unrealized PnL = (1.0850 - 1.0800) * 10000 = 50
+        equity = engine._compute_equity(1.0850)
+        assert equity == pytest.approx(10050.0)
+
+    def test_cap_size_fits(self) -> None:
+        engine = self._make_engine(initial_capital=10000, leverage=30)
+        # No positions, full capital available
+        # Max size = 10000 * 30 / 1.08 = 277,777. Requested 10000 fits easily.
+        capped = engine._cap_size_to_margin(1.08, 10000, 1.08)
+        assert capped == 10000
+
+    def test_cap_size_reduces(self) -> None:
+        engine = self._make_engine(initial_capital=1000, leverage=30)
+        # Max size = 1000 * 30 / 1.08 ≈ 27,778. Requested 50,000 is too much.
+        capped = engine._cap_size_to_margin(1.08, 50000, 1.08)
+        assert capped < 50000
+        assert capped == pytest.approx(1000 * 30 / 1.08)
+
+    def test_cap_size_considers_existing_positions(self) -> None:
+        engine = self._make_engine(initial_capital=1000, leverage=30)
+        # First position uses 1.08 * 20000 / 30 = 720 of margin
+        engine._open_positions.append(OpenPosition(
+            trade_id="t1",
+            instrument="EUR/USD",
+            direction=Direction.LONG,
+            entry_price=1.08,
+            entry_time=datetime(2024, 1, 15, tzinfo=UTC),
+            stop_loss=1.077,
+            take_profit=1.086,
+            size=20000,
+            confluence_score=0.5,
+        ))
+        # Available margin = 1000 - 720 = 280
+        # Max size for new = 280 * 30 / 1.08 ≈ 7,778
+        capped = engine._cap_size_to_margin(1.08, 50000, 1.08)
+        assert capped < 50000
+        assert capped == pytest.approx(280 * 30 / 1.08)
+
+    def test_cap_size_zero_when_no_margin(self) -> None:
+        engine = self._make_engine(initial_capital=100, leverage=30)
+        # Position uses nearly all margin: 1.08 * 2700 / 30 = 97.2
+        engine._open_positions.append(OpenPosition(
+            trade_id="t1",
+            instrument="EUR/USD",
+            direction=Direction.LONG,
+            entry_price=1.08,
+            entry_time=datetime(2024, 1, 15, tzinfo=UTC),
+            stop_loss=1.077,
+            take_profit=1.086,
+            size=2700,
+            confluence_score=0.5,
+        ))
+        # Remaining margin ≈ 2.8 → can still fit a tiny size
+        capped = engine._cap_size_to_margin(1.08, 50000, 1.08)
+        assert capped < 50000
+
+    def test_margin_counters_tracked(self) -> None:
+        """Engine tracks margin_rejected and margin_capped counters."""
+        precomputed = precompute(SWING_FIXTURE, "EUR/USD", "M5")
+        engine = BacktestEngine(
+            precomputed=precomputed,
+            confluence_scorer=ConfluenceScorer(),
+            entry_evaluator=EntryEvaluator(min_confluence=0.01),
+            exit_evaluator=ExitEvaluator(),
+            trade_filter=TradeFilter(require_killzone=False, max_positions=100),
+            position_sizer=PositionSizer(),
+            risk_manager=RiskManager(max_positions=100),
+            sim_config=SimulationConfig(order_rejection_rate=0),
+            initial_capital=1.0,  # Extremely low capital
+            leverage=1.0,  # 1:1 leverage = max restrictive
+        )
+        result = engine.run()
+        assert result.margin_rejected >= 0
+        assert result.margin_capped >= 0
+        assert result.peak_margin_usage_pct >= 0

@@ -54,6 +54,9 @@ class BacktestResult:
     open_positions: list[OpenPosition]
     start_time: datetime | None = None
     end_time: datetime | None = None
+    margin_rejected: int = 0
+    margin_capped: int = 0
+    peak_margin_usage_pct: float = 0.0
 
 
 class BacktestEngine:
@@ -72,6 +75,10 @@ class BacktestEngine:
         risk_manager: Circuit breakers.
         sim_config: Simulation configuration.
         initial_capital: Starting capital.
+        leverage: ESMA leverage for this instrument (e.g. 30 for forex).
+        news_events: Pre-loaded news events for replay.
+        news_pause_minutes: Minutes to pause before a news event.
+        news_resume_minutes: Minutes to resume after a news event.
     """
 
     def __init__(
@@ -85,6 +92,7 @@ class BacktestEngine:
         risk_manager: RiskManager,
         sim_config: SimulationConfig,
         initial_capital: float = 10000.0,
+        leverage: float = 30.0,
         news_events: list[dict[str, Any]] | None = None,
         news_pause_minutes: int = 30,
         news_resume_minutes: int = 15,
@@ -99,10 +107,14 @@ class BacktestEngine:
         self._sim_config = sim_config
         self._initial_capital = initial_capital
         self._capital = initial_capital
+        self._leverage = leverage
         self._open_positions: list[OpenPosition] = []
         self._closed_trades: list[Trade] = []
         self._daily_pnl: float = 0.0
         self._current_day: int = -1
+        self._margin_rejected: int = 0
+        self._margin_capped: int = 0
+        self._peak_margin_usage: float = 0.0
         self._event_manager = EventManager(
             pre_event_pause_minutes=news_pause_minutes,
             post_event_resume_minutes=news_resume_minutes,
@@ -220,6 +232,10 @@ class BacktestEngine:
             if size <= 0:
                 continue
 
+            # Cap size to available margin
+            current_price = float(candle["close"])
+            size = self._cap_size_to_margin(entry_signal.entry_price, size, current_price)
+
             # Open position
             position = OpenPosition(
                 trade_id=str(uuid4()),
@@ -235,12 +251,70 @@ class BacktestEngine:
             )
             self._open_positions.append(position)
 
+            # Track peak margin usage
+            used = self._compute_used_margin()
+            equity = self._compute_equity(current_price)
+            if equity > 0:
+                usage_pct = used / equity * 100
+                self._peak_margin_usage = max(self._peak_margin_usage, usage_pct)
+
         return BacktestResult(
             trades=self._closed_trades,
             open_positions=self._open_positions,
             start_time=start_time,
             end_time=end_time,
+            margin_rejected=self._margin_rejected,
+            margin_capped=self._margin_capped,
+            peak_margin_usage_pct=self._peak_margin_usage,
         )
+
+    def _compute_used_margin(self) -> float:
+        """Compute total margin used by open positions."""
+        return sum(
+            pos.entry_price * pos.size / self._leverage
+            for pos in self._open_positions
+        )
+
+    def _compute_unrealized_pnl(self, current_price: float) -> float:
+        """Compute total unrealized PnL at current price."""
+        pnl = 0.0
+        for pos in self._open_positions:
+            if pos.direction == Direction.LONG:
+                pnl += (current_price - pos.entry_price) * pos.size
+            else:
+                pnl += (pos.entry_price - current_price) * pos.size
+        return pnl
+
+    def _compute_equity(self, current_price: float) -> float:
+        """Compute equity = capital + unrealized PnL."""
+        return self._capital + self._compute_unrealized_pnl(current_price)
+
+    def _cap_size_to_margin(
+        self, entry_price: float, size: float, current_price: float
+    ) -> float:
+        """Reduce position size if needed to fit within available margin.
+
+        Args:
+            entry_price: Entry price of the new position.
+            size: Desired position size.
+            current_price: Current market price for equity calculation.
+
+        Returns:
+            Size capped to what available margin allows. 0 if no margin left.
+        """
+        if entry_price <= 0:
+            return 0.0
+        used_margin = self._compute_used_margin()
+        equity = self._compute_equity(current_price)
+        available_margin = equity - used_margin
+        if available_margin <= 0:
+            self._margin_rejected += 1
+            return 0.0
+        max_size = available_margin * self._leverage / entry_price
+        if size <= max_size:
+            return size
+        self._margin_capped += 1
+        return max_size
 
     def _check_exits(self, candle: dict[str, Any], index: int) -> None:
         """Check exit conditions for all open positions."""

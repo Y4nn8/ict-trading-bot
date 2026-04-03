@@ -28,6 +28,7 @@ class PerformanceMetrics:
     avg_winner: float
     avg_loser: float
     avg_r_multiple: float
+    avg_risk_pct: float
     max_drawdown: float
     max_drawdown_pct: float
     sharpe_ratio: float
@@ -76,6 +77,19 @@ def compute_metrics(
     avg_loser = sum(losers) / len(losers) if losers else 0.0
     avg_r_multiple = sum(r_multiples) / len(r_multiples) if r_multiples else 0.0
 
+    # Average risk % of capital per trade
+    risk_pcts: list[float] = []
+    running_capital = initial_capital
+    for t in trades:
+        entry = t.entry_price or 0.0
+        sl = t.stop_loss or 0.0
+        size = t.size or 0.0
+        risk_amount = abs(entry - sl) * size
+        if running_capital > 0:
+            risk_pcts.append(risk_amount / running_capital * 100)
+        running_capital += t.pnl or 0.0
+    avg_risk_pct = sum(risk_pcts) / len(risk_pcts) if risk_pcts else 0.0
+
     # Drawdown calculation
     equity_curve = _build_equity_curve(pnls, initial_capital)
     max_dd, max_dd_pct = _compute_max_drawdown(equity_curve)
@@ -118,6 +132,7 @@ def compute_metrics(
         avg_winner=avg_winner,
         avg_loser=avg_loser,
         avg_r_multiple=avg_r_multiple,
+        avg_risk_pct=avg_risk_pct,
         max_drawdown=max_dd,
         max_drawdown_pct=max_dd_pct,
         sharpe_ratio=float(sharpe),
@@ -167,6 +182,7 @@ def _empty_metrics() -> PerformanceMetrics:
         avg_winner=0.0,
         avg_loser=0.0,
         avg_r_multiple=0.0,
+        avg_risk_pct=0.0,
         max_drawdown=0.0,
         max_drawdown_pct=0.0,
         sharpe_ratio=0.0,

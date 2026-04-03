@@ -41,6 +41,7 @@ def _run_backtest(
     params: StrategyParams,
     news_events: list[dict[str, object]],
     initial_capital: float,
+    leverage: float = 30.0,
 ) -> tuple[list[object], PerformanceMetrics]:
     """Run a single backtest, return trades and metrics."""
     if candles.is_empty():
@@ -59,6 +60,7 @@ def _run_backtest(
         risk_manager=components.risk_manager,
         sim_config=components.sim_config,
         initial_capital=initial_capital,
+        leverage=leverage,
         news_events=news_events,
     )
     result = engine.run()
@@ -116,6 +118,14 @@ async def run_walk_forward(
         all_news = await news_store.get_events(data_start, data_end)
         await logger.ainfo("news_loaded", count=len(all_news))
 
+        # Look up instrument leverage from config
+        leverage = 30.0  # default ESMA forex
+        for inst in config.instruments:
+            if inst.name == instrument:
+                leverage = float(inst.leverage)
+                break
+        await logger.ainfo("leverage", instrument=instrument, leverage=leverage)
+
         # Generate windows
         window_size = timedelta(days=(train_months + test_months) * 30)
         step = timedelta(days=test_months * 30)
@@ -138,6 +148,7 @@ async def run_walk_forward(
 
         # Run each window
         test_results: list[PerformanceMetrics] = []
+        all_best_params: list[dict[str, object]] = []
 
         for i, (train_start, train_end, test_start, test_end) in enumerate(windows):
             print(f"\n{'='*60}")
@@ -176,10 +187,11 @@ async def run_walk_forward(
                 trial: optuna.Trial,
                 _candles: pl.DataFrame = train_candles,
                 _news: list[dict[str, object]] = train_news,
+                _leverage: float = leverage,
             ) -> float:
                 params = StrategyParams.from_optuna_trial(trial)
                 _, metrics = _run_backtest(
-                    _candles, instrument, params, _news, initial_capital
+                    _candles, instrument, params, _news, initial_capital, _leverage
                 )
                 return _score(metrics, max_mdd_pct)
 
@@ -188,8 +200,15 @@ async def run_walk_forward(
             study.optimize(objective, n_trials=trials_per_window, show_progress_bar=True)
 
             best_params = StrategyParams.from_dict(study.best_trial.params)
+            all_best_params.append(study.best_trial.params)
+
+            best_trial = study.best_trial
+            print(f"\n  Best params (trial #{best_trial.number}, score={best_trial.value:.4f}):")
+            for key, value in sorted(best_trial.params.items()):
+                print(f"    {key}: {value}")
+
             _, train_metrics = _run_backtest(
-                train_candles, instrument, best_params, train_news, initial_capital
+                train_candles, instrument, best_params, train_news, initial_capital, leverage
             )
 
             print("\n  TRAIN results (in-sample):")
@@ -200,7 +219,7 @@ async def run_walk_forward(
 
             # Test on unseen data
             _, test_metrics = _run_backtest(
-                test_candles, instrument, best_params, test_news, initial_capital
+                test_candles, instrument, best_params, test_news, initial_capital, leverage
             )
             test_results.append(test_metrics)
 
@@ -211,6 +230,8 @@ async def run_walk_forward(
             print(f"    PF: {test_metrics.profit_factor:.2f}")
             print(f"    Sharpe: {test_metrics.sharpe_ratio:.3f}")
             print(f"    MDD: {test_metrics.max_drawdown_pct*100:.1f}%")
+            print(f"    Avg R: {test_metrics.avg_r_multiple:.2f}")
+            print(f"    Avg risk/trade: {test_metrics.avg_risk_pct:.2f}%")
 
         # Aggregate test results
         if test_results:
@@ -227,6 +248,8 @@ async def run_walk_forward(
             ) / max(1, sum(1 for m in test_results if m.profit_factor != float("inf")))
             avg_wr = sum(m.win_rate for m in test_results) / len(test_results)
             worst_mdd = max(m.max_drawdown_pct for m in test_results)
+            avg_r = sum(m.avg_r_multiple for m in test_results) / len(test_results)
+            avg_risk = sum(m.avg_risk_pct for m in test_results) / len(test_results)
 
             print(f"  Windows: {len(test_results)}")
             print(f"  Total trades: {total_trades}")
@@ -234,10 +257,60 @@ async def run_walk_forward(
             print(f"  Avg Sharpe: {avg_sharpe:.3f}")
             print(f"  Avg PF: {avg_pf:.2f}")
             print(f"  Avg win rate: {avg_wr*100:.1f}%")
+            print(f"  Avg R: {avg_r:.2f}")
+            print(f"  Avg risk/trade: {avg_risk:.2f}%")
             print(f"  Worst MDD: {worst_mdd*100:.1f}%")
 
             profitable_windows = sum(1 for m in test_results if m.total_pnl > 0)
             print(f"  Profitable windows: {profitable_windows}/{len(test_results)}")
+
+        # Parameter convergence analysis
+        if len(all_best_params) >= 2:
+            print(f"\n{'='*60}")
+            print("PARAMETER CONVERGENCE ANALYSIS")
+            print(f"{'='*60}")
+
+            # Collect all param keys (skip categorical)
+            all_keys = sorted(all_best_params[0].keys())
+            converging: list[tuple[str, float]] = []
+            diverging: list[tuple[str, float]] = []
+
+            for key in all_keys:
+                values = [p[key] for p in all_best_params if key in p]
+                # Skip boolean/categorical params
+                if any(isinstance(v, bool) for v in values):
+                    agrees = len(set(values)) == 1
+                    label = f"{values[0]}" if agrees else " vs ".join(str(v) for v in values)
+                    if agrees:
+                        converging.append((f"{key} = {label}", 0.0))
+                    else:
+                        diverging.append((f"{key} = {label}", 1.0))
+                    continue
+                if not all(isinstance(v, (int, float)) for v in values):
+                    continue
+
+                fvalues = [float(v) for v in values]
+                mean = sum(fvalues) / len(fvalues)
+                spread = max(fvalues) - min(fvalues)
+                # Coefficient of variation: spread relative to mean
+                cv = spread / abs(mean) if abs(mean) > 1e-9 else spread
+                vals_str = ", ".join(f"{v:.4g}" for v in fvalues)
+
+                if cv < 0.3:
+                    converging.append((f"{key}: {vals_str}  (spread {cv:.0%})", cv))
+                else:
+                    diverging.append((f"{key}: {vals_str}  (spread {cv:.0%})", cv))
+
+            print(f"\n  CONVERGING (spread < 30% of mean) — {len(converging)} params:")
+            for label, _cv in sorted(converging, key=lambda x: x[1]):
+                print(f"    {label}")
+
+            print(f"\n  DIVERGING (spread >= 30% of mean) — {len(diverging)} params:")
+            for label, _cv in sorted(diverging, key=lambda x: -x[1]):
+                print(f"    {label}")
+
+            print(f"\n  Convergence ratio: {len(converging)}/{len(converging)+len(diverging)}"
+                  f" ({len(converging)/(len(converging)+len(diverging))*100:.0f}%)")
 
     finally:
         await db.disconnect()
