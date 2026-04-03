@@ -131,20 +131,22 @@ async def optimize(
     days: int,
     n_trials: int,
     initial_capital: float,
+    max_mdd_pct: float = 20.0,
 ) -> None:
     """Run Optuna optimization."""
     config = load_config()
     setup_logging(config.logging.level, json_format=False)
 
     await logger.ainfo(
-        "loading_data", instrument=instrument, days=days
+        "loading_data", instrument=instrument, days=days, max_mdd_pct=max_mdd_pct
     )
     candles = await load_candles(instrument, days)
 
     def objective(trial: optuna.Trial) -> float:
         params = StrategyParams.from_optuna_trial(trial)
-        sharpe = run_single_backtest(candles, instrument, params, initial_capital)
-        return sharpe
+        return run_single_backtest(
+            candles, instrument, params, initial_capital, max_mdd_pct
+        )
 
     study = optuna.create_study(
         direction="maximize",
@@ -196,9 +198,13 @@ def main() -> None:
     parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--trials", type=int, default=100)
     parser.add_argument("--capital", type=float, default=5000.0)
+    parser.add_argument("--max-mdd", type=float, default=20.0,
+                        help="Max drawdown %% to reject trial (default: 20)")
 
     args = parser.parse_args()
-    asyncio.run(optimize(args.instrument, args.days, args.trials, args.capital))
+    asyncio.run(optimize(
+        args.instrument, args.days, args.trials, args.capital, args.max_mdd
+    ))
 
 
 if __name__ == "__main__":
