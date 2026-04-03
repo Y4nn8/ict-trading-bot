@@ -1,0 +1,48 @@
+# Best strategy parameters — optimized via Optuna (50 trials)
+# Walk-forward validated: 3/3 windows profitable
+# Out-of-sample: PF 1.44, Sharpe 2.47, 877 trades over 3 months
+# Optimized on: EUR/USD M5, 2025-10-03 to 2026-04-03
+
+# Detectors
+swing_left_bars: 2
+swing_right_bars: 2
+ob_displacement_factor: 3.344
+ob_atr_period: 24
+disp_atr_period: 29
+disp_threshold: 1.907
+liq_tolerance_pct: 0.022
+liq_lookback: 74
+liq_min_touches: 3
+
+# Confluence weights (raw — will be normalized)
+weight_fvg: 0.992
+weight_ob: 0.434
+weight_ms: 0.882
+weight_displacement: 0.734
+weight_killzone: 0.536
+weight_pd: 0.161
+
+# Entry
+min_confluence: 0.594
+sl_atr_multiple: 2.747
+rr_ratio: 1.079
+
+# Exit
+max_hold_candles: 202
+
+# Filters
+max_spread_pips: 2.860
+require_killzone: true
+max_positions: 6
+
+# Position sizing
+risk_low_threshold: 0.462
+risk_high_threshold: 0.766
+risk_low_pct: 1.912
+risk_medium_pct: 1.353
+risk_high_pct: 2.150
+risk_max_pct: 4.417
+
+# Risk management
+max_daily_drawdown_pct: 3.347
+max_total_drawdown_pct: 12.017
