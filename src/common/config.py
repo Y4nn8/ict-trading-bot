@@ -222,14 +222,14 @@ def load_config(
             config_data.setdefault("broker", {})[config_key] = value
 
     # API key env overrides
-    for env_var, config_path in [
-        ("FINNHUB_API_KEY", ("news", "finnhub_api_key")),
-        ("ANTHROPIC_API_KEY", ("news", "anthropic_api_key")),
-    ]:
-        value = os.environ.get(env_var)
-        if value:
-            section, key = config_path
-            config_data.setdefault(section, {})[key] = value
+    _api_key_overrides = [
+        ("FINNHUB_API_KEY", "news", "finnhub_api_key"),
+        ("ANTHROPIC_API_KEY", "news", "anthropic_api_key"),
+    ]
+    for api_env, api_section, api_key in _api_key_overrides:
+        api_value = os.environ.get(api_env)
+        if api_value:
+            config_data.setdefault(api_section, {})[api_key] = api_value
 
     try:
         return AppConfig(**config_data)
