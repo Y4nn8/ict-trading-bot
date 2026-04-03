@@ -167,52 +167,38 @@ class CandleStorage:
             Polars DataFrame with candle data.
         """
         limit_clause = f" LIMIT {limit}" if limit is not None else ""
+        where_clause, params = _build_candle_where(instrument, timeframe, start, end)
+        tf_param_idx = len(params) + 1
 
         if timeframe == Timeframe.M5:
-            where_clause, params = _build_candle_where(
-                instrument, timeframe, start, end
-            )
             query = f"""
                 SELECT time, open, high, low, close, volume, spread
                 FROM candles
-                WHERE {where_clause}
+                WHERE {where_clause} AND timeframe = ${tf_param_idx}
                 ORDER BY time ASC
                 {limit_clause}
             """
+            params.append(timeframe)
         else:
-            # Merge directly imported candles with continuous aggregate view.
-            # Use DISTINCT ON to deduplicate by time, preferring imported data
-            # (source=1) over aggregated data (source=2).
+            # Merge directly imported candles (in candles table) with
+            # continuous aggregate view. Both use the same params.
+            # DISTINCT ON deduplicates, preferring direct imports (source=1).
             agg_view = _get_table_for_timeframe(timeframe)
-            where_direct, params_direct = _build_candle_where(
-                instrument, timeframe, start, end
-            )
-            where_agg, params_agg = _build_candle_where(
-                instrument, timeframe, start, end
-            )
-            # Offset param indices for the second query
-            offset = len(params_direct)
-            where_agg_reindexed = where_agg
-            for i in range(len(params_agg), 0, -1):
-                where_agg_reindexed = where_agg_reindexed.replace(
-                    f"${i}", f"${i + offset}"
-                )
-
             query = f"""
                 SELECT DISTINCT ON (time) time, open, high, low, close, volume, spread
                 FROM (
                     SELECT time, open, high, low, close, volume, spread, 1 AS source
                     FROM candles
-                    WHERE {where_direct} AND timeframe = '{timeframe}'
+                    WHERE {where_clause} AND timeframe = ${tf_param_idx}
                     UNION ALL
                     SELECT time, open, high, low, close, volume, spread, 2 AS source
                     FROM {agg_view}
-                    WHERE {where_agg_reindexed}
+                    WHERE {where_clause}
                 ) AS combined
                 ORDER BY time ASC, source ASC
                 {limit_clause}
             """
-            params = [*params_direct, *params_agg]
+            params.append(timeframe)
 
         records = await self._db.fetch(query, *params)
 
@@ -240,26 +226,31 @@ class CandleStorage:
         """
         # Check direct imports
         where_clause, params = _build_candle_where(instrument, timeframe)
-        query = f"""
-            SELECT MAX(time) FROM candles
-            WHERE {where_clause} AND timeframe = ${ len(params) + 1}
-        """
-        direct_max = await self._db.fetchval(query, *params, timeframe)
+        tf_param_idx = len(params) + 1
 
         if timeframe == Timeframe.M5:
-            return direct_max  # type: ignore[no-any-return]
+            query = f"""
+                SELECT MAX(time) FROM candles
+                WHERE {where_clause} AND timeframe = ${tf_param_idx}
+            """
+            params.append(timeframe)
+            result = await self._db.fetchval(query, *params)
+            return result  # type: ignore[no-any-return]
 
-        # Also check continuous aggregate view
+        # Single query: max across direct imports and aggregate view
         agg_table = _get_table_for_timeframe(timeframe)
-        where_agg, params_agg = _build_candle_where(instrument, timeframe)
-        query_agg = f"SELECT MAX(time) FROM {agg_table} WHERE {where_agg}"
-        agg_max = await self._db.fetchval(query_agg, *params_agg)
-
-        if direct_max is None:
-            return agg_max  # type: ignore[no-any-return]
-        if agg_max is None:
-            return direct_max  # type: ignore[no-any-return]
-        return max(direct_max, agg_max)  # type: ignore[no-any-return]
+        query = f"""
+            SELECT MAX(time) FROM (
+                SELECT time FROM candles
+                WHERE {where_clause} AND timeframe = ${tf_param_idx}
+                UNION ALL
+                SELECT time FROM {agg_table}
+                WHERE {where_clause}
+            ) AS combined
+        """
+        params.append(timeframe)
+        result = await self._db.fetchval(query, *params)
+        return result  # type: ignore[no-any-return]
 
     async def get_candle_count(
         self,

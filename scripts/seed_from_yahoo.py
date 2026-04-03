@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import UTC
 
 import polars as pl
 import yfinance as yf
@@ -80,35 +79,41 @@ def _download_yahoo(ticker: str, interval: str, period: str | None) -> pl.DataFr
             "volume": pl.Float64,
         })
 
-    # yfinance returns multi-level columns with ticker name
-    # Flatten them
+    # yfinance returns multi-level columns with ticker name — flatten
     if hasattr(data.columns, "levels") and len(data.columns.levels) > 1:
         data.columns = data.columns.get_level_values(0)
 
     data = data.reset_index()
-
-    # Find datetime column (could be "Datetime" or "Date")
     date_col = "Datetime" if "Datetime" in data.columns else "Date"
 
-    records = []
-    for _, row in data.iterrows():
-        dt = row[date_col]
-        if hasattr(dt, "to_pydatetime"):
-            dt = dt.to_pydatetime()
-        if dt.tzinfo is None:
-            from datetime import timezone
-            dt = dt.replace(tzinfo=timezone.utc)
+    # Convert pandas → polars directly (avoids slow iterrows)
+    df = pl.from_pandas(data)
+    df = df.rename({c: c.lower() for c in df.columns})
 
-        records.append({
-            "time": dt,
-            "open": float(row["Open"]),
-            "high": float(row["High"]),
-            "low": float(row["Low"]),
-            "close": float(row["Close"]),
-            "volume": float(row.get("Volume", 0)),
-        })
+    time_col = date_col.lower()
+    if df[time_col].dtype == pl.Utf8:
+        df = df.with_columns(pl.col(time_col).str.to_datetime().alias("time"))
+    else:
+        df = df.with_columns(pl.col(time_col).alias("time"))
 
-    return pl.DataFrame(records).sort("time")
+    # Ensure UTC timezone
+    if df["time"].dtype == pl.Datetime and df["time"].dtype.time_zone is None:  # type: ignore[union-attr]
+        df = df.with_columns(pl.col("time").dt.replace_time_zone("UTC"))
+
+    vol_col = "volume" if "volume" in df.columns else None
+
+    return df.select(
+        pl.col("time"),
+        pl.col("open").cast(pl.Float64),
+        pl.col("high").cast(pl.Float64),
+        pl.col("low").cast(pl.Float64),
+        pl.col("close").cast(pl.Float64),
+        (
+            pl.col(vol_col).cast(pl.Float64).alias("volume")
+            if vol_col
+            else pl.lit(0.0).alias("volume")
+        ),
+    ).sort("time")
 
 
 async def seed(
