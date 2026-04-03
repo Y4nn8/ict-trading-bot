@@ -118,12 +118,8 @@ async def run_walk_forward(
         all_news = await news_store.get_events(data_start, data_end)
         await logger.ainfo("news_loaded", count=len(all_news))
 
-        # Look up instrument leverage from config
-        leverage = 30.0  # default ESMA forex
-        for inst in config.instruments:
-            if inst.name == instrument:
-                leverage = float(inst.leverage)
-                break
+        inst_config = config.get_instrument(instrument)
+        leverage = float(inst_config.leverage) if inst_config else 30.0
         await logger.ainfo("leverage", instrument=instrument, leverage=leverage)
 
         # Generate windows

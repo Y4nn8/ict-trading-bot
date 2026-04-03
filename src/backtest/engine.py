@@ -234,7 +234,15 @@ class BacktestEngine:
 
             # Cap size to available margin
             current_price = float(candle["close"])
-            size = self._cap_size_to_margin(entry_signal.entry_price, size, current_price)
+            original_size = size
+            size, used_margin, equity = self._cap_size_to_margin(
+                entry_signal.entry_price, size, current_price,
+            )
+            if size <= 0:
+                self._margin_rejected += 1
+                continue
+            if size < original_size:
+                self._margin_capped += 1
 
             # Open position
             position = OpenPosition(
@@ -251,11 +259,11 @@ class BacktestEngine:
             )
             self._open_positions.append(position)
 
-            # Track peak margin usage
-            used = self._compute_used_margin()
-            equity = self._compute_equity(current_price)
+            # Track peak margin usage (reuse values, add new position's margin)
+            new_margin = entry_signal.entry_price * size / self._leverage
+            total_used = used_margin + new_margin
             if equity > 0:
-                usage_pct = used / equity * 100
+                usage_pct = total_used / equity * 100
                 self._peak_margin_usage = max(self._peak_margin_usage, usage_pct)
 
         return BacktestResult(
@@ -291,7 +299,7 @@ class BacktestEngine:
 
     def _cap_size_to_margin(
         self, entry_price: float, size: float, current_price: float
-    ) -> float:
+    ) -> tuple[float, float, float]:
         """Reduce position size if needed to fit within available margin.
 
         Args:
@@ -300,21 +308,18 @@ class BacktestEngine:
             current_price: Current market price for equity calculation.
 
         Returns:
-            Size capped to what available margin allows. 0 if no margin left.
+            Tuple of (capped_size, used_margin, equity).
         """
         if entry_price <= 0:
-            return 0.0
+            return 0.0, 0.0, 0.0
         used_margin = self._compute_used_margin()
         equity = self._compute_equity(current_price)
         available_margin = equity - used_margin
         if available_margin <= 0:
-            self._margin_rejected += 1
-            return 0.0
+            return 0.0, used_margin, equity
         max_size = available_margin * self._leverage / entry_price
-        if size <= max_size:
-            return size
-        self._margin_capped += 1
-        return max_size
+        capped = min(size, max_size)
+        return capped, used_margin, equity
 
     def _check_exits(self, candle: dict[str, Any], index: int) -> None:
         """Check exit conditions for all open positions."""

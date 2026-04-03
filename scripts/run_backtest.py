@@ -88,12 +88,8 @@ async def run_backtest(
         news_events = await news_store.get_events(start, end)
         await logger.ainfo("news_events_loaded", count=len(news_events))
 
-        # Look up instrument leverage from config
-        leverage = 30.0  # default ESMA forex
-        for inst in config.instruments:
-            if inst.name == instrument:
-                leverage = float(inst.leverage)
-                break
+        inst_config = config.get_instrument(instrument)
+        leverage = float(inst_config.leverage) if inst_config else 30.0
 
         # Build strategy components from params
         components = build_strategy(params)

@@ -153,6 +153,20 @@ class AppConfig(BaseModel):
     improvement: ImprovementConfig = Field(default_factory=ImprovementConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
 
+    def get_instrument(self, name: str) -> InstrumentConfig | None:
+        """Look up an instrument config by name.
+
+        Args:
+            name: Instrument name (e.g. "EUR/USD").
+
+        Returns:
+            InstrumentConfig if found, None otherwise.
+        """
+        for inst in self.instruments:
+            if inst.name == name:
+                return inst
+        return None
+
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Deep merge two dictionaries, with override taking precedence."""

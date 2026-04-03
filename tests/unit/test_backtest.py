@@ -376,13 +376,15 @@ class TestMarginTracking:
         engine = self._make_engine(initial_capital=10000, leverage=30)
         # No positions, full capital available
         # Max size = 10000 * 30 / 1.08 = 277,777. Requested 10000 fits easily.
-        capped = engine._cap_size_to_margin(1.08, 10000, 1.08)
+        capped, used, equity = engine._cap_size_to_margin(1.08, 10000, 1.08)
         assert capped == 10000
+        assert used == 0.0
+        assert equity == pytest.approx(10000.0)
 
     def test_cap_size_reduces(self) -> None:
         engine = self._make_engine(initial_capital=1000, leverage=30)
         # Max size = 1000 * 30 / 1.08 ≈ 27,778. Requested 50,000 is too much.
-        capped = engine._cap_size_to_margin(1.08, 50000, 1.08)
+        capped, _, _ = engine._cap_size_to_margin(1.08, 50000, 1.08)
         assert capped < 50000
         assert capped == pytest.approx(1000 * 30 / 1.08)
 
@@ -402,7 +404,7 @@ class TestMarginTracking:
         ))
         # Available margin = 1000 - 720 = 280
         # Max size for new = 280 * 30 / 1.08 ≈ 7,778
-        capped = engine._cap_size_to_margin(1.08, 50000, 1.08)
+        capped, _, _ = engine._cap_size_to_margin(1.08, 50000, 1.08)
         assert capped < 50000
         assert capped == pytest.approx(280 * 30 / 1.08)
 
@@ -421,7 +423,7 @@ class TestMarginTracking:
             confluence_score=0.5,
         ))
         # Remaining margin ≈ 2.8 → can still fit a tiny size
-        capped = engine._cap_size_to_margin(1.08, 50000, 1.08)
+        capped, _, _ = engine._cap_size_to_margin(1.08, 50000, 1.08)
         assert capped < 50000
 
     def test_margin_counters_tracked(self) -> None:

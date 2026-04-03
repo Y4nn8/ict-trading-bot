@@ -140,12 +140,8 @@ async def optimize(
     config = load_config()
     setup_logging(config.logging.level, json_format=False)
 
-    # Look up instrument leverage from config
-    leverage = 30.0  # default ESMA forex
-    for inst in config.instruments:
-        if inst.name == instrument:
-            leverage = float(inst.leverage)
-            break
+    inst_config = config.get_instrument(instrument)
+    leverage = float(inst_config.leverage) if inst_config else 30.0
 
     await logger.ainfo(
         "loading_data", instrument=instrument, days=days, max_mdd_pct=max_mdd_pct,
