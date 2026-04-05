@@ -210,7 +210,7 @@ async def run_walk_forward(
                 params = StrategyParams.from_optuna_trial_reduced(trial)
                 _, metrics = _run_backtest(
                     _candles, instrument, params, _news, initial_capital, _leverage,
-                    value_per_point, min_size, avg_spread, avg_spread,
+                    value_per_point, min_size, avg_spread,
                 )
                 return _score(metrics, max_mdd_pct)
 
