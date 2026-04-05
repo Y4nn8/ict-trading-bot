@@ -1,14 +1,12 @@
-"""Walk-forward validation: optimize on train, test on unseen data.
+"""Walk-forward validation with REDUCED search space.
 
-For each window:
-1. Optimize params on train period (Optuna)
-2. Backtest with best params on test period (never seen by optimizer)
-3. Aggregate test results across all windows
-
-Uses Bayesian warm-start: best params from window N seed window N+1.
+Same as run_walk_forward.py but uses from_optuna_trial_reduced() which
+fixes converged parameters (confluence weights, swing bars, sl_atr_multiple,
+risk tiers) and only optimizes ~15 params instead of 30.
 
 Usage:
-    uv run python -m scripts.run_walk_forward --instrument EUR/USD --train-months 4 --test-months 1
+    uv run python -m scripts.run_walk_forward_reduced \\
+        --instrument EUR/USD --train-months 4 --test-weeks 1 --trials 200
 """
 
 from __future__ import annotations
@@ -22,7 +20,7 @@ import polars as pl
 from dotenv import load_dotenv
 
 from src.backtest.engine import BacktestEngine
-from src.backtest.metrics import PerformanceMetrics, SourceBreakdown, compute_metrics, compute_metrics_by_source
+from src.backtest.metrics import PerformanceMetrics, compute_metrics
 from src.backtest.vectorized import precompute
 from src.common.config import load_config
 from src.common.db import Database
@@ -47,12 +45,10 @@ def _run_backtest(
     value_per_point: float = 1.0,
     min_size: float = 0.5,
     avg_spread: float = 0.0,
-    pip_size: float = 0.0001,
-) -> tuple[list[object], PerformanceMetrics, SourceBreakdown]:
-    """Run a single backtest, return trades, metrics, and source breakdown."""
+) -> tuple[list[object], PerformanceMetrics]:
+    """Run a single backtest, return trades and metrics."""
     if candles.is_empty():
-        empty = compute_metrics([], initial_capital)
-        return [], empty, SourceBreakdown(ict=empty, news=empty, ict_trade_count=0, news_trade_count=0)
+        return [], compute_metrics([], initial_capital)
 
     precomputed = precompute(candles, instrument, "M5", params=params)
     components = build_strategy(params)
@@ -71,13 +67,11 @@ def _run_backtest(
         value_per_point=value_per_point,
         min_size=min_size,
         avg_spread=avg_spread,
-        pip_size=pip_size,
         news_events=news_events,
     )
     result = engine.run()
     metrics = compute_metrics(result.trades, initial_capital)
-    breakdown = compute_metrics_by_source(result.trades, initial_capital)
-    return result.trades, metrics, breakdown
+    return result.trades, metrics
 
 
 def _score(metrics: PerformanceMetrics, max_mdd_pct: float) -> float:
@@ -143,8 +137,6 @@ async def run_walk_forward(
             leverage=leverage,
             value_per_point=value_per_point,
             min_size=min_size,
-            pip_size=pip_size,
-            avg_spread_price=avg_spread,
         )
 
         # Generate windows
@@ -174,9 +166,7 @@ async def run_walk_forward(
 
         # Run each window
         test_results: list[PerformanceMetrics] = []
-        all_test_breakdowns: list[SourceBreakdown] = []
         all_best_params: list[dict[str, object]] = []
-        prev_best_trial_params: dict[str, object] | None = None
 
         for i, (train_start, train_end, test_start, test_end) in enumerate(windows):
             print(f"\n{'='*60}")
@@ -217,24 +207,17 @@ async def run_walk_forward(
                 _news: list[dict[str, object]] = train_news,
                 _leverage: float = leverage,
             ) -> float:
-                params = StrategyParams.from_optuna_trial(trial)
-                _, metrics, _ = _run_backtest(
+                params = StrategyParams.from_optuna_trial_reduced(trial)
+                _, metrics = _run_backtest(
                     _candles, instrument, params, _news, initial_capital, _leverage,
-                    value_per_point, min_size, avg_spread, pip_size,
+                    value_per_point, min_size, avg_spread, avg_spread,
                 )
                 return _score(metrics, max_mdd_pct)
 
             study = optuna.create_study(direction="maximize")
             optuna.logging.set_verbosity(optuna.logging.WARNING)
-
-            # Warm-start: seed with previous window's best params
-            if prev_best_trial_params is not None:
-                study.enqueue_trial(prev_best_trial_params)
-                print("  Warm-start: seeded with previous window's best params")
-
             study.optimize(objective, n_trials=trials_per_window, show_progress_bar=True)
 
-            prev_best_trial_params = study.best_trial.params
             best_params = StrategyParams.from_dict(study.best_trial.params)
             all_best_params.append(study.best_trial.params)
 
@@ -243,9 +226,9 @@ async def run_walk_forward(
             for key, value in sorted(best_trial.params.items()):
                 print(f"    {key}: {value}")
 
-            _, train_metrics, _ = _run_backtest(
+            _, train_metrics = _run_backtest(
                 train_candles, instrument, best_params, train_news, initial_capital, leverage,
-                value_per_point, min_size, avg_spread, pip_size,
+                value_per_point, min_size, avg_spread,
             )
 
             print("\n  TRAIN results (in-sample):")
@@ -255,12 +238,11 @@ async def run_walk_forward(
             print(f"    MDD: {train_metrics.max_drawdown_pct*100:.1f}%")
 
             # Test on unseen data
-            _, test_metrics, test_breakdown = _run_backtest(
+            _, test_metrics = _run_backtest(
                 test_candles, instrument, best_params, test_news, initial_capital, leverage,
-                value_per_point, min_size, avg_spread, pip_size,
+                value_per_point, min_size, avg_spread,
             )
             test_results.append(test_metrics)
-            all_test_breakdowns.append(test_breakdown)
 
             print("\n  TEST results (out-of-sample):")
             print(f"    Trades: {test_metrics.total_trades}")
@@ -271,18 +253,6 @@ async def run_walk_forward(
             print(f"    MDD: {test_metrics.max_drawdown_pct*100:.1f}%")
             print(f"    Avg R: {test_metrics.avg_r_multiple:.2f}")
             print(f"    Avg risk/trade: {test_metrics.avg_risk_pct:.2f}%")
-
-            # Per-window source breakdown
-            ict = test_breakdown.ict
-            news = test_breakdown.news
-            print(f"    --- ICT: {test_breakdown.ict_trade_count} trades, "
-                  f"PnL {ict.total_pnl:.2f}, "
-                  f"WR {ict.win_rate*100:.1f}%, "
-                  f"PF {ict.profit_factor:.2f}")
-            print(f"    --- News: {test_breakdown.news_trade_count} trades, "
-                  f"PnL {news.total_pnl:.2f}, "
-                  f"WR {news.win_rate*100:.1f}%, "
-                  f"PF {news.profit_factor:.2f}")
 
         # Aggregate test results
         if test_results:
@@ -314,57 +284,6 @@ async def run_walk_forward(
 
             profitable_windows = sum(1 for m in test_results if m.total_pnl > 0)
             print(f"  Profitable windows: {profitable_windows}/{len(test_results)}")
-
-        # Source breakdown summary
-        if all_test_breakdowns:
-            print(f"\n{'='*60}")
-            print("TRIGGER SOURCE BREAKDOWN (out-of-sample)")
-            print(f"{'='*60}")
-
-            total_ict = sum(b.ict_trade_count for b in all_test_breakdowns)
-            total_news = sum(b.news_trade_count for b in all_test_breakdowns)
-            pnl_ict = sum(b.ict.total_pnl for b in all_test_breakdowns)
-            pnl_news = sum(b.news.total_pnl for b in all_test_breakdowns)
-
-            ict_wins = sum(b.ict.winning_trades for b in all_test_breakdowns)
-            news_wins = sum(b.news.winning_trades for b in all_test_breakdowns)
-            wr_ict = ict_wins / total_ict * 100 if total_ict > 0 else 0
-            wr_news = news_wins / total_news * 100 if total_news > 0 else 0
-
-            ict_gross_profit = sum(
-                b.ict.avg_winner * b.ict.winning_trades for b in all_test_breakdowns
-            )
-            ict_gross_loss = abs(sum(
-                b.ict.avg_loser * b.ict.losing_trades for b in all_test_breakdowns
-            ))
-            news_gross_profit = sum(
-                b.news.avg_winner * b.news.winning_trades for b in all_test_breakdowns
-            )
-            news_gross_loss = abs(sum(
-                b.news.avg_loser * b.news.losing_trades for b in all_test_breakdowns
-            ))
-            pf_ict = ict_gross_profit / ict_gross_loss if ict_gross_loss > 0 else 0
-            pf_news = news_gross_profit / news_gross_loss if news_gross_loss > 0 else 0
-
-            avg_r_ict = sum(
-                b.ict.avg_r_multiple * b.ict_trade_count for b in all_test_breakdowns
-            ) / total_ict if total_ict > 0 else 0
-            avg_r_news = sum(
-                b.news.avg_r_multiple * b.news_trade_count for b in all_test_breakdowns
-            ) / total_news if total_news > 0 else 0
-
-            print(f"  {'':20} {'ICT':>12} {'News':>12}")
-            print(f"  {'Trades':20} {total_ict:>12} {total_news:>12}")
-            print(f"  {'PnL':20} {pnl_ict:>12.2f} {pnl_news:>12.2f}")
-            print(f"  {'Win rate':20} {wr_ict:>11.1f}% {wr_news:>11.1f}%")
-            print(f"  {'Profit factor':20} {pf_ict:>12.2f} {pf_news:>12.2f}")
-            print(f"  {'Avg R':20} {avg_r_ict:>12.2f} {avg_r_news:>12.2f}")
-            print(f"  {'% of trades':20} "
-                  f"{total_ict/(total_ict+total_news)*100 if total_ict+total_news else 0:>11.1f}% "
-                  f"{total_news/(total_ict+total_news)*100 if total_ict+total_news else 0:>11.1f}%")
-            print(f"  {'% of PnL':20} "
-                  f"{pnl_ict/(pnl_ict+pnl_news)*100 if pnl_ict+pnl_news else 0:>11.1f}% "
-                  f"{pnl_news/(pnl_ict+pnl_news)*100 if pnl_ict+pnl_news else 0:>11.1f}%")
 
         # Parameter convergence analysis
         if len(all_best_params) >= 2:

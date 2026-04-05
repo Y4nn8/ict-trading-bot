@@ -75,7 +75,13 @@ class EntryEvaluator:
         close = float(candle["close"])
         high = float(candle["high"])
         low = float(candle["low"])
-        atr_estimate = high - low  # Simple ATR proxy from current candle
+
+        # Use pre-computed rolling ATR if available, fall back to candle range
+        atr_raw = candle.get("atr")
+        atr_estimate = float(atr_raw) if atr_raw is not None and atr_raw == atr_raw else high - low
+
+        if atr_estimate <= 0:
+            return None
 
         sl_distance = atr_estimate * self._sl_atr_mult
         tp_distance = sl_distance * self._rr_ratio

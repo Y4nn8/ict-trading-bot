@@ -1,14 +1,15 @@
-"""Walk-forward validation: optimize on train, test on unseen data.
+"""Walk-forward validation with SMART search space + warm-start.
 
-For each window:
-1. Optimize params on train period (Optuna)
-2. Backtest with best params on test period (never seen by optimizer)
-3. Aggregate test results across all windows
+Combines three optimizations vs the base walk-forward:
+1. Fixed stable params (sl_atr=0.52, rr_ratio=3.0, swing_left=1)
+2. Grouped correlated params (atr_period, risk_pct, 3 confluence groups)
+3. Bayesian warm-start: best params from window N seed window N+1
 
-Uses Bayesian warm-start: best params from window N seed window N+1.
+~16 optimized params instead of 30.
 
 Usage:
-    uv run python -m scripts.run_walk_forward --instrument EUR/USD --train-months 4 --test-months 1
+    uv run python -m scripts.run_walk_forward_smart \\
+        --instrument EUR/USD --train-months 4 --test-weeks 1 --trials 200
 """
 
 from __future__ import annotations
@@ -143,8 +144,6 @@ async def run_walk_forward(
             leverage=leverage,
             value_per_point=value_per_point,
             min_size=min_size,
-            pip_size=pip_size,
-            avg_spread_price=avg_spread,
         )
 
         # Generate windows
@@ -217,7 +216,7 @@ async def run_walk_forward(
                 _news: list[dict[str, object]] = train_news,
                 _leverage: float = leverage,
             ) -> float:
-                params = StrategyParams.from_optuna_trial(trial)
+                params = StrategyParams.from_optuna_trial_smart(trial)
                 _, metrics, _ = _run_backtest(
                     _candles, instrument, params, _news, initial_capital, _leverage,
                     value_per_point, min_size, avg_spread, pip_size,
@@ -235,7 +234,7 @@ async def run_walk_forward(
             study.optimize(objective, n_trials=trials_per_window, show_progress_bar=True)
 
             prev_best_trial_params = study.best_trial.params
-            best_params = StrategyParams.from_dict(study.best_trial.params)
+            best_params = StrategyParams.from_smart_dict(study.best_trial.params)
             all_best_params.append(study.best_trial.params)
 
             best_trial = study.best_trial
@@ -326,11 +325,13 @@ async def run_walk_forward(
             pnl_ict = sum(b.ict.total_pnl for b in all_test_breakdowns)
             pnl_news = sum(b.news.total_pnl for b in all_test_breakdowns)
 
+            # Aggregate win rates (weighted by trade count)
             ict_wins = sum(b.ict.winning_trades for b in all_test_breakdowns)
             news_wins = sum(b.news.winning_trades for b in all_test_breakdowns)
             wr_ict = ict_wins / total_ict * 100 if total_ict > 0 else 0
             wr_news = news_wins / total_news * 100 if total_news > 0 else 0
 
+            # Aggregate profit factor
             ict_gross_profit = sum(
                 b.ict.avg_winner * b.ict.winning_trades for b in all_test_breakdowns
             )

@@ -129,3 +129,74 @@
 - Deploy on IG demo with best params
 - Integrate M1 as execution timeframe (more precise entries)
 - Multi-instrument optimization (GBP/USD, XAUUSD)
+
+## Session 6 — 2026-04-04
+
+### Progress
+- Smart walk-forward (reduced search space + Bayesian warm-start) implemented and validated
+- 8/8 weekly OOS windows profitable on EUR/USD
+- Compared W5/W7 fixed params across 8 weekly windows (W7 dominated: 8/8 profitable, +14,162€ vs 5/8, +1,228€)
+- Active scripts: `run_walk_forward_smart.py` (16 params), `test_fixed_params.py` (W5 vs W7)
+
+### Decisions Made
+- **Smart param grouping**: reduced 30 → 16 Optuna params for better convergence. Fixed: `sl_atr=0.52`, `rr_ratio=3.0`, `swing_left=1`. Grouped: single `atr_period` (OB+disp), single `risk_pct` (all tiers), 3 macro confluence weights (`w_structure`, `w_gap`, `w_context`)
+- **Bayesian warm-start**: each window seeded with previous window's best params (W1 starts cold). Speeds up convergence without introducing data leakage
+- **Weekly recalibration justified**: param convergence only 11% (2/19 params stable) — market regimes shift fast, monthly would be too slow
+- **`require_killzone=False` confirmed**: converged across all 8 windows — killzone filter hurts performance
+- **`max_positions=1`** in final windows: optimizer prefers focused single-position strategy
+
+### Walk-Forward Smart Results (200 trials/window, 8 weekly OOS windows)
+
+| Window | Trades | PnL OOS | Win Rate | PF | Sharpe | MDD |
+|--------|--------|---------|----------|-----|--------|-----|
+| W1 | 105 | +629€ | 32.4% | 1.24 | 1.38 | 8.5% |
+| W2 | 166 | +1,514€ | 36.7% | 1.65 | 3.15 | 3.9% |
+| W3 | 181 | +367€ | 31.5% | 1.16 | 0.86 | 5.7% |
+| W4 | 172 | +1,189€ | 37.8% | 1.51 | 2.39 | 7.3% |
+| W5 | 198 | +3,674€ | 41.9% | 1.80 | 3.73 | 5.5% |
+| W6 | 157 | +1,692€ | 34.4% | 1.38 | 1.95 | 10.5% |
+| W7 | 171 | +3,899€ | 43.9% | 2.01 | 4.24 | 4.0% |
+| W8 | 156 | +1,812€ | 37.8% | 1.46 | 2.48 | 5.4% |
+| **Total** | **1,306** | **+14,775€** | **37.1%** | **1.53** | **2.52** | **10.5%** |
+
+**8/8 profitable. Capital: 5,000€. Leverage: 30:1.**
+
+### Best Smart Params (W8, trial #155 — also confirmed by W7→W8 warm-start)
+```yaml
+# Fixed
+sl_atr_multiple: 0.52
+rr_ratio: 3.0
+swing_left_bars: 1
+swing_right_bars: 1
+require_killzone: false
+# Grouped
+atr_period: 11  # OB + displacement
+risk_pct: 1.887  # all tiers
+w_structure: 0.641  # → weight_ms=0.321, weight_ob=0.321
+w_gap: 0.700  # → weight_fvg=0.350, weight_displacement=0.350
+w_context: 0.063  # → weight_killzone=0.031, weight_pd=0.031
+# Free
+ob_displacement_factor: 3.845
+disp_threshold: 2.822
+liq_tolerance_pct: 0.076
+liq_lookback: 177
+liq_min_touches: 2
+min_confluence: 0.314
+max_hold_candles: 12
+max_spread_pips: 8.064
+max_positions: 1
+risk_max_pct: 1.121
+max_daily_drawdown_pct: 3.461
+max_total_drawdown_pct: 15.227
+```
+
+### Issues Encountered
+- 30-param walk-forward had only 30% convergence and poor OOS (1/2 profitable) — smart grouping solved this
+- Previous session's in-sample PnL was wildly inflated (79B€ on W4 train) — classic Optuna overfitting on train, but OOS stayed reasonable
+
+### TODO / Next Session
+- Deploy on IG demo with weekly recalibration pipeline
+- Fix Twelve Data symbols for SPX500, DOW30, NIKKEI225
+- Multi-instrument optimization (GBP/USD, XAUUSD)
+- Investigate W6 worst MDD (10.5%) — news-driven?
+- Consider ensemble: run top-3 window params, take majority vote
