@@ -90,12 +90,22 @@ async def run_backtest(
 
         inst_config = config.get_instrument(instrument)
         leverage = float(inst_config.leverage) if inst_config else 30.0
+        value_per_point = float(inst_config.value_per_point) if inst_config else 1.0
+        min_size = float(inst_config.min_size) if inst_config else 0.5
+        pip_size = float(inst_config.pip_size) if inst_config else 0.0001
+        avg_spread = float(inst_config.avg_spread) * pip_size if inst_config else 0.0
 
         # Build strategy components from params
         components = build_strategy(params)
 
         # Run backtest
-        await logger.ainfo("running_backtest", candles=len(candles), leverage=leverage)
+        await logger.ainfo(
+            "running_backtest",
+            candles=len(candles),
+            leverage=leverage,
+            value_per_point=value_per_point,
+            min_size=min_size,
+        )
         engine = BacktestEngine(
             precomputed=precomputed,
             confluence_scorer=components.confluence_scorer,
@@ -107,6 +117,9 @@ async def run_backtest(
             sim_config=components.sim_config,
             initial_capital=initial_capital,
             leverage=leverage,
+            value_per_point=value_per_point,
+            min_size=min_size,
+            avg_spread=avg_spread,
             news_events=news_events,
         )
         result = engine.run()

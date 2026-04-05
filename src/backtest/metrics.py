@@ -141,6 +141,45 @@ def compute_metrics(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class SourceBreakdown:
+    """Metrics broken down by trigger source (ict vs news)."""
+
+    ict: PerformanceMetrics
+    news: PerformanceMetrics
+    ict_trade_count: int
+    news_trade_count: int
+
+
+def compute_metrics_by_source(
+    trades: list[Trade],
+    initial_capital: float = 10000.0,
+) -> SourceBreakdown:
+    """Split trades by trigger source and compute metrics for each.
+
+    Args:
+        trades: List of closed Trade objects with setup_type.trigger_source.
+        initial_capital: Starting capital for drawdown calculation.
+
+    Returns:
+        SourceBreakdown with separate metrics for ICT and news trades.
+    """
+    ict_trades = [
+        t for t in trades
+        if (t.setup_type or {}).get("trigger_source", "ict") == "ict"
+    ]
+    news_trades = [
+        t for t in trades
+        if (t.setup_type or {}).get("trigger_source") == "news"
+    ]
+    return SourceBreakdown(
+        ict=compute_metrics(ict_trades, initial_capital),
+        news=compute_metrics(news_trades, initial_capital),
+        ict_trade_count=len(ict_trades),
+        news_trade_count=len(news_trades),
+    )
+
+
 def _build_equity_curve(pnls: list[float], initial_capital: float) -> list[float]:
     """Build cumulative equity curve from PnL list."""
     curve = [initial_capital]

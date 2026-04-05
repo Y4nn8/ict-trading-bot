@@ -1,48 +1,50 @@
-# Best strategy parameters — optimized via Optuna (50 trials)
-# Walk-forward validated: 3/3 windows profitable
-# Out-of-sample: PF 1.44, Sharpe 2.47, 877 trades over 3 months
+# Best strategy parameters — Smart WF (200 trials, 16 grouped params, warm-start)
+# Walk-forward validated: 8/8 weekly windows profitable (out-of-sample)
+# OOS aggregate: PF 1.53, Sharpe 2.52, 1306 trades, PnL +14,775 on 5k capital
 # Optimized on: EUR/USD M5, 2025-10-03 to 2026-04-03
+# Source: W8 best trial #155 (confirmed by W7 warm-start)
+
+# Fixed (universally stable)
+swing_left_bars: 1
+swing_right_bars: 1
+sl_atr_multiple: 0.52
+rr_ratio: 3.0
 
 # Detectors
-swing_left_bars: 2
-swing_right_bars: 2
-ob_displacement_factor: 3.344
-ob_atr_period: 24
-disp_atr_period: 29
-disp_threshold: 1.907
-liq_tolerance_pct: 0.022
-liq_lookback: 74
-liq_min_touches: 3
+ob_atr_period: 11
+disp_atr_period: 11
+ob_displacement_factor: 3.845
+disp_threshold: 2.822
+liq_tolerance_pct: 0.076
+liq_lookback: 177
+liq_min_touches: 2
 
 # Confluence weights (raw — will be normalized)
-weight_fvg: 0.992
-weight_ob: 0.434
-weight_ms: 0.882
-weight_displacement: 0.734
-weight_killzone: 0.536
-weight_pd: 0.161
+# From smart groups: w_structure=0.641, w_gap=0.700, w_context=0.063
+weight_ms: 0.321
+weight_ob: 0.321
+weight_fvg: 0.350
+weight_displacement: 0.350
+weight_killzone: 0.031
+weight_pd: 0.031
 
 # Entry
-min_confluence: 0.594
-sl_atr_multiple: 2.747
-rr_ratio: 1.079
-
-# Exit
-max_hold_candles: 202
+min_confluence: 0.314
+max_hold_candles: 12
 
 # Filters
-max_spread_pips: 2.860
-require_killzone: true
-max_positions: 6
+max_spread_pips: 8.064
+require_killzone: false
+max_positions: 1
 
-# Position sizing
-risk_low_threshold: 0.462
-risk_high_threshold: 0.766
-risk_low_pct: 1.912
-risk_medium_pct: 1.353
-risk_high_pct: 2.150
-risk_max_pct: 4.417
+# Position sizing (uniform risk)
+risk_low_threshold: 0.4
+risk_high_threshold: 0.7
+risk_low_pct: 1.887
+risk_medium_pct: 1.887
+risk_high_pct: 1.887
+risk_max_pct: 1.121
 
 # Risk management
-max_daily_drawdown_pct: 3.347
-max_total_drawdown_pct: 12.017
+max_daily_drawdown_pct: 3.461
+max_total_drawdown_pct: 15.227

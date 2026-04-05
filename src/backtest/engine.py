@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from src.backtest.simulator import SimulationConfig, simulate_fill
 from src.common.logging import get_logger
 from src.common.models import Direction, Trade
 from src.news.event_manager import EventManager
@@ -18,7 +19,6 @@ from src.news.interpreter import NewsAction
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from src.backtest.simulator import SimulationConfig
     from src.backtest.vectorized import PrecomputedData
     from src.execution.position_sizer import PositionSizer
     from src.execution.risk_manager import RiskManager
@@ -43,6 +43,7 @@ class OpenPosition:
     take_profit: float
     size: float
     confluence_score: float
+    trigger_source: str = "ict"  # "ict" or "news"
     setup_context: dict[str, Any] = field(default_factory=dict)
 
 
@@ -90,9 +91,14 @@ class BacktestEngine:
         trade_filter: TradeFilter,
         position_sizer: PositionSizer,
         risk_manager: RiskManager,
-        sim_config: SimulationConfig,
+        sim_config: SimulationConfig | None = None,
         initial_capital: float = 10000.0,
         leverage: float = 30.0,
+        value_per_point: float = 1.0,
+        min_size: float = 0.5,
+        size_step: float = 0.5,
+        avg_spread: float = 0.0,
+        pip_size: float = 0.0001,
         news_events: list[dict[str, Any]] | None = None,
         news_pause_minutes: int = 30,
         news_resume_minutes: int = 15,
@@ -106,10 +112,15 @@ class BacktestEngine:
         self._filter = trade_filter
         self._sizer = position_sizer
         self._risk = risk_manager
-        self._sim_config = sim_config
+        self._sim_config = sim_config or SimulationConfig()
         self._initial_capital = initial_capital
         self._capital = initial_capital
         self._leverage = leverage
+        self._value_per_point = value_per_point
+        self._min_size = min_size
+        self._size_step = size_step
+        self._avg_spread = avg_spread
+        self._pip_size = pip_size
         self._open_positions: list[OpenPosition] = []
         self._closed_trades: list[Trade] = []
         self._daily_pnl: float = 0.0
@@ -191,6 +202,7 @@ class BacktestEngine:
             }
 
             # Check for news-triggered entries (per-instrument)
+            news_triggered = False
             news_triggers = self._event_manager.pop_triggers()
             for trigger in news_triggers:
                 inst_sents = trigger.get("instrument_sentiments", {})
@@ -204,8 +216,12 @@ class BacktestEngine:
 
                 if inst_sent == "bullish":
                     context["ms_breaks"] = [{"direction": "bullish"}]
+                    news_triggered = True
                 elif inst_sent == "bearish":
                     context["ms_breaks"] = [{"direction": "bearish"}]
+                    news_triggered = True
+
+            trigger_source = "news" if news_triggered else "ict"
 
             # Score confluence
             score = self._confluence.score(candle, context)
@@ -223,12 +239,33 @@ class BacktestEngine:
             if entry_signal is None:
                 continue
 
-            # Size the position
+            # Simulate realistic fill (spread + slippage + rejection)
+            is_buy = entry_signal.direction == Direction.LONG
+            fill = simulate_fill(
+                target_price=entry_signal.entry_price,
+                is_buy=is_buy,
+                spread=self._avg_spread,
+                config=self._sim_config,
+                pip_size=self._pip_size,
+            )
+            if not fill.filled:
+                continue
+
+            # Adjust SL/TP to preserve the same distance from actual fill
+            sl_offset = fill.fill_price - entry_signal.entry_price
+            actual_entry = fill.fill_price
+            actual_sl = entry_signal.stop_loss + sl_offset
+            actual_tp = entry_signal.take_profit + sl_offset
+
+            # Size the position using the actual fill price
             size = self._sizer.compute_size(
                 capital=self._capital,
                 confluence_score=score,
-                entry_price=entry_signal.entry_price,
-                stop_loss=entry_signal.stop_loss,
+                entry_price=actual_entry,
+                stop_loss=actual_sl,
+                value_per_point=self._value_per_point,
+                min_size=self._min_size,
+                size_step=self._size_step,
             )
 
             if size <= 0:
@@ -238,7 +275,7 @@ class BacktestEngine:
             current_price = float(candle["close"])
             original_size = size
             size, used_margin, equity = self._cap_size_to_margin(
-                entry_signal.entry_price, size, current_price,
+                actual_entry, size, current_price,
             )
             if size <= 0:
                 self._margin_rejected += 1
@@ -251,18 +288,19 @@ class BacktestEngine:
                 trade_id=str(uuid4()),
                 instrument=self._precomputed.instrument,
                 direction=entry_signal.direction,
-                entry_price=entry_signal.entry_price,
+                entry_price=actual_entry,
                 entry_time=time,
-                stop_loss=entry_signal.stop_loss,
-                take_profit=entry_signal.take_profit,
+                stop_loss=actual_sl,
+                take_profit=actual_tp,
                 size=size,
                 confluence_score=score,
+                trigger_source=trigger_source,
                 setup_context=context,
             )
             self._open_positions.append(position)
 
             # Track peak margin usage (reuse values, add new position's margin)
-            new_margin = entry_signal.entry_price * size / self._leverage
+            new_margin = actual_entry * size * self._value_per_point / self._leverage
             total_used = used_margin + new_margin
             if equity > 0:
                 usage_pct = total_used / equity * 100
@@ -280,19 +318,21 @@ class BacktestEngine:
 
     def _compute_used_margin(self) -> float:
         """Compute total margin used by open positions."""
+        vpp = self._value_per_point
         return sum(
-            pos.entry_price * pos.size / self._leverage
+            pos.entry_price * pos.size * vpp / self._leverage
             for pos in self._open_positions
         )
 
     def _compute_unrealized_pnl(self, current_price: float) -> float:
         """Compute total unrealized PnL at current price."""
         pnl = 0.0
+        vpp = self._value_per_point
         for pos in self._open_positions:
             if pos.direction == Direction.LONG:
-                pnl += (current_price - pos.entry_price) * pos.size
+                pnl += (current_price - pos.entry_price) * pos.size * vpp
             else:
-                pnl += (pos.entry_price - current_price) * pos.size
+                pnl += (pos.entry_price - current_price) * pos.size * vpp
         return pnl
 
     def _compute_equity(self, current_price: float) -> float:
@@ -319,7 +359,8 @@ class BacktestEngine:
         available_margin = equity - used_margin
         if available_margin <= 0:
             return 0.0, used_margin, equity
-        max_size = available_margin * self._leverage / entry_price
+        vpp = self._value_per_point
+        max_size = available_margin * self._leverage / (entry_price * vpp)
         capped = min(size, max_size)
         return capped, used_margin, equity
 
@@ -329,25 +370,32 @@ class BacktestEngine:
         high = float(candle["high"])
         low = float(candle["low"])
         time = candle["time"]
+        half_spread = self._avg_spread / 2
 
         for pos in self._open_positions:
             exit_result = self._exit.evaluate(pos, candle)
 
             if exit_result is not None:
-                exit_price = exit_result.exit_price
+                # Time-based exit: apply spread to close price
+                if pos.direction == Direction.LONG:
+                    exit_price = exit_result.exit_price - half_spread
+                else:
+                    exit_price = exit_result.exit_price + half_spread
             elif pos.direction == Direction.LONG:
+                # LONG exits sell at bid = price - spread/2
                 if low <= pos.stop_loss:
-                    exit_price = pos.stop_loss
+                    exit_price = pos.stop_loss - half_spread
                 elif high >= pos.take_profit:
-                    exit_price = pos.take_profit
+                    exit_price = pos.take_profit - half_spread
                 else:
                     remaining.append(pos)
                     continue
             elif pos.direction == Direction.SHORT:
+                # SHORT exits buy at ask = price + spread/2
                 if high >= pos.stop_loss:
-                    exit_price = pos.stop_loss
+                    exit_price = pos.stop_loss + half_spread
                 elif low <= pos.take_profit:
-                    exit_price = pos.take_profit
+                    exit_price = pos.take_profit + half_spread
                 else:
                     remaining.append(pos)
                     continue
@@ -375,6 +423,7 @@ class BacktestEngine:
                 pnl_percent=pnl_pct,
                 r_multiple=r_multiple,
                 confluence_score=pos.confluence_score,
+                setup_type={"trigger_source": pos.trigger_source},
                 is_backtest=True,
             )
             self._closed_trades.append(trade)
@@ -386,8 +435,8 @@ class BacktestEngine:
     def _compute_pnl(self, pos: OpenPosition, exit_price: float) -> float:
         """Compute PnL for a closed position."""
         if pos.direction == Direction.LONG:
-            return (exit_price - pos.entry_price) * pos.size
-        return (pos.entry_price - exit_price) * pos.size
+            return (exit_price - pos.entry_price) * pos.size * self._value_per_point
+        return (pos.entry_price - exit_price) * pos.size * self._value_per_point
 
     def _close_opposing_positions(
         self, candle: dict[str, Any], inst_sentiments: dict[str, str]
@@ -397,7 +446,8 @@ class BacktestEngine:
         Uses per-instrument sentiments. If "__all__" key exists,
         applies to all instruments.
         """
-        close_price = float(candle["close"])
+        raw_close = float(candle["close"])
+        half_spread = self._avg_spread / 2
         time = candle["time"]
         remaining: list[OpenPosition] = []
 
@@ -410,6 +460,11 @@ class BacktestEngine:
                 or (sentiment == "bearish" and pos.direction == Direction.LONG)
             )
             if should_close:
+                # Apply spread: LONG sells at bid, SHORT buys at ask
+                if pos.direction == Direction.LONG:
+                    close_price = raw_close - half_spread
+                else:
+                    close_price = raw_close + half_spread
                 pnl = self._compute_pnl(pos, close_price)
                 pnl_pct = (
                     (pnl / (pos.entry_price * pos.size)) * 100
@@ -435,6 +490,7 @@ class BacktestEngine:
                     pnl_percent=pnl_pct,
                     r_multiple=r_multiple,
                     confluence_score=pos.confluence_score,
+                    setup_type={"trigger_source": pos.trigger_source},
                     is_backtest=True,
                     news_context={"close_reason": "news_opposing", "sentiment": sentiment},
                 ))

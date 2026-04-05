@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from src.structure.displacement import detect_displacement_vectorized
 from src.structure.fvg import detect_fvg_vectorized
 from src.structure.liquidity import detect_liquidity_vectorized
@@ -21,6 +23,44 @@ if TYPE_CHECKING:
     import polars as pl
 
     from src.strategy.params import StrategyParams
+
+
+def _compute_atr_column(candles: pl.DataFrame, period: int = 14) -> pl.DataFrame:
+    """Add a rolling ATR column to candles DataFrame.
+
+    Args:
+        candles: DataFrame with open, high, low, close columns.
+        period: ATR lookback period.
+
+    Returns:
+        DataFrame with an additional 'atr' column.
+    """
+    import polars as pl_mod
+
+    highs = candles["high"].to_numpy()
+    lows = candles["low"].to_numpy()
+    closes = candles["close"].to_numpy()
+
+    n = len(candles)
+    atr = np.full(n, np.nan)
+
+    if n < 2:
+        return candles.with_columns(pl_mod.Series("atr", atr))
+
+    # True Range: max(H-L, |H-prev_close|, |L-prev_close|)
+    tr = np.maximum(
+        highs[1:] - lows[1:],
+        np.maximum(
+            np.abs(highs[1:] - closes[:-1]),
+            np.abs(lows[1:] - closes[:-1]),
+        ),
+    )
+
+    # Rolling mean of TR
+    for i in range(period, len(tr)):
+        atr[i + 1] = float(np.mean(tr[i - period + 1 : i + 1]))
+
+    return candles.with_columns(pl_mod.Series("atr", atr))
 
 
 @dataclass
@@ -61,7 +101,8 @@ def precompute(
 
         params = StrategyParams()
 
-    candles_with_sessions = add_session_columns_vectorized(candles)
+    candles_with_atr = _compute_atr_column(candles, params.disp_atr_period)
+    candles_with_sessions = add_session_columns_vectorized(candles_with_atr)
 
     swings = detect_swings_vectorized(
         candles, params.swing_left_bars, params.swing_right_bars
