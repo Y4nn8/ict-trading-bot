@@ -216,7 +216,7 @@ class StrategyParams:
         )
 
     @staticmethod
-    def from_optuna_trial_smart(trial: optuna.Trial) -> StrategyParams:
+    def from_optuna_trial_xauusd(trial: optuna.Trial) -> StrategyParams:
         """Create params with converged values fixed from 200-trial analysis.
 
         Fixes 16 params that converged (spread < 30%) across walk-forward
@@ -290,7 +290,7 @@ class StrategyParams:
         )
 
     @staticmethod
-    def from_smart_dict(params: dict[str, Any]) -> StrategyParams:
+    def from_xauusd_dict(params: dict[str, Any]) -> StrategyParams:
         """Create params from a smart trial's params dict.
 
         Reconstructs from optimized param names (weight_ob, weight_displacement,

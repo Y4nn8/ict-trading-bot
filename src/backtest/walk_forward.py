@@ -8,8 +8,8 @@ Usage from scripts:
     from src.backtest.walk_forward import run_walk_forward_cli
 
     run_walk_forward_cli(
-        param_builder=StrategyParams.from_optuna_trial_smart,
-        param_reconstructor=StrategyParams.from_smart_dict,
+        param_builder=StrategyParams.from_optuna_trial_xauusd,
+        param_reconstructor=StrategyParams.from_xauusd_dict,
         description="Walk-forward validation (smart)",
     )
 """
