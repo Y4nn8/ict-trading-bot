@@ -80,6 +80,8 @@ class BacktestEngine:
         news_events: Pre-loaded news events for replay.
         news_pause_minutes: Minutes to pause before a news event.
         news_resume_minutes: Minutes to resume after a news event.
+        be_trigger_pct: Move SL to BE when price reaches this % of TP distance (0=off).
+        be_offset_pct: Place new SL at entry + this % of TP distance (0=exact BE).
     """
 
     def __init__(
@@ -102,6 +104,10 @@ class BacktestEngine:
         news_events: list[dict[str, Any]] | None = None,
         news_pause_minutes: int = 30,
         news_resume_minutes: int = 15,
+        ms_lookback_candles: int = 1,
+        be_trigger_pct: float = 0.0,
+        be_offset_pct: float = 0.0,
+        min_stop_distance: float = 0.0,
     ) -> None:
         if leverage <= 0:
             raise ValueError(f"leverage must be positive, got {leverage}")
@@ -128,6 +134,11 @@ class BacktestEngine:
         self._margin_rejected: int = 0
         self._margin_capped: int = 0
         self._peak_margin_usage: float = 0.0
+        self._be_trigger_pct = be_trigger_pct
+        self._be_offset_pct = be_offset_pct
+        self._min_stop_distance = min_stop_distance
+        self._be_applied: set[str] = set()  # trade_ids already moved to BE
+        self._ms_lookback = max(1, ms_lookback_candles)
         self._event_manager = EventManager(
             pre_event_pause_minutes=news_pause_minutes,
             post_event_resume_minutes=news_resume_minutes,
@@ -190,16 +201,23 @@ class BacktestEngine:
             # Check exits on open positions
             self._check_exits(candle, i)
 
+            # Collect MS breaks within lookback window
+            recent_ms: list[dict[str, Any]] = []
+            for j in range(max(0, i - self._ms_lookback + 1), i + 1):
+                recent_ms.extend(ms_by_idx.get(j, []))
+
             # Build context
             context: dict[str, Any] = {
                 "fvgs": fvg_by_idx.get(i, []),
                 "order_blocks": ob_by_idx.get(i, []),
-                "ms_breaks": ms_by_idx.get(i, []),
+                "ms_breaks": recent_ms,
                 "displacements": disp_by_idx.get(i, []),
                 "session": candle.get("session", ""),
                 "killzone": candle.get("killzone", ""),
                 "in_killzone": candle.get("in_killzone", False),
             }
+            if self._precomputed.htf_trend is not None:
+                context["htf_trend"] = str(self._precomputed.htf_trend[i])
 
             # Check for news-triggered entries (per-instrument)
             news_triggered = False
@@ -373,6 +391,35 @@ class BacktestEngine:
         half_spread = self._avg_spread / 2
 
         for pos in self._open_positions:
+            # Move SL to breakeven if trigger reached
+            if (
+                self._be_trigger_pct > 0
+                and pos.trade_id not in self._be_applied
+            ):
+                tp_dist = abs(pos.take_profit - pos.entry_price)
+                if pos.direction == Direction.LONG:
+                    progress = high - pos.entry_price
+                else:
+                    progress = pos.entry_price - low
+                if tp_dist > 0 and progress / tp_dist >= self._be_trigger_pct:
+                    if pos.direction == Direction.LONG:
+                        new_sl = pos.entry_price + tp_dist * self._be_offset_pct
+                        # Enforce min stop distance from current price
+                        max_sl = float(candle["close"]) - self._min_stop_distance
+                        new_sl = min(new_sl, max_sl)
+                    else:
+                        new_sl = pos.entry_price - tp_dist * self._be_offset_pct
+                        min_sl = float(candle["close"]) + self._min_stop_distance
+                        new_sl = max(new_sl, min_sl)
+                    # Only move SL if it improves the position (tighter)
+                    improves = (
+                        (pos.direction == Direction.LONG and new_sl > pos.stop_loss)
+                        or (pos.direction == Direction.SHORT and new_sl < pos.stop_loss)
+                    )
+                    if improves:
+                        pos.stop_loss = new_sl
+                        self._be_applied.add(pos.trade_id)
+
             exit_result = self._exit.evaluate(pos, candle)
 
             if exit_result is not None:
@@ -429,6 +476,7 @@ class BacktestEngine:
             self._closed_trades.append(trade)
             self._capital += pnl
             self._daily_pnl += pnl
+            self._be_applied.discard(pos.trade_id)
 
         self._open_positions = remaining
 
@@ -496,6 +544,7 @@ class BacktestEngine:
                 ))
                 self._capital += pnl
                 self._daily_pnl += pnl
+                self._be_applied.discard(pos.trade_id)
             else:
                 remaining.append(pos)
 

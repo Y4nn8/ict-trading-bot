@@ -45,9 +45,12 @@ class StrategyParams:
     min_confluence: float = 0.4
     sl_atr_multiple: float = 1.5
     rr_ratio: float = 2.0
+    ms_lookback_candles: int = 1  # how many candles a MS break stays valid
 
     # --- Exit ---
     max_hold_candles: int = 72  # 0 = disabled
+    be_trigger_pct: float = 0.0  # move SL to BE when price reaches X% of TP distance (0=off)
+    be_offset_pct: float = 0.0  # place new SL at entry + X% of TP distance (0=exact BE)
 
     # --- Filter ---
     max_spread_pips: float = 3.0
@@ -65,6 +68,7 @@ class StrategyParams:
     # --- Risk manager ---
     max_daily_drawdown_pct: float = 3.0
     max_total_drawdown_pct: float = 10.0
+    max_daily_gain_pct: float = 3.0  # e.g. 3.0 = stop after +3% daily
 
     @staticmethod
     def from_optuna_trial(trial: optuna.Trial) -> StrategyParams:
@@ -107,6 +111,7 @@ class StrategyParams:
             weight_pd=raw_pd / total,
             # Entry
             min_confluence=trial.suggest_float("min_confluence", 0.2, 0.8),
+            ms_lookback_candles=trial.suggest_int("ms_lookback_candles", 1, 36),
             sl_atr_multiple=trial.suggest_float("sl_atr_multiple", 0.5, 3.0),
             rr_ratio=trial.suggest_float("rr_ratio", 1.0, 5.0),
             # Exit
@@ -131,6 +136,12 @@ class StrategyParams:
             max_total_drawdown_pct=trial.suggest_float(
                 "max_total_drawdown_pct", 5.0, 20.0
             ),
+            max_daily_gain_pct=trial.suggest_float(
+                "max_daily_gain_pct", 1.0, 5.0
+            ),
+            # Breakeven stop
+            be_trigger_pct=trial.suggest_float("be_trigger_pct", 0.1, 0.5),
+            be_offset_pct=trial.suggest_float("be_offset_pct", 0.0, 0.1),
         )
 
     @staticmethod
@@ -173,6 +184,7 @@ class StrategyParams:
             liq_min_touches=trial.suggest_int("liq_min_touches", 2, 5),
             # Entry
             min_confluence=trial.suggest_float("min_confluence", 0.2, 0.8),
+            ms_lookback_candles=trial.suggest_int("ms_lookback_candles", 1, 36),
             rr_ratio=trial.suggest_float("rr_ratio", 1.0, 5.0),
             # Exit
             max_hold_candles=trial.suggest_int("max_hold_candles", 12, 288),
@@ -196,92 +208,93 @@ class StrategyParams:
             max_total_drawdown_pct=trial.suggest_float(
                 "max_total_drawdown_pct", 5.0, 20.0
             ),
+            max_daily_gain_pct=trial.suggest_float(
+                "max_daily_gain_pct", 1.0, 5.0
+            ),
+            be_trigger_pct=trial.suggest_float("be_trigger_pct", 0.1, 0.5),
+            be_offset_pct=trial.suggest_float("be_offset_pct", 0.0, 0.1),
         )
 
     @staticmethod
     def from_optuna_trial_smart(trial: optuna.Trial) -> StrategyParams:
-        """Create params with grouped and fixed parameters for better convergence.
+        """Create params with converged values fixed from 200-trial analysis.
 
-        Fixes universally stable params (sl_atr, rr_ratio, swing_left).
-        Groups correlated params: atr_period (OB+disp), risk_pct (all tiers),
-        confluence weights in 3 macro groups (structure, gap, context).
-        ~16 optimized params instead of 30.
+        Fixes 16 params that converged (spread < 30%) across walk-forward
+        windows (30-param, 200 trials, 5mo train / 1wk test, 2026-04-06).
+        Optimizes 14 remaining divergent params.
 
         Args:
             trial: Optuna trial object.
 
         Returns:
-            StrategyParams with grouped, fixed, and optimized values.
+            StrategyParams with fixed and optimized values.
         """
-        # Grouped: one ATR period for both OB and displacement detectors
-        atr_period = trial.suggest_int("atr_period", 10, 30)
-
-        # Grouped: 3 confluence macro-weights, then split equally within
-        w_structure = trial.suggest_float("w_structure", 0.0, 1.0)  # MS + OB
-        w_gap = trial.suggest_float("w_gap", 0.0, 1.0)  # FVG + displacement
-        w_context = trial.suggest_float("w_context", 0.0, 1.0)  # killzone + P/D
-        total = w_structure + w_gap + w_context
+        # Weights: fix ms and fvg (converged), optimize the 4 divergent ones
+        raw_ms = 0.58
+        raw_fvg = 0.36
+        raw_ob = trial.suggest_float("weight_ob", 0.0, 1.0)
+        raw_disp = trial.suggest_float("weight_displacement", 0.0, 1.0)
+        raw_kz = trial.suggest_float("weight_killzone", 0.0, 1.0)
+        raw_pd = trial.suggest_float("weight_pd", 0.0, 1.0)
+        total = raw_ms + raw_fvg + raw_ob + raw_disp + raw_kz + raw_pd
         if total == 0:
             total = 1.0
-        w_structure /= total
-        w_gap /= total
-        w_context /= total
 
-        # Grouped: single risk % for all tiers
-        risk_pct = trial.suggest_float("risk_pct", 0.3, 3.0)
+        # Grouped: single risk % for all tiers (all 3 diverged independently)
+        risk_pct = trial.suggest_float("risk_pct", 0.3, 5.0)
 
         return StrategyParams(
-            # --- FIXED: universally stable across all analyses ---
-            sl_atr_multiple=0.52,
-            rr_ratio=3.0,
-            swing_left_bars=1,
-            # --- GROUPED ---
-            ob_atr_period=atr_period,
-            disp_atr_period=atr_period,
-            weight_ms=w_structure / 2,
-            weight_ob=w_structure / 2,
-            weight_fvg=w_gap / 2,
-            weight_displacement=w_gap / 2,
-            weight_killzone=w_context / 2,
-            weight_pd=w_context / 2,
-            risk_low_pct=risk_pct,
-            risk_medium_pct=risk_pct,
-            risk_high_pct=risk_pct,
-            # --- OPTIMIZED: remaining free params ---
-            swing_right_bars=trial.suggest_int("swing_right_bars", 1, 3),
+            # --- FIXED: converged across 200-trial walk-forward ---
+            require_killzone=False,
+            ob_atr_period=22,
+            disp_atr_period=13,
+            disp_threshold=2.26,
+            liq_min_touches=4,
+            swing_right_bars=4,
+            min_confluence=0.50,
+            rr_ratio=4.71,
+            max_hold_candles=256,
+            max_spread_pips=6.14,
+            risk_high_threshold=0.88,
+            risk_max_pct=4.07,
+            max_daily_drawdown_pct=2.36,
+            max_total_drawdown_pct=9.78,
+            # --- WEIGHTS: ms + fvg fixed, rest optimized, all normalized ---
+            weight_ms=raw_ms / total,
+            weight_fvg=raw_fvg / total,
+            weight_ob=raw_ob / total,
+            weight_displacement=raw_disp / total,
+            weight_killzone=raw_kz / total,
+            weight_pd=raw_pd / total,
+            # --- OPTIMIZED: divergent across windows (14 params) ---
+            ms_lookback_candles=trial.suggest_int("ms_lookback_candles", 1, 36),
+            swing_left_bars=trial.suggest_int("swing_left_bars", 1, 5),
             ob_displacement_factor=trial.suggest_float(
                 "ob_displacement_factor", 1.0, 4.0,
             ),
-            disp_threshold=trial.suggest_float("disp_threshold", 1.0, 3.0),
             liq_tolerance_pct=trial.suggest_float(
                 "liq_tolerance_pct", 0.01, 0.1,
             ),
             liq_lookback=trial.suggest_int("liq_lookback", 20, 200),
-            liq_min_touches=trial.suggest_int("liq_min_touches", 2, 5),
-            min_confluence=trial.suggest_float("min_confluence", 0.2, 0.8),
-            max_hold_candles=trial.suggest_int("max_hold_candles", 12, 288),
-            max_spread_pips=trial.suggest_float("max_spread_pips", 0.5, 10.0),
-            require_killzone=trial.suggest_categorical(
-                "require_killzone", [True, False],
-            ),
+            sl_atr_multiple=trial.suggest_float("sl_atr_multiple", 0.5, 3.0),
             max_positions=trial.suggest_int("max_positions", 1, 10),
-            risk_low_threshold=0.4,
-            risk_high_threshold=0.7,
-            risk_max_pct=trial.suggest_float("risk_max_pct", 1.0, 5.0),
-            max_daily_drawdown_pct=trial.suggest_float(
-                "max_daily_drawdown_pct", 1.0, 5.0,
+            risk_low_threshold=trial.suggest_float("risk_low_threshold", 0.2, 0.6),
+            risk_low_pct=risk_pct,
+            risk_medium_pct=risk_pct,
+            risk_high_pct=risk_pct,
+            max_daily_gain_pct=trial.suggest_float(
+                "max_daily_gain_pct", 1.0, 5.0,
             ),
-            max_total_drawdown_pct=trial.suggest_float(
-                "max_total_drawdown_pct", 5.0, 20.0,
-            ),
+            be_trigger_pct=trial.suggest_float("be_trigger_pct", 0.1, 0.5),
+            be_offset_pct=trial.suggest_float("be_offset_pct", 0.0, 0.1),
         )
 
     @staticmethod
     def from_smart_dict(params: dict[str, Any]) -> StrategyParams:
         """Create params from a smart trial's params dict.
 
-        Handles the grouped param names (atr_period, w_structure, w_gap,
-        w_context, risk_pct) and fixed values.
+        Reconstructs from optimized param names (weight_ob, weight_displacement,
+        weight_killzone, weight_pd, risk_pct) plus fixed converged values.
 
         Args:
             params: Dict from smart trial's best_trial.params.
@@ -289,45 +302,54 @@ class StrategyParams:
         Returns:
             StrategyParams instance.
         """
-        atr = int(params.get("atr_period", 14))
-        w_s = float(params.get("w_structure", 1 / 3))
-        w_g = float(params.get("w_gap", 1 / 3))
-        w_c = float(params.get("w_context", 1 / 3))
-        total = w_s + w_g + w_c or 1.0
-        w_s, w_g, w_c = w_s / total, w_g / total, w_c / total
+        raw_ms = 0.58
+        raw_fvg = 0.36
+        raw_ob = float(params.get("weight_ob", 0.5))
+        raw_disp = float(params.get("weight_displacement", 0.5))
+        raw_kz = float(params.get("weight_killzone", 0.5))
+        raw_pd = float(params.get("weight_pd", 0.5))
+        total = raw_ms + raw_fvg + raw_ob + raw_disp + raw_kz + raw_pd or 1.0
+
         risk = float(params.get("risk_pct", 1.0))
 
         return StrategyParams(
-            sl_atr_multiple=0.52,
-            rr_ratio=3.0,
-            swing_left_bars=1,
-            swing_right_bars=int(params.get("swing_right_bars", 1)),
-            ob_atr_period=atr,
-            disp_atr_period=atr,
+            # Fixed converged values
+            require_killzone=False,
+            ob_atr_period=22,
+            disp_atr_period=13,
+            disp_threshold=2.26,
+            liq_min_touches=4,
+            swing_right_bars=4,
+            min_confluence=0.50,
+            rr_ratio=4.71,
+            max_hold_candles=256,
+            max_spread_pips=6.14,
+            risk_high_threshold=0.88,
+            risk_max_pct=4.07,
+            max_daily_drawdown_pct=2.36,
+            max_total_drawdown_pct=9.78,
+            # Normalized weights
+            weight_ms=raw_ms / total,
+            weight_fvg=raw_fvg / total,
+            weight_ob=raw_ob / total,
+            weight_displacement=raw_disp / total,
+            weight_killzone=raw_kz / total,
+            weight_pd=raw_pd / total,
+            # Optimized params from dict
+            ms_lookback_candles=int(params.get("ms_lookback_candles", 4)),
+            swing_left_bars=int(params.get("swing_left_bars", 2)),
             ob_displacement_factor=float(params.get("ob_displacement_factor", 2.0)),
-            disp_threshold=float(params.get("disp_threshold", 1.5)),
-            liq_tolerance_pct=float(params.get("liq_tolerance_pct", 0.02)),
-            liq_lookback=int(params.get("liq_lookback", 50)),
-            liq_min_touches=int(params.get("liq_min_touches", 2)),
-            weight_ms=w_s / 2,
-            weight_ob=w_s / 2,
-            weight_fvg=w_g / 2,
-            weight_displacement=w_g / 2,
-            weight_killzone=w_c / 2,
-            weight_pd=w_c / 2,
-            min_confluence=float(params.get("min_confluence", 0.4)),
-            max_hold_candles=int(params.get("max_hold_candles", 72)),
-            max_spread_pips=float(params.get("max_spread_pips", 3.0)),
-            require_killzone=bool(params.get("require_killzone", True)),
+            liq_tolerance_pct=float(params.get("liq_tolerance_pct", 0.05)),
+            liq_lookback=int(params.get("liq_lookback", 100)),
+            sl_atr_multiple=float(params.get("sl_atr_multiple", 1.5)),
             max_positions=int(params.get("max_positions", 5)),
-            risk_low_threshold=0.4,
-            risk_high_threshold=0.7,
+            risk_low_threshold=float(params.get("risk_low_threshold", 0.4)),
             risk_low_pct=risk,
             risk_medium_pct=risk,
             risk_high_pct=risk,
-            risk_max_pct=float(params.get("risk_max_pct", 2.0)),
-            max_daily_drawdown_pct=float(params.get("max_daily_drawdown_pct", 3.0)),
-            max_total_drawdown_pct=float(params.get("max_total_drawdown_pct", 10.0)),
+            max_daily_gain_pct=float(params.get("max_daily_gain_pct", 3.0)),
+            be_trigger_pct=float(params.get("be_trigger_pct", 0.0)),
+            be_offset_pct=float(params.get("be_offset_pct", 0.0)),
         )
 
     @staticmethod
@@ -368,6 +390,7 @@ class StrategyParams:
             weight_killzone=normalized["weight_killzone"],
             weight_pd=normalized["weight_pd"],
             min_confluence=float(params.get("min_confluence", 0.4)),
+            ms_lookback_candles=int(params.get("ms_lookback_candles", 1)),
             sl_atr_multiple=float(params.get("sl_atr_multiple", 1.5)),
             rr_ratio=float(params.get("rr_ratio", 2.0)),
             max_hold_candles=int(params.get("max_hold_candles", 72)),
@@ -382,6 +405,9 @@ class StrategyParams:
             risk_max_pct=float(params.get("risk_max_pct", 2.0)),
             max_daily_drawdown_pct=float(params.get("max_daily_drawdown_pct", 3.0)),
             max_total_drawdown_pct=float(params.get("max_total_drawdown_pct", 10.0)),
+            max_daily_gain_pct=float(params.get("max_daily_gain_pct", 0.0)),
+            be_trigger_pct=float(params.get("be_trigger_pct", 0.0)),
+            be_offset_pct=float(params.get("be_offset_pct", 0.0)),
         )
 
     def to_dict(self) -> dict[str, object]:

@@ -17,10 +17,12 @@ class RiskManager:
         max_daily_drawdown_pct: float = 3.0,
         max_total_drawdown_pct: float = 10.0,
         max_positions: int = 5,
+        max_daily_gain_pct: float = 0.0,
     ) -> None:
         self._max_daily_dd_pct = max_daily_drawdown_pct
         self._max_total_dd_pct = max_total_drawdown_pct
         self._max_positions = max_positions
+        self._max_daily_gain_pct = max_daily_gain_pct
 
     def is_circuit_broken(
         self,
@@ -42,6 +44,12 @@ class RiskManager:
         if current_capital > 0:
             daily_dd_pct = abs(min(daily_pnl, 0)) / current_capital * 100
             if daily_dd_pct >= self._max_daily_dd_pct:
+                return True
+
+        # Daily gain target check (lock in profits)
+        if self._max_daily_gain_pct > 0 and current_capital > 0:
+            daily_gain_pct = max(daily_pnl, 0) / current_capital * 100
+            if daily_gain_pct >= self._max_daily_gain_pct:
                 return True
 
         # Total drawdown check

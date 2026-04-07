@@ -316,10 +316,167 @@ class TestRiskManager:
         rm = RiskManager(max_total_drawdown_pct=10.0)
         assert rm.is_circuit_broken(0, 8900, 10000)
 
+    def test_daily_gain_circuit_break(self) -> None:
+        rm = RiskManager(max_daily_gain_pct=3.0)
+        # +3% of 10000 = 300 → should trigger
+        assert rm.is_circuit_broken(300, 10000, 10000)
+        # +2% → should not trigger
+        assert not rm.is_circuit_broken(200, 10000, 10000)
+
+    def test_daily_gain_disabled_by_default(self) -> None:
+        rm = RiskManager()
+        # Large gain should not trigger when disabled (default 0)
+        assert not rm.is_circuit_broken(5000, 10000, 10000)
+
     def test_can_open_position(self) -> None:
         rm = RiskManager(max_positions=3)
         assert rm.can_open_position(2)
         assert not rm.can_open_position(3)
+
+
+class TestBreakevenStop:
+    """Tests for breakeven stop-loss mechanism."""
+
+    def test_sl_moved_to_breakeven_long(self) -> None:
+        """LONG: SL moves to entry when price reaches trigger % of TP distance."""
+        precomputed = precompute(SWING_FIXTURE, "EUR/USD", "M5")
+        engine = BacktestEngine(
+            precomputed=precomputed,
+            confluence_scorer=ConfluenceScorer(),
+            entry_evaluator=EntryEvaluator(),
+            exit_evaluator=ExitEvaluator(),
+            trade_filter=TradeFilter(),
+            position_sizer=PositionSizer(),
+            risk_manager=RiskManager(),
+            be_trigger_pct=0.2,  # trigger at 20% of TP distance
+            be_offset_pct=0.0,   # exact breakeven
+        )
+        # Simulate a LONG position: entry=1.1, SL=1.09, TP=1.15
+        pos = OpenPosition(
+            trade_id="test-be",
+            instrument="EUR/USD",
+            direction=Direction.LONG,
+            entry_price=1.1,
+            entry_time=datetime(2024, 1, 1, tzinfo=UTC),
+            stop_loss=1.09,
+            take_profit=1.15,
+            size=1.0,
+            confluence_score=0.8,
+        )
+        engine._open_positions = [pos]
+        # TP dist = 0.05, 20% = 0.01, so high >= 1.11 triggers
+        candle = {
+            "time": datetime(2024, 1, 1, 0, 5, tzinfo=UTC),
+            "open": 1.105, "high": 1.112, "low": 1.104, "close": 1.11,
+        }
+        engine._check_exits(candle, 0)
+        # SL should have moved to entry (1.1)
+        assert pos.stop_loss == pytest.approx(1.1)
+        assert pos.trade_id in engine._be_applied
+
+    def test_sl_moved_with_offset_short(self) -> None:
+        """SHORT: SL moves to entry - offset when trigger reached."""
+        precomputed = precompute(SWING_FIXTURE, "EUR/USD", "M5")
+        engine = BacktestEngine(
+            precomputed=precomputed,
+            confluence_scorer=ConfluenceScorer(),
+            entry_evaluator=EntryEvaluator(),
+            exit_evaluator=ExitEvaluator(),
+            trade_filter=TradeFilter(),
+            position_sizer=PositionSizer(),
+            risk_manager=RiskManager(),
+            be_trigger_pct=0.2,
+            be_offset_pct=0.05,  # lock in 5% of TP distance
+        )
+        # SHORT: entry=1.15, SL=1.16, TP=1.10 → dist=0.05
+        pos = OpenPosition(
+            trade_id="test-be-short",
+            instrument="EUR/USD",
+            direction=Direction.SHORT,
+            entry_price=1.15,
+            entry_time=datetime(2024, 1, 1, tzinfo=UTC),
+            stop_loss=1.16,
+            take_profit=1.10,
+            size=1.0,
+            confluence_score=0.8,
+        )
+        engine._open_positions = [pos]
+        # 20% of 0.05 = 0.01, low <= 1.14 triggers
+        candle = {
+            "time": datetime(2024, 1, 1, 0, 5, tzinfo=UTC),
+            "open": 1.145, "high": 1.148, "low": 1.138, "close": 1.14,
+        }
+        engine._check_exits(candle, 0)
+        # New SL = entry - 5% of dist = 1.15 - 0.0025 = 1.1475
+        assert pos.stop_loss == pytest.approx(1.1475)
+
+    def test_be_not_applied_twice(self) -> None:
+        """BE should only be applied once per position."""
+        precomputed = precompute(SWING_FIXTURE, "EUR/USD", "M5")
+        engine = BacktestEngine(
+            precomputed=precomputed,
+            confluence_scorer=ConfluenceScorer(),
+            entry_evaluator=EntryEvaluator(),
+            exit_evaluator=ExitEvaluator(),
+            trade_filter=TradeFilter(),
+            position_sizer=PositionSizer(),
+            risk_manager=RiskManager(),
+            be_trigger_pct=0.2,
+            be_offset_pct=0.0,
+        )
+        pos = OpenPosition(
+            trade_id="test-be-once",
+            instrument="EUR/USD",
+            direction=Direction.LONG,
+            entry_price=1.1,
+            entry_time=datetime(2024, 1, 1, tzinfo=UTC),
+            stop_loss=1.09,
+            take_profit=1.15,
+            size=1.0,
+            confluence_score=0.8,
+        )
+        engine._open_positions = [pos]
+        engine._be_applied.add("test-be-once")
+        # Manually set SL to something else — should NOT be overwritten
+        pos.stop_loss = 1.095
+        candle = {
+            "time": datetime(2024, 1, 1, 0, 5, tzinfo=UTC),
+            "open": 1.105, "high": 1.112, "low": 1.104, "close": 1.11,
+        }
+        engine._check_exits(candle, 0)
+        assert pos.stop_loss == pytest.approx(1.095)  # unchanged
+
+    def test_be_disabled_when_zero(self) -> None:
+        """No BE move when be_trigger_pct=0 (default)."""
+        precomputed = precompute(SWING_FIXTURE, "EUR/USD", "M5")
+        engine = BacktestEngine(
+            precomputed=precomputed,
+            confluence_scorer=ConfluenceScorer(),
+            entry_evaluator=EntryEvaluator(),
+            exit_evaluator=ExitEvaluator(),
+            trade_filter=TradeFilter(),
+            position_sizer=PositionSizer(),
+            risk_manager=RiskManager(),
+            be_trigger_pct=0.0,
+        )
+        pos = OpenPosition(
+            trade_id="test-be-off",
+            instrument="EUR/USD",
+            direction=Direction.LONG,
+            entry_price=1.1,
+            entry_time=datetime(2024, 1, 1, tzinfo=UTC),
+            stop_loss=1.09,
+            take_profit=1.15,
+            size=1.0,
+            confluence_score=0.8,
+        )
+        engine._open_positions = [pos]
+        candle = {
+            "time": datetime(2024, 1, 1, 0, 5, tzinfo=UTC),
+            "open": 1.105, "high": 1.14, "low": 1.104, "close": 1.13,
+        }
+        engine._check_exits(candle, 0)
+        assert pos.stop_loss == pytest.approx(1.09)  # unchanged
 
 
 class TestMarginTracking:

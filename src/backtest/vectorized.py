@@ -77,6 +77,79 @@ class PrecomputedData:
     order_blocks: pl.DataFrame
     liquidity: pl.DataFrame
     displacements: pl.DataFrame
+    htf_trend: np.ndarray | None = None  # H1 trend per M5 candle
+
+
+def build_htf_trend_array(
+    m5_candles: pl.DataFrame,
+    h1_candles: pl.DataFrame,
+    swing_left_bars: int = 2,
+    swing_right_bars: int = 2,
+) -> np.ndarray:
+    """Build an array mapping each M5 candle to the current H1 trend.
+
+    Runs market structure detection on H1 candles and forward-fills
+    the trend for each M5 timestamp. An H1 bar is only visible after
+    its close (timestamp + 1 hour) to prevent look-ahead bias.
+
+    Args:
+        m5_candles: M5 candles DataFrame with a 'time' column.
+        h1_candles: H1 candles DataFrame with OHLCV columns.
+        swing_left_bars: Swing detection left bars for H1.
+        swing_right_bars: Swing detection right bars for H1.
+
+    Returns:
+        1-D numpy array of Trend string values, one per M5 candle.
+    """
+    from datetime import timedelta
+
+    import polars as pl_mod
+
+    n = len(m5_candles)
+    result = np.full(n, Trend.UNDEFINED, dtype=object)
+
+    if h1_candles.is_empty() or len(h1_candles) < 10:
+        return result
+
+    h1_breaks, _ = detect_market_structure_vectorized(
+        h1_candles, swing_left_bars, swing_right_bars,
+    )
+
+    if h1_breaks.is_empty():
+        return result
+
+    # H1 bar at time T closes at T+1h — only apply trend after close
+    h1_offset = timedelta(hours=1)
+    break_times = h1_breaks["time"].to_list()
+    break_visible_times = np.array(
+        [t.replace(tzinfo=None) + h1_offset for t in break_times],
+        dtype="datetime64[us]",
+    )
+    break_directions = h1_breaks["direction"].to_list()
+
+    # Build cumulative trend from breaks: each break sets the new trend
+    # BOS bullish / CHoCH bullish → bullish, BOS bearish / CHoCH bearish → bearish
+    trends_at_breaks = []
+    current_trend = Trend.UNDEFINED
+    for d in break_directions:
+        if d == "bullish":
+            current_trend = Trend.BULLISH
+        elif d == "bearish":
+            current_trend = Trend.BEARISH
+        trends_at_breaks.append(current_trend)
+
+    m5_times = m5_candles["time"].cast(pl_mod.Datetime("us", "UTC")).to_numpy()
+    m5_times_ns = m5_times.astype("datetime64[us]")
+
+    # For each M5 candle, find the latest H1 break that is visible
+    indices = np.searchsorted(break_visible_times, m5_times_ns, side="right") - 1
+
+    for i in range(n):
+        idx = indices[i]
+        if idx >= 0:
+            result[i] = trends_at_breaks[idx]
+
+    return result
 
 
 def precompute(
@@ -123,6 +196,7 @@ def precompute(
         params.liq_tolerance_pct,
         params.liq_lookback,
         params.liq_min_touches,
+        swings=swings,
     )
 
     displacements = detect_displacement_vectorized(

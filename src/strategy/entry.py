@@ -72,6 +72,11 @@ class EntryEvaluator:
         else:
             return None
 
+        # HTF directional filter: skip if M5 direction opposes H1 trend
+        htf_trend = context.get("htf_trend")
+        if htf_trend is not None and htf_trend != "undefined" and direction_str != htf_trend:
+            return None
+
         close = float(candle["close"])
         high = float(candle["high"])
         low = float(candle["low"])

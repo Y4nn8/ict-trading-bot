@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
@@ -35,19 +34,20 @@ from src.backtest.metrics import (
     compute_metrics,
     compute_metrics_by_source,
 )
-from src.backtest.vectorized import precompute
+from src.backtest.vectorized import build_htf_trend_array, precompute
 from src.common.config import load_config
 from src.common.db import Database
 from src.common.logging import get_logger, setup_logging
 from src.market_data.storage import CandleStorage
 from src.news.store import NewsStore
 from src.strategy.factory import build_strategy
-from src.strategy.params import StrategyParams
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import datetime
 
     from src.common.models import Trade
+    from src.strategy.params import StrategyParams
 
 load_dotenv()
 
@@ -177,13 +177,23 @@ def run_backtest(
     min_size: float = 0.5,
     avg_spread: float = 0.0,
     pip_size: float = 0.0001,
-) -> tuple[list[object], PerformanceMetrics, SourceBreakdown]:
+    min_stop_distance: float = 0.0,
+    h1_candles: pl.DataFrame | None = None,
+) -> tuple[list[Trade], PerformanceMetrics, SourceBreakdown]:
     """Run a single backtest, return trades, metrics, and source breakdown."""
     if candles.is_empty():
         empty = compute_metrics([], initial_capital)
         return [], empty, _empty_breakdown(initial_capital)
 
     precomputed = precompute(candles, instrument, "M5", params=params)
+
+    # Overlay H1 trend on M5 candles for multi-timeframe filtering
+    if h1_candles is not None and not h1_candles.is_empty():
+        precomputed.htf_trend = build_htf_trend_array(
+            precomputed.candles, h1_candles,
+            params.swing_left_bars, params.swing_right_bars,
+        )
+
     components = build_strategy(params)
 
     engine = BacktestEngine(
@@ -202,6 +212,10 @@ def run_backtest(
         avg_spread=avg_spread,
         pip_size=pip_size,
         news_events=news_events,
+        ms_lookback_candles=params.ms_lookback_candles,
+        be_trigger_pct=params.be_trigger_pct,
+        be_offset_pct=params.be_offset_pct,
+        min_stop_distance=min_stop_distance,
     )
     result = engine.run()
     metrics = compute_metrics(result.trades, initial_capital)
@@ -209,16 +223,27 @@ def run_backtest(
     return result.trades, metrics, breakdown
 
 
-def score_trial(metrics: PerformanceMetrics, max_mdd_pct: float) -> float:
-    """Composite Optuna objective score."""
-    if metrics.total_trades < 5:
+def score_trial(
+    metrics: PerformanceMetrics,
+    max_mdd_pct: float,
+    trading_days: int = 1,
+    min_trades_per_day: float = 1.0,
+) -> float:
+    """PnL-based Optuna objective with hard limits on quality metrics.
+
+    Objective: pure PnL (normalized by capital).
+    Hard rejects: too few trades, MDD too high, PF < 1.0, Sharpe < 0.
+    """
+    min_trades = max(5, int(trading_days * min_trades_per_day))
+    if metrics.total_trades < min_trades:
         return -10.0
     if metrics.max_drawdown_pct * 100 > max_mdd_pct:
         return -10.0
-    pnl_norm = metrics.total_pnl / 5000
-    sharpe = max(metrics.sharpe_ratio, 0)
-    pf = min(metrics.profit_factor, 5.0) if metrics.profit_factor > 0 else 0
-    return pnl_norm * (1 + sharpe) * (1 + pf * 0.2)
+    if metrics.profit_factor < 1.0:
+        return -10.0
+    if metrics.sharpe_ratio < 0:
+        return -10.0
+    return metrics.total_pnl / 5000
 
 
 # ---------------------------------------------------------------------------
@@ -366,12 +391,13 @@ def print_convergence(all_best_params: list[dict[str, object]]) -> None:
         if any(isinstance(v, bool) for v in values):
             agrees = len(set(values)) == 1
             label = f"{values[0]}" if agrees else " vs ".join(str(v) for v in values)
-            (converging if agrees else diverging).append((f"{key} = {label}", 0.0 if agrees else 1.0))
+            score = 0.0 if agrees else 1.0
+            (converging if agrees else diverging).append((f"{key} = {label}", score))
             continue
         if not all(isinstance(v, (int, float)) for v in values):
             continue
 
-        fvalues = [float(v) for v in values]
+        fvalues = [float(v) for v in values]  # type: ignore[arg-type]
         mean = sum(fvalues) / len(fvalues)
         spread = max(fvalues) - min(fvalues)
         cv = spread / abs(mean) if abs(mean) > 1e-9 else spread
@@ -447,6 +473,10 @@ async def run_walk_forward(
         all_news = await news_store.get_events(data_start, data_end)
         await logger.ainfo("news_loaded", count=len(all_news))
 
+        # Fetch H1 candles for multi-timeframe trend filtering
+        all_h1_candles = await storage.fetch_candles(instrument, "H1")
+        await logger.ainfo("h1_loaded", candles=len(all_h1_candles))
+
         # Instrument specs
         inst_config = config.get_instrument(instrument)
         leverage = float(inst_config.leverage) if inst_config else 30.0
@@ -454,6 +484,7 @@ async def run_walk_forward(
         min_size = float(inst_config.min_size) if inst_config else 0.5
         pip_size = float(inst_config.pip_size) if inst_config else 0.0001
         avg_spread = float(inst_config.avg_spread) * pip_size if inst_config else 0.0
+        min_stop_distance = float(inst_config.min_stop_distance) if inst_config else 0.0
         await logger.ainfo(
             "instrument_specs",
             instrument=instrument,
@@ -462,6 +493,7 @@ async def run_walk_forward(
             min_size=min_size,
             pip_size=pip_size,
             avg_spread_price=avg_spread,
+            min_stop_distance=min_stop_distance,
         )
 
         # Generate windows
@@ -497,6 +529,7 @@ async def run_walk_forward(
             "min_size": min_size,
             "avg_spread": avg_spread,
             "pip_size": pip_size,
+            "min_stop_distance": min_stop_distance,
         }
 
         # Run each window
@@ -519,6 +552,15 @@ async def run_walk_forward(
                 (pl.col("time") >= test_start) & (pl.col("time") < test_end)
             )
 
+            # H1 candles for HTF trend — include extra lookback for structure detection
+            h1_lookback = timedelta(days=30)
+            train_h1 = all_h1_candles.filter(
+                (pl.col("time") >= train_start - h1_lookback) & (pl.col("time") < train_end)
+            ) if not all_h1_candles.is_empty() else all_h1_candles
+            test_h1 = all_h1_candles.filter(
+                (pl.col("time") >= test_start - h1_lookback) & (pl.col("time") < test_end)
+            ) if not all_h1_candles.is_empty() else all_h1_candles
+
             train_news = [
                 n for n in all_news
                 if train_start <= n.get("time", data_start) < train_end
@@ -528,25 +570,33 @@ async def run_walk_forward(
                 if test_start <= n.get("time", data_start) < test_end
             ]
 
-            print(f"  Train candles: {len(train_candles)}, news: {len(train_news)}")
-            print(f"  Test candles:  {len(test_candles)}, news: {len(test_news)}")
+            n_tr, n_tn, n_th = len(train_candles), len(train_news), len(train_h1)
+            n_te, n_en, n_eh = len(test_candles), len(test_news), len(test_h1)
+            print(f"  Train: {n_tr} candles, {n_tn} news, {n_th} H1")
+            print(f"  Test:  {n_te} candles, {n_en} news, {n_eh} H1")
 
             if train_candles.is_empty() or test_candles.is_empty():
                 print("  SKIP: insufficient data")
                 continue
+
+            # Count trading days in train window
+            train_trading_days = train_candles["time"].dt.date().n_unique()
 
             # Optimize on train
             def objective(
                 trial: optuna.Trial,
                 _candles: pl.DataFrame = train_candles,
                 _news: list[dict[str, object]] = train_news,
+                _h1: pl.DataFrame = train_h1,
                 _leverage: float = leverage,
+                _trading_days: int = train_trading_days,
             ) -> float:
                 params = param_builder(trial)
                 _, metrics, _ = run_backtest(
                     _candles, instrument, params, _news, **bt_kwargs,
+                    h1_candles=_h1,
                 )
-                return score_trial(metrics, max_mdd_pct)
+                return score_trial(metrics, max_mdd_pct, _trading_days)
 
             study = optuna.create_study(direction="maximize")
             optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -570,9 +620,11 @@ async def run_walk_forward(
             # Evaluate on train and test
             _, train_metrics, _ = run_backtest(
                 train_candles, instrument, best_params, train_news, **bt_kwargs,
+                h1_candles=train_h1,
             )
             _, test_metrics, test_breakdown = run_backtest(
                 test_candles, instrument, best_params, test_news, **bt_kwargs,
+                h1_candles=test_h1,
             )
             test_results.append(test_metrics)
             all_test_breakdowns.append(test_breakdown)

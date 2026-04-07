@@ -121,6 +121,8 @@ async def run_backtest(
             min_size=min_size,
             avg_spread=avg_spread,
             news_events=news_events,
+            be_trigger_pct=params.be_trigger_pct,
+            be_offset_pct=params.be_offset_pct,
         )
         result = engine.run()
 

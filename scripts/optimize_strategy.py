@@ -106,6 +106,8 @@ def run_single_backtest(
         value_per_point=value_per_point,
         min_size=min_size,
         avg_spread=avg_spread,
+        be_trigger_pct=params.be_trigger_pct,
+        be_offset_pct=params.be_offset_pct,
     )
     result = engine.run()
 
@@ -207,6 +209,8 @@ async def optimize(
         value_per_point=value_per_point,
         min_size=min_size,
         avg_spread=avg_spread,
+        be_trigger_pct=best_params.be_trigger_pct,
+        be_offset_pct=best_params.be_offset_pct,
     )
     result = engine.run()
     report = generate_report(result.trades, initial_capital)
