@@ -59,8 +59,8 @@ def simulate_fill(
             slippage=0.0,
         )
 
-    # Spread cost: buy at ask (higher), sell at bid (lower)
-    spread_adjustment = spread / 2 if is_buy else -spread / 2
+    # Bid-based candles: buy at ask (bid + spread), sell at bid (no adjustment)
+    spread_adjustment = spread if is_buy else 0.0
 
     # Random slippage: 0 to max, scaled by volatility
     max_slip = config.slippage_max_pips * pip_size * volatility_factor

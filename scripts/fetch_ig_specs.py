@@ -81,7 +81,7 @@ def main() -> None:
             "asset_class": r["asset_class"],
             "leverage": r["leverage"],
             "min_size": r["min_deal_size"],
-            "size_step": r["min_step_distance"],
+            "min_stop_distance": r["min_step_distance"],
             "pip_size": r["one_pip_means"],
             "value_per_point": r["value_of_one_pip"] or 1.0,
         }

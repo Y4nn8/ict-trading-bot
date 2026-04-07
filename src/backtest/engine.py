@@ -390,7 +390,10 @@ class BacktestEngine:
         high = float(candle["high"])
         low = float(candle["low"])
         time = candle["time"]
-        half_spread = self._avg_spread / 2
+        spread = self._avg_spread
+        # Bid-based candles: ask = bid + spread
+        ask_high = high + spread
+        ask_low = low + spread
 
         for pos in self._open_positions:
             # Move SL to breakeven if trigger reached
@@ -402,7 +405,7 @@ class BacktestEngine:
                 if pos.direction == Direction.LONG:
                     progress = high - pos.entry_price
                 else:
-                    progress = pos.entry_price - low
+                    progress = pos.entry_price - ask_low
                 if tp_dist > 0 and progress / tp_dist >= self._be_trigger_pct:
                     if pos.direction == Direction.LONG:
                         new_sl = pos.entry_price + tp_dist * self._be_offset_pct
@@ -411,7 +414,7 @@ class BacktestEngine:
                         new_sl = min(new_sl, max_sl)
                     else:
                         new_sl = pos.entry_price - tp_dist * self._be_offset_pct
-                        min_sl = float(candle["close"]) + self._min_stop_distance
+                        min_sl = float(candle["close"]) + spread + self._min_stop_distance
                         new_sl = max(new_sl, min_sl)
                     # Only move SL if it improves the position (tighter)
                     improves = (
@@ -425,26 +428,26 @@ class BacktestEngine:
             exit_result = self._exit.evaluate(pos, candle)
 
             if exit_result is not None:
-                # Time-based exit: apply spread to close price
+                # Time-based exit: LONG sells at bid, SHORT buys at ask
                 if pos.direction == Direction.LONG:
-                    exit_price = exit_result.exit_price - half_spread
+                    exit_price = exit_result.exit_price
                 else:
-                    exit_price = exit_result.exit_price + half_spread
+                    exit_price = exit_result.exit_price + spread
             elif pos.direction == Direction.LONG:
-                # LONG exits sell at bid = price - spread/2
+                # LONG exits sell at bid (candle prices are already bid)
                 if low <= pos.stop_loss:
-                    exit_price = pos.stop_loss - half_spread
+                    exit_price = pos.stop_loss
                 elif high >= pos.take_profit:
-                    exit_price = pos.take_profit - half_spread
+                    exit_price = pos.take_profit
                 else:
                     remaining.append(pos)
                     continue
             elif pos.direction == Direction.SHORT:
-                # SHORT exits buy at ask = price + spread/2
-                if high >= pos.stop_loss:
-                    exit_price = pos.stop_loss + half_spread
-                elif low <= pos.take_profit:
-                    exit_price = pos.take_profit + half_spread
+                # SHORT exits buy at ask; trigger on ask prices
+                if ask_high >= pos.stop_loss:
+                    exit_price = pos.stop_loss
+                elif ask_low <= pos.take_profit:
+                    exit_price = pos.take_profit
                 else:
                     remaining.append(pos)
                     continue
@@ -503,7 +506,7 @@ class BacktestEngine:
         applies to all instruments.
         """
         raw_close = float(candle["close"])
-        half_spread = self._avg_spread / 2
+        spread = self._avg_spread
         time = candle["time"]
         remaining: list[OpenPosition] = []
 
@@ -516,11 +519,8 @@ class BacktestEngine:
                 or (sentiment == "bearish" and pos.direction == Direction.LONG)
             )
             if should_close:
-                # Apply spread: LONG sells at bid, SHORT buys at ask
-                if pos.direction == Direction.LONG:
-                    close_price = raw_close - half_spread
-                else:
-                    close_price = raw_close + half_spread
+                # Bid-based candles: LONG sells at bid, SHORT buys at ask
+                close_price = raw_close if pos.direction == Direction.LONG else raw_close + spread
                 pnl = self._compute_pnl(pos, close_price)
                 price_delta = abs(close_price - pos.entry_price)
                 pnl_pct = (price_delta / pos.entry_price) * 100 if pos.entry_price > 0 else 0
