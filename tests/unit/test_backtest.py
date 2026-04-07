@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from src.backtest.engine import BacktestEngine, OpenPosition
-from src.backtest.metrics import compute_metrics
+from src.backtest.metrics import compute_metrics, compute_metrics_by_source
 from src.backtest.report import format_report, generate_report
 from src.backtest.simulator import SimulationConfig, compute_swap_cost, simulate_fill
 from src.backtest.vectorized import PrecomputedData, precompute
@@ -611,3 +611,63 @@ class TestMarginTracking:
         assert result.margin_rejected >= 0
         assert result.margin_capped >= 0
         assert result.peak_margin_usage_pct >= 0
+
+
+class TestComputeMetricsBySource:
+    """Tests for compute_metrics_by_source."""
+
+    def _make_trade(
+        self, pnl: float, trigger_source: str = "ict"
+    ) -> Trade:
+        return Trade(
+            opened_at=datetime(2024, 1, 15, 10, 0, tzinfo=UTC),
+            closed_at=datetime(2024, 1, 15, 11, 0, tzinfo=UTC),
+            instrument="EUR/USD",
+            direction=Direction.LONG,
+            entry_price=1.08,
+            exit_price=1.08 + pnl / 100,
+            stop_loss=1.07,
+            take_profit=1.09,
+            size=1.0,
+            pnl=pnl,
+            pnl_percent=pnl,
+            r_multiple=pnl / 10 if pnl != 0 else 0,
+            setup_type={"trigger_source": trigger_source},
+            is_backtest=True,
+        )
+
+    def test_all_ict_trades(self) -> None:
+        trades = [self._make_trade(100), self._make_trade(-50)]
+        result = compute_metrics_by_source(trades)
+        assert result.ict_trade_count == 2
+        assert result.news_trade_count == 0
+        assert result.ict.total_pnl == pytest.approx(50, abs=1)
+
+    def test_all_news_trades(self) -> None:
+        trades = [self._make_trade(200, "news")]
+        result = compute_metrics_by_source(trades)
+        assert result.ict_trade_count == 0
+        assert result.news_trade_count == 1
+        assert result.news.total_pnl == pytest.approx(200, abs=1)
+
+    def test_mixed_trades(self) -> None:
+        trades = [
+            self._make_trade(100, "ict"),
+            self._make_trade(200, "news"),
+            self._make_trade(-30, "ict"),
+        ]
+        result = compute_metrics_by_source(trades)
+        assert result.ict_trade_count == 2
+        assert result.news_trade_count == 1
+
+    def test_default_to_ict_when_no_setup_type(self) -> None:
+        trade = self._make_trade(50)
+        trade.setup_type = None
+        result = compute_metrics_by_source([trade])
+        assert result.ict_trade_count == 1
+        assert result.news_trade_count == 0
+
+    def test_empty_trades(self) -> None:
+        result = compute_metrics_by_source([])
+        assert result.ict_trade_count == 0
+        assert result.news_trade_count == 0

@@ -14,7 +14,7 @@ from src.strategy.params import StrategyParams
 if __name__ == "__main__":
     run_walk_forward_cli(
         param_builder=StrategyParams.from_optuna_trial_reduced,
-        param_reconstructor=StrategyParams.from_dict,
+        param_reconstructor=StrategyParams.from_reduced_dict,
         description="Walk-forward validation (reduced, ~15 params)",
         default_trials=200,
     )

@@ -216,6 +216,60 @@ class StrategyParams:
         )
 
     @staticmethod
+    def from_reduced_dict(params: dict[str, Any]) -> StrategyParams:
+        """Reconstruct params from a reduced trial's params dict.
+
+        Mirrors from_optuna_trial_reduced: applies the same fixed values
+        (equal weights, sl_atr_multiple=0.52, swing_left_bars=1) and
+        grouped risk_pct.
+
+        Args:
+            params: Dict from reduced trial's best_trial.params.
+
+        Returns:
+            StrategyParams instance.
+        """
+        risk = float(params.get("risk_pct", 1.0))
+        return StrategyParams(
+            # Fixed converged values (same as from_optuna_trial_reduced)
+            weight_fvg=1 / 6,
+            weight_ob=1 / 6,
+            weight_ms=1 / 6,
+            weight_displacement=1 / 6,
+            weight_killzone=1 / 6,
+            weight_pd=1 / 6,
+            swing_left_bars=1,
+            sl_atr_multiple=0.52,
+            risk_low_threshold=0.4,
+            risk_high_threshold=0.7,
+            # Optimized params from dict
+            swing_right_bars=int(params.get("swing_right_bars", 2)),
+            ob_displacement_factor=float(params.get("ob_displacement_factor", 2.0)),
+            ob_atr_period=int(params.get("ob_atr_period", 14)),
+            disp_atr_period=int(params.get("disp_atr_period", 14)),
+            disp_threshold=float(params.get("disp_threshold", 1.5)),
+            liq_tolerance_pct=float(params.get("liq_tolerance_pct", 0.02)),
+            liq_lookback=int(params.get("liq_lookback", 50)),
+            liq_min_touches=int(params.get("liq_min_touches", 2)),
+            min_confluence=float(params.get("min_confluence", 0.4)),
+            ms_lookback_candles=int(params.get("ms_lookback_candles", 1)),
+            rr_ratio=float(params.get("rr_ratio", 2.0)),
+            max_hold_candles=int(params.get("max_hold_candles", 72)),
+            max_spread_pips=float(params.get("max_spread_pips", 3.0)),
+            require_killzone=bool(params.get("require_killzone", True)),
+            max_positions=int(params.get("max_positions", 5)),
+            risk_low_pct=risk,
+            risk_medium_pct=risk,
+            risk_high_pct=risk,
+            risk_max_pct=float(params.get("risk_max_pct", 2.0)),
+            max_daily_drawdown_pct=float(params.get("max_daily_drawdown_pct", 3.0)),
+            max_total_drawdown_pct=float(params.get("max_total_drawdown_pct", 10.0)),
+            max_daily_gain_pct=float(params.get("max_daily_gain_pct", 3.0)),
+            be_trigger_pct=float(params.get("be_trigger_pct", 0.0)),
+            be_offset_pct=float(params.get("be_offset_pct", 0.0)),
+        )
+
+    @staticmethod
     def from_optuna_trial_xauusd(trial: optuna.Trial) -> StrategyParams:
         """Create params with converged values fixed from 200-trial analysis.
 

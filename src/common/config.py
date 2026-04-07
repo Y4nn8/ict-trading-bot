@@ -55,6 +55,7 @@ class InstrumentConfig(BaseModel):
     asset_class: str
     leverage: int
     min_size: float = 0.5
+    size_step: float = 0.5  # Min increment for position size (from IG minStepDistance)
     value_per_point: float = 1.0
     point_currency: str = "EUR"  # Currency of the value_per_point
     pip_size: float = 0.0001  # Price value of 1 pip (0.0001 for forex, 1.0 for indices)

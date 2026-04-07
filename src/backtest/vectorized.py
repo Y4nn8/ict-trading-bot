@@ -56,9 +56,13 @@ def _compute_atr_column(candles: pl.DataFrame, period: int = 14) -> pl.DataFrame
         ),
     )
 
-    # Rolling mean of TR
-    for i in range(period, len(tr)):
-        atr[i + 1] = float(np.mean(tr[i - period + 1 : i + 1]))
+    # Rolling mean of TR (vectorized).
+    # tr[0] corresponds to candle index 1. First ATR at candle index `period`
+    # uses tr[0:period].
+    if len(tr) >= period:
+        kernel = np.ones(period, dtype=float) / period
+        rolling_atr = np.convolve(tr, kernel, mode="valid")  # length = len(tr) - period + 1
+        atr[period : period + len(rolling_atr)] = rolling_atr
 
     return candles.with_columns(pl_mod.Series("atr", atr))
 

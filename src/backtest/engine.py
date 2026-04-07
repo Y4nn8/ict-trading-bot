@@ -452,9 +452,14 @@ class BacktestEngine:
 
             # Close the trade
             pnl = self._compute_pnl(pos, exit_price)
-            pnl_pct = (pnl / (pos.entry_price * pos.size)) * 100 if pos.size > 0 else 0
+            price_delta = abs(exit_price - pos.entry_price)
+            pnl_pct = (price_delta / pos.entry_price) * 100 if pos.entry_price > 0 else 0
+            if pnl < 0:
+                pnl_pct = -pnl_pct
             risk = abs(pos.entry_price - pos.stop_loss)
-            r_multiple = pnl / (risk * pos.size) if risk > 0 and pos.size > 0 else 0
+            r_multiple = (price_delta / risk) if risk > 0 else 0
+            if pnl < 0:
+                r_multiple = -r_multiple
 
             trade = Trade(
                 opened_at=pos.entry_time,
@@ -514,15 +519,14 @@ class BacktestEngine:
                 else:
                     close_price = raw_close + half_spread
                 pnl = self._compute_pnl(pos, close_price)
-                pnl_pct = (
-                    (pnl / (pos.entry_price * pos.size)) * 100
-                    if pos.size > 0
-                    else 0
-                )
+                price_delta = abs(close_price - pos.entry_price)
+                pnl_pct = (price_delta / pos.entry_price) * 100 if pos.entry_price > 0 else 0
+                if pnl < 0:
+                    pnl_pct = -pnl_pct
                 risk = abs(pos.entry_price - pos.stop_loss)
-                r_multiple = (
-                    pnl / (risk * pos.size) if risk > 0 and pos.size > 0 else 0
-                )
+                r_multiple = (price_delta / risk) if risk > 0 else 0
+                if pnl < 0:
+                    r_multiple = -r_multiple
 
                 self._closed_trades.append(Trade(
                     opened_at=pos.entry_time,

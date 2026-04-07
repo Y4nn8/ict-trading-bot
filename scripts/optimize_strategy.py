@@ -68,6 +68,7 @@ def run_single_backtest(
     value_per_point: float = 1.0,
     min_size: float = 0.5,
     avg_spread: float = 0.0,
+    pip_size: float = 0.0001,
 ) -> float:
     """Run one backtest and return a composite score.
 
@@ -106,6 +107,7 @@ def run_single_backtest(
         value_per_point=value_per_point,
         min_size=min_size,
         avg_spread=avg_spread,
+        pip_size=pip_size,
         be_trigger_pct=params.be_trigger_pct,
         be_offset_pct=params.be_offset_pct,
     )
@@ -165,7 +167,7 @@ async def optimize(
         params = StrategyParams.from_optuna_trial(trial)
         return run_single_backtest(
             candles, instrument, params, initial_capital, max_mdd_pct, leverage,
-            value_per_point, min_size, avg_spread,
+            value_per_point, min_size, avg_spread, pip_size,
         )
 
     study = optuna.create_study(
@@ -209,6 +211,7 @@ async def optimize(
         value_per_point=value_per_point,
         min_size=min_size,
         avg_spread=avg_spread,
+        pip_size=pip_size,
         be_trigger_pct=best_params.be_trigger_pct,
         be_offset_pct=best_params.be_offset_pct,
     )
