@@ -227,11 +227,12 @@ def score_trial(
     max_mdd_pct: float,
     trading_days: int = 1,
     min_trades_per_day: float = 1.0,
+    initial_capital: float = 5000.0,
 ) -> float:
-    """PnL-based Optuna objective with hard limits on quality metrics.
+    """Composite Optuna objective: PnL * Sharpe * n_trades.
 
-    Objective: pure PnL (normalized by capital).
-    Hard rejects: too few trades, MDD too high, PF < 1.0, Sharpe < 0.
+    Rewards strategies that are profitable, consistent (high Sharpe),
+    AND active (many trades). Hard rejects filter out degenerate trials.
     """
     min_trades = max(5, int(trading_days * min_trades_per_day))
     if metrics.total_trades < min_trades:
@@ -242,7 +243,8 @@ def score_trial(
         return -10.0
     if metrics.sharpe_ratio < 0:
         return -10.0
-    return metrics.total_pnl / 5000
+    pnl_norm = metrics.total_pnl / initial_capital
+    return pnl_norm * metrics.sharpe_ratio * metrics.total_trades
 
 
 # ---------------------------------------------------------------------------
@@ -286,10 +288,29 @@ def print_window_results(
 def print_summary(
     test_results: list[PerformanceMetrics],
     all_test_breakdowns: list[SourceBreakdown],
+    windows: list[tuple[Any, Any, Any, Any]] | None = None,
 ) -> None:
     """Print aggregated walk-forward summary."""
     if not test_results:
         return
+
+    # Per-window detail table
+    print(f"\n{'='*60}")
+    print("PER-WINDOW OOS RESULTS")
+    print(f"{'='*60}")
+    header = (f"  {'Window':<8} {'Dates':<25} {'Trades':>6} "
+              f"{'PnL':>9} {'WR':>6} {'PF':>6} {'Sharpe':>7} {'MDD':>6}")
+    print(header)
+    print(f"  {'-'*len(header.strip())}")
+    for i, m in enumerate(test_results):
+        if windows and i < len(windows):
+            dates = f"{windows[i][2].date()} → {windows[i][3].date()}"
+        else:
+            dates = ""
+        pnl_str = f"{m.total_pnl:+.0f}"
+        print(f"  W{i+1:<7} {dates:<25} {m.total_trades:>6} {pnl_str:>9} "
+              f"{m.win_rate*100:>5.1f}% {m.profit_factor:>5.2f} "
+              f"{m.sharpe_ratio:>7.2f} {m.max_drawdown_pct*100:>5.1f}%")
 
     print(f"\n{'='*60}")
     print("WALK-FORWARD SUMMARY (out-of-sample only)")
@@ -422,6 +443,42 @@ def print_convergence(all_best_params: list[dict[str, object]]) -> None:
 # Main walk-forward loop
 # ---------------------------------------------------------------------------
 
+def _median_params(
+    trials: list[optuna.trial.FrozenTrial],
+    top_n: int,
+) -> dict[str, Any]:
+    """Compute median of params from top N trials.
+
+    For numeric params, takes the median. For categorical params,
+    takes the most common value.
+
+    Args:
+        trials: Sorted trials (best first).
+        top_n: Number of top trials to use.
+
+    Returns:
+        Dict of median parameter values.
+    """
+    import statistics
+
+    top = trials[:top_n]
+    keys = top[0].params.keys()
+    result: dict[str, Any] = {}
+    for key in keys:
+        values = [t.params[key] for t in top]
+        if all(isinstance(v, bool) for v in values):
+            result[key] = statistics.mode(values)
+        elif all(isinstance(v, (int, float)) for v in values):
+            median_val = statistics.median(values)
+            if all(isinstance(v, int) for v in values):
+                result[key] = round(median_val)
+            else:
+                result[key] = median_val
+        else:
+            result[key] = statistics.mode(values)
+    return result
+
+
 async def run_walk_forward(
     instrument: str,
     train_months: int,
@@ -432,6 +489,7 @@ async def run_walk_forward(
     param_builder: Callable[[optuna.Trial], StrategyParams],
     param_reconstructor: Callable[[dict[str, Any]], StrategyParams],
     test_weeks: int | None = None,
+    top_n_median: int = 0,
 ) -> None:
     """Run walk-forward validation with Optuna optimization.
 
@@ -445,6 +503,7 @@ async def run_walk_forward(
         param_builder: Creates StrategyParams from an Optuna trial.
         param_reconstructor: Rebuilds StrategyParams from best trial params dict.
         test_weeks: Test window in weeks (overrides test_months).
+        top_n_median: If > 0, use median of top N trials instead of best trial.
     """
     config = load_config()
     setup_logging(config.logging.level, json_format=False)
@@ -597,7 +656,8 @@ async def run_walk_forward(
                     _candles, instrument, params, _news, **bt_kwargs,
                     h1_candles=_h1,
                 )
-                return score_trial(metrics, max_mdd_pct, _trading_days)
+                return score_trial(metrics, max_mdd_pct, _trading_days,
+                                   initial_capital=initial_capital)
 
             study = optuna.create_study(direction="maximize")
             optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -609,14 +669,31 @@ async def run_walk_forward(
 
             study.optimize(objective, n_trials=trials_per_window, show_progress_bar=True)
 
-            prev_best_trial_params = study.best_trial.params
-            best_params = param_reconstructor(study.best_trial.params)
-            all_best_params.append(study.best_trial.params)
+            # Select params: median of top N or single best
+            viable = [t for t in study.trials
+                      if t.value is not None and t.value > -10.0]
+            viable.sort(key=lambda t: t.value or 0.0, reverse=True)
 
-            best_trial = study.best_trial
-            print(f"\n  Best params (trial #{best_trial.number}, score={best_trial.value:.4f}):")
-            for key, value in sorted(best_trial.params.items()):
-                print(f"    {key}: {value}")
+            if top_n_median > 0 and len(viable) >= top_n_median:
+                chosen_params = _median_params(viable, top_n_median)
+                best_params = param_reconstructor(chosen_params)
+                best_score = viable[0].value
+                print(f"\n  Median of top {top_n_median} trials "
+                      f"(best score={best_score:.4f}, "
+                      f"{len(viable)} viable):")
+                for key, value in sorted(chosen_params.items()):
+                    print(f"    {key}: {value}")
+            else:
+                chosen_params = study.best_trial.params
+                best_params = param_reconstructor(chosen_params)
+                best_trial = study.best_trial
+                print(f"\n  Best params (trial #{best_trial.number}, "
+                      f"score={best_trial.value:.4f}):")
+                for key, value in sorted(chosen_params.items()):
+                    print(f"    {key}: {value}")
+
+            prev_best_trial_params = chosen_params
+            all_best_params.append(chosen_params)
 
             # Evaluate on train and test
             _, train_metrics, _ = run_backtest(
@@ -633,7 +710,7 @@ async def run_walk_forward(
             print_window_results(test_metrics, test_breakdown, train_metrics)
 
         # Aggregated reports
-        print_summary(test_results, all_test_breakdowns)
+        print_summary(test_results, all_test_breakdowns, windows)
         print_convergence(all_best_params)
 
     finally:
@@ -668,6 +745,8 @@ def run_walk_forward_cli(
     parser.add_argument("--max-mdd", type=float, default=20.0)
     parser.add_argument("--test-weeks", type=int, default=None,
                         help="Test period in weeks (overrides --test-months)")
+    parser.add_argument("--top-n", type=int, default=0,
+                        help="Use median of top N trials instead of best (0=off)")
 
     args = parser.parse_args()
     asyncio.run(run_walk_forward(
@@ -676,4 +755,5 @@ def run_walk_forward_cli(
         param_builder=param_builder,
         param_reconstructor=param_reconstructor,
         test_weeks=args.test_weeks,
+        top_n_median=args.top_n,
     ))
