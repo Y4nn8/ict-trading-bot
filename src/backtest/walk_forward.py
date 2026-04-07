@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
@@ -48,8 +49,6 @@ if TYPE_CHECKING:
 
     from src.common.models import Trade
     from src.strategy.params import StrategyParams
-
-load_dotenv()
 
 logger = get_logger(__name__)
 
@@ -393,6 +392,40 @@ def _print_source_breakdown(breakdowns: list[SourceBreakdown]) -> None:
           f"{pnl_news/pnl_total*100 if pnl_total else 0:>11.1f}%")
 
 
+def _print_compare_table(
+    compare_results: dict[str, list[PerformanceMetrics]],
+) -> None:
+    """Print comparison of different param selection strategies."""
+    print(f"\n{'='*60}")
+    print("PARAM SELECTION COMPARISON (out-of-sample)")
+    print(f"{'='*60}")
+    header = (f"  {'Method':<10} {'Trades':>6} {'PnL':>9} {'WR':>6} "
+              f"{'PF':>6} {'Sharpe':>7} {'MDD':>6} {'Win W':>6}")
+    print(header)
+    print(f"  {'-'*len(header.strip())}")
+
+    for label, results in compare_results.items():
+        if not results:
+            continue
+        total_trades = sum(m.total_trades for m in results)
+        total_pnl = sum(m.total_pnl for m in results)
+        avg_wr = sum(m.win_rate for m in results) / len(results)
+        finite_pfs = [
+            m.profit_factor for m in results
+            if m.profit_factor != float("inf")
+        ]
+        avg_pf = sum(finite_pfs) / len(finite_pfs) if finite_pfs else 0.0
+        avg_sharpe = sum(m.sharpe_ratio for m in results) / len(results)
+        worst_mdd = max(m.max_drawdown_pct for m in results)
+        profitable = sum(1 for m in results if m.total_pnl > 0)
+        print(
+            f"  {label:<10} {total_trades:>6} {total_pnl:>+9.0f} "
+            f"{avg_wr*100:>5.1f}% {avg_pf:>5.2f} "
+            f"{avg_sharpe:>7.2f} {worst_mdd*100:>5.1f}% "
+            f"{profitable}/{len(results)}"
+        )
+
+
 def print_convergence(all_best_params: list[dict[str, object]]) -> None:
     """Print parameter convergence analysis."""
     if len(all_best_params) < 2:
@@ -460,6 +493,7 @@ def _median_params(
         Dict of median parameter values.
     """
     import statistics
+    from collections import Counter
 
     top = trials[:top_n]
     keys = top[0].params.keys()
@@ -467,7 +501,7 @@ def _median_params(
     for key in keys:
         values = [t.params[key] for t in top]
         if all(isinstance(v, bool) for v in values):
-            result[key] = statistics.mode(values)
+            result[key] = Counter(values).most_common(1)[0][0]
         elif all(isinstance(v, (int, float)) for v in values):
             median_val = statistics.median(values)
             if all(isinstance(v, int) for v in values):
@@ -475,7 +509,7 @@ def _median_params(
             else:
                 result[key] = median_val
         else:
-            result[key] = statistics.mode(values)
+            result[key] = Counter(values).most_common(1)[0][0]
     return result
 
 
@@ -490,6 +524,7 @@ async def run_walk_forward(
     param_reconstructor: Callable[[dict[str, Any]], StrategyParams],
     test_weeks: int | None = None,
     top_n_median: int = 0,
+    compare_top_n: list[int] | None = None,
 ) -> None:
     """Run walk-forward validation with Optuna optimization.
 
@@ -504,6 +539,8 @@ async def run_walk_forward(
         param_reconstructor: Rebuilds StrategyParams from best trial params dict.
         test_weeks: Test window in weeks (overrides test_months).
         top_n_median: If > 0, use median of top N trials instead of best trial.
+        compare_top_n: If set, evaluate multiple strategies (best + median-N)
+            on each OOS window and print a comparison table.
     """
     config = load_config()
     setup_logging(config.logging.level, json_format=False)
@@ -596,6 +633,9 @@ async def run_walk_forward(
         test_results: list[PerformanceMetrics] = []
         all_test_breakdowns: list[SourceBreakdown] = []
         all_best_params: list[dict[str, object]] = []
+        compare_results: dict[str, list[PerformanceMetrics]] = (
+            defaultdict(list) if compare_top_n else {}
+        )
         prev_best_trial_params: dict[str, object] | None = None
 
         for i, (train_start, train_end, test_start, test_end) in enumerate(windows):
@@ -709,9 +749,33 @@ async def run_walk_forward(
 
             print_window_results(test_metrics, test_breakdown, train_metrics)
 
+            # Compare multiple top-N strategies on OOS
+            if compare_top_n and viable:
+                variants = [("best", 0)] + [
+                    (f"med-{n}", n) for n in compare_top_n
+                ]
+                for label, n in variants:
+                    if n == 0:
+                        vparams = param_reconstructor(viable[0].params)
+                    elif len(viable) >= n:
+                        vparams = param_reconstructor(
+                            _median_params(viable, n),
+                        )
+                    else:
+                        continue
+                    _, vm, _vb = run_backtest(
+                        test_candles, instrument, vparams,
+                        test_news, **bt_kwargs, h1_candles=test_h1,
+                    )
+                    compare_results[label].append(vm)
+
         # Aggregated reports
         print_summary(test_results, all_test_breakdowns, windows)
         print_convergence(all_best_params)
+
+        # Comparison table
+        if compare_top_n and compare_results:
+            _print_compare_table(compare_results)
 
     finally:
         await db.disconnect()
@@ -735,6 +799,7 @@ def run_walk_forward_cli(
         description: CLI description.
         default_trials: Default number of Optuna trials per window.
     """
+    load_dotenv()
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--instrument", type=str, default="EUR/USD")
     parser.add_argument("--train-months", type=int, default=4)
@@ -747,8 +812,11 @@ def run_walk_forward_cli(
                         help="Test period in weeks (overrides --test-months)")
     parser.add_argument("--top-n", type=int, default=0,
                         help="Use median of top N trials instead of best (0=off)")
+    parser.add_argument("--compare", action="store_true",
+                        help="Compare best vs median-5/10/20 on OOS")
 
     args = parser.parse_args()
+    compare = [5, 10, 20] if args.compare else None
     asyncio.run(run_walk_forward(
         args.instrument, args.train_months, args.test_months,
         args.trials, args.capital, args.max_mdd,
@@ -756,4 +824,5 @@ def run_walk_forward_cli(
         param_reconstructor=param_reconstructor,
         test_weeks=args.test_weeks,
         top_n_median=args.top_n,
+        compare_top_n=compare,
     ))

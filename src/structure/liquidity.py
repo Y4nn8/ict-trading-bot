@@ -49,13 +49,13 @@ def detect_liquidity_vectorized(
     highs, and swing lows to swing lows.
 
     Args:
-        df: DataFrame with columns: time, high, low (used as fallback).
+        df: DataFrame with columns: time, high, low (currently unused,
+            kept for API compatibility).
         tolerance_pct: Percentage tolerance for considering levels "equal".
         lookback: Number of preceding swing points to compare against.
         min_touches: Minimum number of touches to form a liquidity pool.
         swings: Pre-computed swings DataFrame with columns:
-                time, price, swing_type, index.
-                If None or empty, returns an empty DataFrame.
+                time, price, swing_type, index. Required.
 
     Returns:
         DataFrame with columns: time, price, liquidity_type, touch_count, index.
