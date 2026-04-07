@@ -92,8 +92,10 @@ async def run_backtest(
         leverage = float(inst_config.leverage) if inst_config else 30.0
         value_per_point = float(inst_config.value_per_point) if inst_config else 1.0
         min_size = float(inst_config.min_size) if inst_config else 0.5
+        size_step = float(inst_config.size_step) if inst_config else 0.5
         pip_size = float(inst_config.pip_size) if inst_config else 0.0001
         avg_spread = float(inst_config.avg_spread) * pip_size if inst_config else 0.0
+        min_stop_distance = float(inst_config.min_stop_distance) * pip_size if inst_config else 0.0
 
         # Build strategy components from params
         components = build_strategy(params)
@@ -119,8 +121,10 @@ async def run_backtest(
             leverage=leverage,
             value_per_point=value_per_point,
             min_size=min_size,
+            size_step=size_step,
             avg_spread=avg_spread,
             pip_size=pip_size,
+            min_stop_distance=min_stop_distance,
             news_events=news_events,
             be_trigger_pct=params.be_trigger_pct,
             be_offset_pct=params.be_offset_pct,

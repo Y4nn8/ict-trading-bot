@@ -1,7 +1,8 @@
 """Walk-forward validation with anti-overfitting measures.
 
-Uses median of top N trials instead of single best, with 2-week
-test windows by default for more statistically significant OOS results.
+Supports median of top N trials (via --top-n) instead of single best,
+and weekly test windows (via --test-weeks) for more statistically
+significant OOS results. Both are opt-in via CLI flags.
 
 Usage:
     uv run python -m scripts.run_walk_forward_robust \\

@@ -271,11 +271,14 @@ class BacktestEngine:
             if not fill.filled:
                 continue
 
-            # Adjust SL/TP to preserve the same distance from actual fill
-            sl_offset = fill.fill_price - entry_signal.entry_price
+            # Adjust SL/TP by slippage only (not spread).
+            # LONG entries fill on ask (bid+spread) but SL/TP exit on bid,
+            # so the spread component must not shift exit levels.
+            spread_component = self._avg_spread if is_buy else 0.0
+            slippage_offset = fill.fill_price - entry_signal.entry_price - spread_component
             actual_entry = fill.fill_price
-            actual_sl = entry_signal.stop_loss + sl_offset
-            actual_tp = entry_signal.take_profit + sl_offset
+            actual_sl = entry_signal.stop_loss + slippage_offset
+            actual_tp = entry_signal.take_profit + slippage_offset
 
             # Size the position using the actual fill price
             size = self._sizer.compute_size(
@@ -345,14 +348,17 @@ class BacktestEngine:
         )
 
     def _compute_unrealized_pnl(self, current_price: float) -> float:
-        """Compute total unrealized PnL at current price."""
+        """Compute total unrealized PnL at current bid price."""
         pnl = 0.0
         vpp = self._value_per_price_unit
         for pos in self._open_positions:
             if pos.direction == Direction.LONG:
+                # LONG sells at bid
                 pnl += (current_price - pos.entry_price) * pos.size * vpp
             else:
-                pnl += (pos.entry_price - current_price) * pos.size * vpp
+                # SHORT buys at ask (bid + spread)
+                ask = current_price + self._avg_spread
+                pnl += (pos.entry_price - ask) * pos.size * vpp
         return pnl
 
     def _compute_equity(self, current_price: float) -> float:

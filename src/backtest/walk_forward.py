@@ -580,7 +580,8 @@ async def run_walk_forward(
         size_step = float(inst_config.size_step) if inst_config else 0.5
         pip_size = float(inst_config.pip_size) if inst_config else 0.0001
         avg_spread = float(inst_config.avg_spread) * pip_size if inst_config else 0.0
-        min_stop_distance = float(inst_config.min_stop_distance) if inst_config else 0.0
+        # min_stop_distance is in IG points (pips); convert to price units
+        min_stop_distance = float(inst_config.min_stop_distance) * pip_size if inst_config else 0.0
         await logger.ainfo(
             "instrument_specs",
             instrument=instrument,
