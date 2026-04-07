@@ -55,7 +55,7 @@ def detect_liquidity_vectorized(
         min_touches: Minimum number of touches to form a liquidity pool.
         swings: Pre-computed swings DataFrame with columns:
                 time, price, swing_type, index.
-                If None, falls back to raw highs/lows (legacy behavior).
+                If None or empty, returns an empty DataFrame.
 
     Returns:
         DataFrame with columns: time, price, liquidity_type, touch_count, index.
@@ -85,7 +85,7 @@ def detect_liquidity_vectorized(
             tolerance = current * tolerance_pct / 100
             matches = int(np.sum(np.abs(window_prices - current) <= tolerance))
 
-            if matches >= min_touches:
+            if matches + 1 >= min_touches:
                 pools.append({
                     "time": times[i],
                     "price": float(current),
@@ -142,18 +142,20 @@ def detect_liquidity_incremental(
         times_list = state.recent_high_times
         indices_list = state.recent_high_indices
         liq_type = LiquidityType.EQUAL_HIGHS
-    else:
+    elif swing_type == "swing_low":
         prices_list = state.recent_swing_lows
         times_list = state.recent_low_times
         indices_list = state.recent_low_indices
         liq_type = LiquidityType.EQUAL_LOWS
+    else:
+        return []
 
     results: list[LiquidityPool] = []
 
     # Check against recent swings of the same type
     tolerance = price * state.tolerance_pct / 100
     matches = sum(1 for p in prices_list if abs(p - price) <= tolerance)
-    if matches >= state.min_touches:
+    if matches + 1 >= state.min_touches:
         results.append(LiquidityPool(
             time=time,
             price=price,

@@ -46,9 +46,10 @@ class RiskManager:
             if daily_dd_pct >= self._max_daily_dd_pct:
                 return True
 
-        # Daily gain target check (lock in profits)
-        if self._max_daily_gain_pct > 0 and current_capital > 0:
-            daily_gain_pct = max(daily_pnl, 0) / current_capital * 100
+        # Daily gain target check (lock in profits, relative to start-of-day capital)
+        start_of_day_capital = current_capital - daily_pnl
+        if self._max_daily_gain_pct > 0 and start_of_day_capital > 0:
+            daily_gain_pct = max(daily_pnl, 0) / start_of_day_capital * 100
             if daily_gain_pct >= self._max_daily_gain_pct:
                 return True
 

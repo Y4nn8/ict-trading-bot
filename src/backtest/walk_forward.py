@@ -158,9 +158,6 @@ def _add_months(dt: datetime, months: int) -> datetime:
 # Backtest runner
 # ---------------------------------------------------------------------------
 
-_EMPTY_BREAKDOWN = None  # Sentinel, built lazily
-
-
 def _empty_breakdown(initial_capital: float) -> SourceBreakdown:
     empty = compute_metrics([], initial_capital)
     return SourceBreakdown(ict=empty, news=empty, ict_trade_count=0, news_trade_count=0)

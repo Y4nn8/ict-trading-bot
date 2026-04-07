@@ -459,7 +459,7 @@ class StrategyParams:
             risk_max_pct=float(params.get("risk_max_pct", 2.0)),
             max_daily_drawdown_pct=float(params.get("max_daily_drawdown_pct", 3.0)),
             max_total_drawdown_pct=float(params.get("max_total_drawdown_pct", 10.0)),
-            max_daily_gain_pct=float(params.get("max_daily_gain_pct", 0.0)),
+            max_daily_gain_pct=float(params.get("max_daily_gain_pct", 3.0)),
             be_trigger_pct=float(params.get("be_trigger_pct", 0.0)),
             be_offset_pct=float(params.get("be_offset_pct", 0.0)),
         )
