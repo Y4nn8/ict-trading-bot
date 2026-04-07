@@ -43,6 +43,7 @@ class OpenPosition:
     take_profit: float
     size: float
     confluence_score: float
+    initial_stop_loss: float = 0.0  # Immutable SL at entry for R-multiple
     trigger_source: str = "ict"  # "ict" or "news"
     setup_context: dict[str, Any] = field(default_factory=dict)
 
@@ -286,7 +287,7 @@ class BacktestEngine:
                 confluence_score=score,
                 entry_price=actual_entry,
                 stop_loss=actual_sl,
-                value_per_point=self._value_per_price_unit,
+                value_per_price_unit=self._value_per_price_unit,
                 min_size=self._min_size,
                 size_step=self._size_step,
             )
@@ -317,6 +318,7 @@ class BacktestEngine:
                 take_profit=actual_tp,
                 size=size,
                 confluence_score=score,
+                initial_stop_loss=actual_sl,
                 trigger_source=trigger_source,
                 setup_context=context,
             )
@@ -467,7 +469,7 @@ class BacktestEngine:
             pnl_pct = (price_delta / pos.entry_price) * 100 if pos.entry_price > 0 else 0
             if pnl < 0:
                 pnl_pct = -pnl_pct
-            risk = abs(pos.entry_price - pos.stop_loss)
+            risk = abs(pos.entry_price - pos.initial_stop_loss)
             r_multiple = (price_delta / risk) if risk > 0 else 0
             if pnl < 0:
                 r_multiple = -r_multiple
@@ -532,7 +534,7 @@ class BacktestEngine:
                 pnl_pct = (price_delta / pos.entry_price) * 100 if pos.entry_price > 0 else 0
                 if pnl < 0:
                     pnl_pct = -pnl_pct
-                risk = abs(pos.entry_price - pos.stop_loss)
+                risk = abs(pos.entry_price - pos.initial_stop_loss)
                 r_multiple = (price_delta / risk) if risk > 0 else 0
                 if pnl < 0:
                     r_multiple = -r_multiple

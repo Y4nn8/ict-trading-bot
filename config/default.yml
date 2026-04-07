@@ -30,6 +30,7 @@ instruments:
     asset_class: forex
     leverage: 30
     min_size: 0.1  # IG API: minDealSize=0.1
+    size_step: 0.1
     value_per_point: 1.0  # $1 per pip per contract (10k lot)
     point_currency: USD
     pip_size: 0.0001  # 1 pip = 0.0001
@@ -40,6 +41,7 @@ instruments:
     asset_class: forex
     leverage: 30
     min_size: 0.04  # IG API: minDealSize=0.04
+    size_step: 0.04
     value_per_point: 1.0  # $1 per pip per contract (10k lot)
     point_currency: USD
     pip_size: 0.0001
@@ -50,6 +52,7 @@ instruments:
     asset_class: index
     leverage: 20
     min_size: 1.0  # IG API: minDealSize=1.0
+    size_step: 1.0
     value_per_point: 1.0  # £1 per point
     point_currency: GBP
     pip_size: 1.0  # 1 point = 1.0
@@ -60,6 +63,7 @@ instruments:
     asset_class: index
     leverage: 20
     min_size: 0.2  # IG API: minDealSize=0.2
+    size_step: 0.2
     value_per_point: 1.0  # £1 per point
     point_currency: GBP
     pip_size: 1.0
@@ -70,6 +74,7 @@ instruments:
     asset_class: index
     leverage: 20
     min_size: 0.5  # IG API: minDealSize=0.5
+    size_step: 0.5
     value_per_point: 1.0  # €1 per point
     pip_size: 1.0
     min_spread: 1.2
@@ -79,6 +84,7 @@ instruments:
     asset_class: index
     leverage: 20
     min_size: 0.5  # IG API: minDealSize=0.5
+    size_step: 0.5
     value_per_point: 1.0  # $1 per point
     point_currency: USD
     pip_size: 1.0
@@ -89,6 +95,7 @@ instruments:
     asset_class: commodity
     leverage: 10
     min_size: 0.1  # IG API: minDealSize=0.1
+    size_step: 0.1
     value_per_point: 10.0  # $10 per point (10oz mini)
     point_currency: USD
     pip_size: 1.0  # 1 point = $1 in gold price
