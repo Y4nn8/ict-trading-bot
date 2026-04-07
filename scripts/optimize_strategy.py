@@ -65,6 +65,12 @@ def run_single_backtest(
     initial_capital: float = 5000.0,
     max_mdd_pct: float = 5.0,
     leverage: float = 30.0,
+    value_per_point: float = 1.0,
+    min_size: float = 0.5,
+    size_step: float = 0.5,
+    avg_spread: float = 0.0,
+    pip_size: float = 0.0001,
+    min_stop_distance: float = 0.0,
 ) -> float:
     """Run one backtest and return a composite score.
 
@@ -100,6 +106,14 @@ def run_single_backtest(
         sim_config=components.sim_config,
         initial_capital=initial_capital,
         leverage=leverage,
+        value_per_point=value_per_point,
+        min_size=min_size,
+        size_step=size_step,
+        avg_spread=avg_spread,
+        pip_size=pip_size,
+        min_stop_distance=min_stop_distance,
+        be_trigger_pct=params.be_trigger_pct,
+        be_offset_pct=params.be_offset_pct,
     )
     result = engine.run()
 
@@ -142,17 +156,25 @@ async def optimize(
 
     inst_config = config.get_instrument(instrument)
     leverage = float(inst_config.leverage) if inst_config else 30.0
+    value_per_point = float(inst_config.value_per_point) if inst_config else 1.0
+    min_size = float(inst_config.min_size) if inst_config else 0.5
+    size_step = float(inst_config.size_step) if inst_config else 0.5
+    pip_size = float(inst_config.pip_size) if inst_config else 0.0001
+    avg_spread = float(inst_config.avg_spread) * pip_size if inst_config else 0.0
+    min_stop_distance = float(inst_config.min_stop_distance) * pip_size if inst_config else 0.0
 
     await logger.ainfo(
         "loading_data", instrument=instrument, days=days, max_mdd_pct=max_mdd_pct,
-        leverage=leverage,
+        leverage=leverage, value_per_point=value_per_point, min_size=min_size,
     )
     candles = await load_candles(instrument, days)
 
     def objective(trial: optuna.Trial) -> float:
         params = StrategyParams.from_optuna_trial(trial)
         return run_single_backtest(
-            candles, instrument, params, initial_capital, max_mdd_pct, leverage
+            candles, instrument, params, initial_capital, max_mdd_pct, leverage,
+            value_per_point, min_size, size_step, avg_spread, pip_size,
+            min_stop_distance,
         )
 
     study = optuna.create_study(
@@ -193,6 +215,14 @@ async def optimize(
         sim_config=components.sim_config,
         initial_capital=initial_capital,
         leverage=leverage,
+        value_per_point=value_per_point,
+        min_size=min_size,
+        size_step=size_step,
+        avg_spread=avg_spread,
+        pip_size=pip_size,
+        min_stop_distance=min_stop_distance,
+        be_trigger_pct=best_params.be_trigger_pct,
+        be_offset_pct=best_params.be_offset_pct,
     )
     result = engine.run()
     report = generate_report(result.trades, initial_capital)

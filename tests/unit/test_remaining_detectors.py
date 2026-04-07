@@ -55,18 +55,28 @@ class TestLiquidity:
             "volume": [100.0] * n,
         })
 
-    def test_vectorized_returns_dataframe(self, liq_fixture: pl.DataFrame) -> None:
-        result = detect_liquidity_vectorized(liq_fixture)
+    @pytest.fixture
+    def swings_fixture(self, liq_fixture: pl.DataFrame) -> pl.DataFrame:
+        """Create swings with equal highs at 1.090."""
+        from src.structure.swings import detect_swings_vectorized
+
+        return detect_swings_vectorized(liq_fixture, left_bars=2, right_bars=2)
+
+    def test_vectorized_returns_dataframe(
+        self, liq_fixture: pl.DataFrame, swings_fixture: pl.DataFrame,
+    ) -> None:
+        result = detect_liquidity_vectorized(liq_fixture, swings=swings_fixture)
         assert isinstance(result, pl.DataFrame)
 
     def test_incremental_returns_list(self) -> None:
         state = LiquidityState(lookback=5, min_touches=2)
-        candle = {
+        swing = {
             "time": datetime(2024, 1, 15, 10, 0, tzinfo=UTC),
-            "high": 1.090,
-            "low": 1.087,
+            "price": 1.090,
+            "swing_type": "swing_high",
+            "index": 0,
         }
-        result = detect_liquidity_incremental(candle, state)
+        result = detect_liquidity_incremental(swing, state)
         assert isinstance(result, list)
 
 

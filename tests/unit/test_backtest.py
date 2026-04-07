@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from src.backtest.engine import BacktestEngine, OpenPosition
-from src.backtest.metrics import compute_metrics
+from src.backtest.metrics import compute_metrics, compute_metrics_by_source
 from src.backtest.report import format_report, generate_report
 from src.backtest.simulator import SimulationConfig, compute_swap_cost, simulate_fill
 from src.backtest.vectorized import PrecomputedData, precompute
@@ -265,8 +265,8 @@ class TestPositionSizer:
 
     def test_high_confluence_bigger_size(self) -> None:
         sizer = PositionSizer()
-        small = sizer.compute_size(10000, 0.3, 1.08, 1.077, value_per_point=1.0, min_size=0.5)
-        large = sizer.compute_size(10000, 0.8, 1.08, 1.077, value_per_point=1.0, min_size=0.5)
+        small = sizer.compute_size(10000, 0.3, 1.08, 1.077, value_per_price_unit=1.0, min_size=0.5)
+        large = sizer.compute_size(10000, 0.8, 1.08, 1.077, value_per_price_unit=1.0, min_size=0.5)
         assert large > small
 
     def test_zero_sl_distance(self) -> None:
@@ -276,27 +276,27 @@ class TestPositionSizer:
     def test_respects_min_size(self) -> None:
         sizer = PositionSizer()
         # Even if raw calc gives 0.3, should return min_size=0.5
-        size = sizer.compute_size(5000, 0.5, 23000, 22960, value_per_point=1.0, min_size=0.5)
+        size = sizer.compute_size(5000, 0.5, 23000, 22960, value_per_price_unit=1.0, min_size=0.5)
         assert size >= 0.5
 
     def test_returns_zero_if_min_size_exceeds_budget(self) -> None:
         sizer = PositionSizer()
         # Capital=100, risk=0.5%=0.50€, SL=40pts, vpp=1€ → min_size risk=0.5*40=20€ > 0.50€
-        size = sizer.compute_size(100, 0.3, 23000, 22960, value_per_point=1.0, min_size=0.5)
+        size = sizer.compute_size(100, 0.3, 23000, 22960, value_per_price_unit=1.0, min_size=0.5)
         assert size == 0.0
 
     def test_rounds_down_to_step(self) -> None:
         sizer = PositionSizer()
         # 5000€ capital, 1% risk=50€, SL=40pts, vpp=1€ → 50/40=1.25 → floor to 1.0
         size = sizer.compute_size(
-            5000, 0.5, 23000, 22960, value_per_point=1.0, min_size=0.5, size_step=0.5
+            5000, 0.5, 23000, 22960, value_per_price_unit=1.0, min_size=0.5, size_step=0.5
         )
         assert size % 0.5 == 0.0
 
     def test_dax_e1_realistic(self) -> None:
         """DAX €1/point, 5000€ capital, 1% risk, 40pt SL."""
         sizer = PositionSizer()
-        size = sizer.compute_size(5000, 0.5, 23000, 22960, value_per_point=1.0, min_size=0.5)
+        size = sizer.compute_size(5000, 0.5, 23000, 22960, value_per_price_unit=1.0, min_size=0.5)
         # Risk budget: 50€, risk per contract: 40*1=40€, raw=1.25, step=1.0
         assert size == 1.0
 
@@ -316,19 +316,183 @@ class TestRiskManager:
         rm = RiskManager(max_total_drawdown_pct=10.0)
         assert rm.is_circuit_broken(0, 8900, 10000)
 
+    def test_daily_gain_circuit_break(self) -> None:
+        rm = RiskManager(max_daily_gain_pct=3.0)
+        # +3% of 10000 = 300 → should trigger
+        assert rm.is_circuit_broken(300, 10000, 10000)
+        # +2% → should not trigger
+        assert not rm.is_circuit_broken(200, 10000, 10000)
+
+    def test_daily_gain_disabled_by_default(self) -> None:
+        rm = RiskManager()
+        # Large gain should not trigger when disabled (default 0)
+        assert not rm.is_circuit_broken(5000, 10000, 10000)
+
     def test_can_open_position(self) -> None:
         rm = RiskManager(max_positions=3)
         assert rm.can_open_position(2)
         assert not rm.can_open_position(3)
 
 
+class TestBreakevenStop:
+    """Tests for breakeven stop-loss mechanism."""
+
+    def test_sl_moved_to_breakeven_long(self) -> None:
+        """LONG: SL moves to entry when price reaches trigger % of TP distance."""
+        precomputed = precompute(SWING_FIXTURE, "EUR/USD", "M5")
+        engine = BacktestEngine(
+            precomputed=precomputed,
+            confluence_scorer=ConfluenceScorer(),
+            entry_evaluator=EntryEvaluator(),
+            exit_evaluator=ExitEvaluator(),
+            trade_filter=TradeFilter(),
+            position_sizer=PositionSizer(),
+            risk_manager=RiskManager(),
+            be_trigger_pct=0.2,  # trigger at 20% of TP distance
+            be_offset_pct=0.0,   # exact breakeven
+        )
+        # Simulate a LONG position: entry=1.1, SL=1.09, TP=1.15
+        pos = OpenPosition(
+            trade_id="test-be",
+            instrument="EUR/USD",
+            direction=Direction.LONG,
+            entry_price=1.1,
+            entry_time=datetime(2024, 1, 1, tzinfo=UTC),
+            stop_loss=1.09,
+            take_profit=1.15,
+            size=1.0,
+            confluence_score=0.8,
+        )
+        engine._open_positions = [pos]
+        # TP dist = 0.05, 20% = 0.01, so high >= 1.11 triggers
+        candle = {
+            "time": datetime(2024, 1, 1, 0, 5, tzinfo=UTC),
+            "open": 1.105, "high": 1.112, "low": 1.104, "close": 1.11,
+        }
+        engine._check_exits(candle, 0)
+        # SL should have moved to entry (1.1)
+        assert pos.stop_loss == pytest.approx(1.1)
+        assert pos.trade_id in engine._be_applied
+
+    def test_sl_moved_with_offset_short(self) -> None:
+        """SHORT: SL moves to entry - offset when trigger reached."""
+        precomputed = precompute(SWING_FIXTURE, "EUR/USD", "M5")
+        engine = BacktestEngine(
+            precomputed=precomputed,
+            confluence_scorer=ConfluenceScorer(),
+            entry_evaluator=EntryEvaluator(),
+            exit_evaluator=ExitEvaluator(),
+            trade_filter=TradeFilter(),
+            position_sizer=PositionSizer(),
+            risk_manager=RiskManager(),
+            be_trigger_pct=0.2,
+            be_offset_pct=0.05,  # lock in 5% of TP distance
+        )
+        # SHORT: entry=1.15, SL=1.16, TP=1.10 → dist=0.05
+        pos = OpenPosition(
+            trade_id="test-be-short",
+            instrument="EUR/USD",
+            direction=Direction.SHORT,
+            entry_price=1.15,
+            entry_time=datetime(2024, 1, 1, tzinfo=UTC),
+            stop_loss=1.16,
+            take_profit=1.10,
+            size=1.0,
+            confluence_score=0.8,
+        )
+        engine._open_positions = [pos]
+        # 20% of 0.05 = 0.01, low <= 1.14 triggers
+        candle = {
+            "time": datetime(2024, 1, 1, 0, 5, tzinfo=UTC),
+            "open": 1.145, "high": 1.148, "low": 1.138, "close": 1.14,
+        }
+        engine._check_exits(candle, 0)
+        # New SL = entry - 5% of dist = 1.15 - 0.0025 = 1.1475
+        assert pos.stop_loss == pytest.approx(1.1475)
+
+    def test_be_not_applied_twice(self) -> None:
+        """BE should only be applied once per position."""
+        precomputed = precompute(SWING_FIXTURE, "EUR/USD", "M5")
+        engine = BacktestEngine(
+            precomputed=precomputed,
+            confluence_scorer=ConfluenceScorer(),
+            entry_evaluator=EntryEvaluator(),
+            exit_evaluator=ExitEvaluator(),
+            trade_filter=TradeFilter(),
+            position_sizer=PositionSizer(),
+            risk_manager=RiskManager(),
+            be_trigger_pct=0.2,
+            be_offset_pct=0.0,
+        )
+        pos = OpenPosition(
+            trade_id="test-be-once",
+            instrument="EUR/USD",
+            direction=Direction.LONG,
+            entry_price=1.1,
+            entry_time=datetime(2024, 1, 1, tzinfo=UTC),
+            stop_loss=1.09,
+            take_profit=1.15,
+            size=1.0,
+            confluence_score=0.8,
+        )
+        engine._open_positions = [pos]
+        engine._be_applied.add("test-be-once")
+        # Manually set SL to something else — should NOT be overwritten
+        pos.stop_loss = 1.095
+        candle = {
+            "time": datetime(2024, 1, 1, 0, 5, tzinfo=UTC),
+            "open": 1.105, "high": 1.112, "low": 1.104, "close": 1.11,
+        }
+        engine._check_exits(candle, 0)
+        assert pos.stop_loss == pytest.approx(1.095)  # unchanged
+
+    def test_be_disabled_when_zero(self) -> None:
+        """No BE move when be_trigger_pct=0 (default)."""
+        precomputed = precompute(SWING_FIXTURE, "EUR/USD", "M5")
+        engine = BacktestEngine(
+            precomputed=precomputed,
+            confluence_scorer=ConfluenceScorer(),
+            entry_evaluator=EntryEvaluator(),
+            exit_evaluator=ExitEvaluator(),
+            trade_filter=TradeFilter(),
+            position_sizer=PositionSizer(),
+            risk_manager=RiskManager(),
+            be_trigger_pct=0.0,
+        )
+        pos = OpenPosition(
+            trade_id="test-be-off",
+            instrument="EUR/USD",
+            direction=Direction.LONG,
+            entry_price=1.1,
+            entry_time=datetime(2024, 1, 1, tzinfo=UTC),
+            stop_loss=1.09,
+            take_profit=1.15,
+            size=1.0,
+            confluence_score=0.8,
+        )
+        engine._open_positions = [pos]
+        candle = {
+            "time": datetime(2024, 1, 1, 0, 5, tzinfo=UTC),
+            "open": 1.105, "high": 1.14, "low": 1.104, "close": 1.13,
+        }
+        engine._check_exits(candle, 0)
+        assert pos.stop_loss == pytest.approx(1.09)  # unchanged
+
+
 class TestMarginTracking:
     """Tests for margin tracking in BacktestEngine."""
 
     def _make_engine(
-        self, initial_capital: float = 10000.0, leverage: float = 30.0
+        self,
+        initial_capital: float = 10000.0,
+        leverage: float = 30.0,
+        pip_size: float = 1.0,
     ) -> BacktestEngine:
-        """Create a minimal engine for margin testing."""
+        """Create a minimal engine for margin testing.
+
+        Uses pip_size=1.0 by default so value_per_point == value_per_price_unit,
+        keeping test arithmetic simple. Pass pip_size=0.0001 to test forex conversion.
+        """
         precomputed = precompute(SWING_FIXTURE, "EUR/USD", "M5")
         return BacktestEngine(
             precomputed=precomputed,
@@ -341,6 +505,7 @@ class TestMarginTracking:
             sim_config=SimulationConfig(),
             initial_capital=initial_capital,
             leverage=leverage,
+            pip_size=pip_size,
         )
 
     def test_used_margin_empty(self) -> None:
@@ -454,3 +619,63 @@ class TestMarginTracking:
         assert result.margin_rejected >= 0
         assert result.margin_capped >= 0
         assert result.peak_margin_usage_pct >= 0
+
+
+class TestComputeMetricsBySource:
+    """Tests for compute_metrics_by_source."""
+
+    def _make_trade(
+        self, pnl: float, trigger_source: str = "ict"
+    ) -> Trade:
+        return Trade(
+            opened_at=datetime(2024, 1, 15, 10, 0, tzinfo=UTC),
+            closed_at=datetime(2024, 1, 15, 11, 0, tzinfo=UTC),
+            instrument="EUR/USD",
+            direction=Direction.LONG,
+            entry_price=1.08,
+            exit_price=1.08 + pnl / 100,
+            stop_loss=1.07,
+            take_profit=1.09,
+            size=1.0,
+            pnl=pnl,
+            pnl_percent=pnl,
+            r_multiple=pnl / 10 if pnl != 0 else 0,
+            setup_type={"trigger_source": trigger_source},
+            is_backtest=True,
+        )
+
+    def test_all_ict_trades(self) -> None:
+        trades = [self._make_trade(100), self._make_trade(-50)]
+        result = compute_metrics_by_source(trades)
+        assert result.ict_trade_count == 2
+        assert result.news_trade_count == 0
+        assert result.ict.total_pnl == pytest.approx(50, abs=1)
+
+    def test_all_news_trades(self) -> None:
+        trades = [self._make_trade(200, "news")]
+        result = compute_metrics_by_source(trades)
+        assert result.ict_trade_count == 0
+        assert result.news_trade_count == 1
+        assert result.news.total_pnl == pytest.approx(200, abs=1)
+
+    def test_mixed_trades(self) -> None:
+        trades = [
+            self._make_trade(100, "ict"),
+            self._make_trade(200, "news"),
+            self._make_trade(-30, "ict"),
+        ]
+        result = compute_metrics_by_source(trades)
+        assert result.ict_trade_count == 2
+        assert result.news_trade_count == 1
+
+    def test_default_to_ict_when_no_setup_type(self) -> None:
+        trade = self._make_trade(50)
+        trade.setup_type = None
+        result = compute_metrics_by_source([trade])
+        assert result.ict_trade_count == 1
+        assert result.news_trade_count == 0
+
+    def test_empty_trades(self) -> None:
+        result = compute_metrics_by_source([])
+        assert result.ict_trade_count == 0
+        assert result.news_trade_count == 0

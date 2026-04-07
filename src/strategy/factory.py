@@ -77,6 +77,7 @@ def build_strategy(params: StrategyParams) -> StrategyComponents:
             max_daily_drawdown_pct=params.max_daily_drawdown_pct,
             max_total_drawdown_pct=params.max_total_drawdown_pct,
             max_positions=params.max_positions,
+            max_daily_gain_pct=params.max_daily_gain_pct,
         ),
         sim_config=SimulationConfig(),
     )

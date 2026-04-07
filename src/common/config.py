@@ -55,10 +55,13 @@ class InstrumentConfig(BaseModel):
     asset_class: str
     leverage: int
     min_size: float = 0.5
+    size_step: float = 0.5  # Min increment for position size (from IG minDealSize step)
     value_per_point: float = 1.0
     point_currency: str = "EUR"  # Currency of the value_per_point
-    min_spread: float = 0.0
-    avg_spread: float = 0.0
+    pip_size: float = 0.0001  # Price value of 1 pip (0.0001 for forex, 1.0 for indices)
+    min_spread: float = 0.0  # In pips
+    avg_spread: float = 0.0  # In pips
+    min_stop_distance: float = 0.0  # Min SL distance in points (IG)
 
 
 class ConfluenceRiskMap(BaseModel):

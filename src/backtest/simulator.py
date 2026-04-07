@@ -35,6 +35,7 @@ def simulate_fill(
     spread: float,
     config: SimulationConfig,
     volatility_factor: float = 1.0,
+    pip_size: float = 0.0001,
 ) -> FillResult:
     """Simulate filling an order with realistic execution.
 
@@ -44,6 +45,7 @@ def simulate_fill(
         spread: Current spread in price units.
         config: Simulation configuration.
         volatility_factor: Multiplier for slippage (higher = more slippage).
+        pip_size: Size of one pip in price units (0.0001 for forex, 1.0 for gold/indices).
 
     Returns:
         FillResult with actual fill price and costs.
@@ -57,11 +59,11 @@ def simulate_fill(
             slippage=0.0,
         )
 
-    # Spread cost: buy at ask (higher), sell at bid (lower)
-    spread_adjustment = spread / 2 if is_buy else -spread / 2
+    # Bid-based candles: buy at ask (bid + spread), sell at bid (no adjustment)
+    spread_adjustment = spread if is_buy else 0.0
 
     # Random slippage: 0 to max, scaled by volatility
-    max_slip = config.slippage_max_pips * 0.0001 * volatility_factor
+    max_slip = config.slippage_max_pips * pip_size * volatility_factor
     slippage = random.uniform(0, max_slip)
     # Slippage is adverse: buy fills higher, sell fills lower
     slippage_direction = 1.0 if is_buy else -1.0
@@ -81,6 +83,7 @@ def compute_swap_cost(
     is_long: bool,
     days_held: float,
     config: SimulationConfig,
+    pip_size: float = 0.0001,
 ) -> float:
     """Compute overnight swap/financing cost.
 
@@ -89,9 +92,10 @@ def compute_swap_cost(
         is_long: True for long positions.
         days_held: Number of days position is held (fractional OK).
         config: Simulation configuration.
+        pip_size: Size of one pip in price units (0.0001 for forex, 1.0 for gold/indices).
 
     Returns:
         Swap cost in price units (negative = cost).
     """
     swap_rate = config.swap_long_per_day if is_long else config.swap_short_per_day
-    return swap_rate * 0.0001 * position_size * days_held
+    return swap_rate * pip_size * position_size * days_held
