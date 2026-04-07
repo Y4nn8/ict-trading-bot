@@ -483,9 +483,16 @@ class TestMarginTracking:
     """Tests for margin tracking in BacktestEngine."""
 
     def _make_engine(
-        self, initial_capital: float = 10000.0, leverage: float = 30.0
+        self,
+        initial_capital: float = 10000.0,
+        leverage: float = 30.0,
+        pip_size: float = 1.0,
     ) -> BacktestEngine:
-        """Create a minimal engine for margin testing."""
+        """Create a minimal engine for margin testing.
+
+        Uses pip_size=1.0 by default so value_per_point == value_per_price_unit,
+        keeping test arithmetic simple. Pass pip_size=0.0001 to test forex conversion.
+        """
         precomputed = precompute(SWING_FIXTURE, "EUR/USD", "M5")
         return BacktestEngine(
             precomputed=precomputed,
@@ -498,6 +505,7 @@ class TestMarginTracking:
             sim_config=SimulationConfig(),
             initial_capital=initial_capital,
             leverage=leverage,
+            pip_size=pip_size,
         )
 
     def test_used_margin_empty(self) -> None:

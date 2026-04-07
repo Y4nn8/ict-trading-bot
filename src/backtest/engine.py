@@ -122,7 +122,9 @@ class BacktestEngine:
         self._initial_capital = initial_capital
         self._capital = initial_capital
         self._leverage = leverage
-        self._value_per_point = value_per_point
+        # Convert from "value per pip" (IG terminology) to "value per 1.0 price unit"
+        # For forex: 1.0 / 0.0001 = 10,000; for indices/gold (pip_size=1.0): no change
+        self._value_per_price_unit = value_per_point / pip_size if pip_size > 0 else value_per_point
         self._min_size = min_size
         self._size_step = size_step
         self._avg_spread = avg_spread
@@ -281,7 +283,7 @@ class BacktestEngine:
                 confluence_score=score,
                 entry_price=actual_entry,
                 stop_loss=actual_sl,
-                value_per_point=self._value_per_point,
+                value_per_point=self._value_per_price_unit,
                 min_size=self._min_size,
                 size_step=self._size_step,
             )
@@ -318,7 +320,7 @@ class BacktestEngine:
             self._open_positions.append(position)
 
             # Track peak margin usage (reuse values, add new position's margin)
-            new_margin = actual_entry * size * self._value_per_point / self._leverage
+            new_margin = actual_entry * size * self._value_per_price_unit / self._leverage
             total_used = used_margin + new_margin
             if equity > 0:
                 usage_pct = total_used / equity * 100
@@ -336,7 +338,7 @@ class BacktestEngine:
 
     def _compute_used_margin(self) -> float:
         """Compute total margin used by open positions."""
-        vpp = self._value_per_point
+        vpp = self._value_per_price_unit
         return sum(
             pos.entry_price * pos.size * vpp / self._leverage
             for pos in self._open_positions
@@ -345,7 +347,7 @@ class BacktestEngine:
     def _compute_unrealized_pnl(self, current_price: float) -> float:
         """Compute total unrealized PnL at current price."""
         pnl = 0.0
-        vpp = self._value_per_point
+        vpp = self._value_per_price_unit
         for pos in self._open_positions:
             if pos.direction == Direction.LONG:
                 pnl += (current_price - pos.entry_price) * pos.size * vpp
@@ -377,7 +379,7 @@ class BacktestEngine:
         available_margin = equity - used_margin
         if available_margin <= 0:
             return 0.0, used_margin, equity
-        vpp = self._value_per_point
+        vpp = self._value_per_price_unit
         max_size = available_margin * self._leverage / (entry_price * vpp)
         capped = min(size, max_size)
         return capped, used_margin, equity
@@ -488,8 +490,8 @@ class BacktestEngine:
     def _compute_pnl(self, pos: OpenPosition, exit_price: float) -> float:
         """Compute PnL for a closed position."""
         if pos.direction == Direction.LONG:
-            return (exit_price - pos.entry_price) * pos.size * self._value_per_point
-        return (pos.entry_price - exit_price) * pos.size * self._value_per_point
+            return (exit_price - pos.entry_price) * pos.size * self._value_per_price_unit
+        return (pos.entry_price - exit_price) * pos.size * self._value_per_price_unit
 
     def _close_opposing_positions(
         self, candle: dict[str, Any], inst_sentiments: dict[str, str]

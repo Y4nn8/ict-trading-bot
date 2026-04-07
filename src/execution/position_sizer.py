@@ -45,7 +45,7 @@ class PositionSizer:
     ) -> float:
         """Compute position size in contracts.
 
-        The size is calculated so that the risk (SL distance * size * value_per_point)
+        The size is calculated so that the risk (SL distance * size * value_per_price_unit)
         equals the target risk amount. Then rounded down to the nearest size_step
         and clamped to min_size.
 
@@ -54,7 +54,8 @@ class PositionSizer:
             confluence_score: Trade confluence score (0-1).
             entry_price: Entry price.
             stop_loss: Stop loss price.
-            value_per_point: Value per point per contract (e.g. €1 for DAX €1).
+            value_per_point: Value per 1.0 price unit per contract (pre-converted from
+                value_per_pip / pip_size by the caller).
             min_size: Minimum position size (broker constraint).
             size_step: Size increment step (e.g. 0.5 contracts).
 
