@@ -8,11 +8,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from datetime import datetime
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import polars as pl
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 
 class LiquidityType(StrEnum):
@@ -132,7 +134,7 @@ def detect_liquidity_incremental(
 
     price = float(swing["price"])  # type: ignore[arg-type]
     swing_type = str(swing["swing_type"])
-    time = cast(datetime, swing["time"])
+    time = cast("datetime", swing["time"])
     index = int(swing["index"])  # type: ignore[call-overload]
 
     if swing_type == "swing_high":

@@ -40,11 +40,14 @@ class MarketSpecs:
 
 
 def _parse_currency_value(raw: str | None) -> float | None:
-    """Parse IG's currency-prefixed value like '$1' or '€5' into a float."""
+    """Parse IG's currency-prefixed value like '$1', '€5', or '$1,234.56'."""
     if raw is None:
         return None
-    match = re.search(r"[\d.]+", raw)
-    return float(match.group()) if match else None
+    # Strip currency symbols/whitespace, extract number with optional sign and commas
+    match = re.search(r"[+-]?[\d,]+\.?\d*", raw)
+    if not match:
+        return None
+    return float(match.group().replace(",", ""))
 
 
 _RESOLUTION_MAP: dict[str, str] = {

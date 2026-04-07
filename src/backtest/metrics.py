@@ -84,7 +84,9 @@ def compute_metrics(
         entry = t.entry_price or 0.0
         sl = t.stop_loss or 0.0
         size = t.size or 0.0
-        risk_amount = abs(entry - sl) * size
+        # Use value_per_price_unit from context to convert risk to account currency
+        vppu = (t.context or {}).get("value_per_price_unit", 1.0)
+        risk_amount = abs(entry - sl) * size * vppu
         if running_capital > 0:
             risk_pcts.append(risk_amount / running_capital * 100)
         running_capital += t.pnl or 0.0

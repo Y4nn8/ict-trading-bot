@@ -88,8 +88,11 @@ class TestDatabase:
         ):
             db = Database(db_config)
             await db.connect()
-            result = await db.fetch("SELECT * FROM t")
-            assert result == [{"id": 1}]
+            try:
+                result = await db.fetch("SELECT * FROM t")
+                assert result == [{"id": 1}]
+            finally:
+                await db.disconnect()
 
     async def test_execute(self, db_config: DatabaseConfig) -> None:
         mock_pool = _make_mock_pool()
@@ -101,8 +104,11 @@ class TestDatabase:
         ):
             db = Database(db_config)
             await db.connect()
-            result = await db.execute("INSERT INTO t VALUES (1)")
-            assert result == "INSERT 0 1"
+            try:
+                result = await db.execute("INSERT INTO t VALUES (1)")
+                assert result == "INSERT 0 1"
+            finally:
+                await db.disconnect()
 
     async def test_query_failure_raises_database_error(
         self, db_config: DatabaseConfig

@@ -478,6 +478,7 @@ class BacktestEngine:
                 r_multiple=r_multiple,
                 confluence_score=pos.confluence_score,
                 setup_type={"trigger_source": pos.trigger_source},
+                context={"value_per_price_unit": self._value_per_price_unit},
                 is_backtest=True,
             )
             self._closed_trades.append(trade)
@@ -545,6 +546,7 @@ class BacktestEngine:
                     r_multiple=r_multiple,
                     confluence_score=pos.confluence_score,
                     setup_type={"trigger_source": pos.trigger_source},
+                    context={"value_per_price_unit": self._value_per_price_unit},
                     is_backtest=True,
                     news_context={"close_reason": "news_opposing", "sentiment": sentiment},
                 ))

@@ -61,7 +61,7 @@ class InstrumentConfig(BaseModel):
     pip_size: float = 0.0001  # Price value of 1 pip (0.0001 for forex, 1.0 for indices)
     min_spread: float = 0.0  # In pips
     avg_spread: float = 0.0  # In pips
-    min_stop_distance: float = 0.0  # Min SL distance in points (from IG minNormalStopOrLimitDistance)
+    min_stop_distance: float = 0.0  # Min SL distance in points (IG)
 
 
 class ConfluenceRiskMap(BaseModel):
