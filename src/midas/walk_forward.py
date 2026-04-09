@@ -241,8 +241,17 @@ async def run_midas_walk_forward(
 
         wr.n_train_rows = len(df_filtered)
 
+        # Build PnL-based sample weights
+        buy_pnls = [label_result.buy_pnls[i] for i, m in enumerate(mask) if m]
+        sell_pnls = [label_result.sell_pnls[i] for i, m in enumerate(mask) if m]
+        weights = MidasTrainer.build_sample_weights(
+            buy_pnls, sell_pnls, target_filtered,
+        )
+
         trainer = MidasTrainer(config.trainer_config)
-        train_metrics = trainer.train(df_filtered, target_filtered)
+        train_metrics = trainer.train(
+            df_filtered, target_filtered, sample_weights=weights,
+        )
 
         wr.val_log_loss = train_metrics.val_log_loss
         wr.class_dist = train_metrics.class_distribution
@@ -259,10 +268,42 @@ async def run_midas_walk_forward(
         print(f"    Class dist: {wr.class_dist}")
         print(f"    Top features: {[f[0] for f in sorted_imp]}")
 
+        # Train exit model: for BUY/SELL entries, label CLOSE=1 if PnL < 0
+        buy_pnl_arr = np.array(buy_pnls)
+        sell_pnl_arr = np.array(sell_pnls)
+        # Rows where entry model would enter (BUY or SELL)
+        entry_mask = target_filtered != 0
+        if entry_mask.sum() >= 50:
+            exit_df_rows = df_filtered.filter(pl.Series(entry_mask))
+            # Add position context columns (simulated averages for training)
+            directions = np.where(target_filtered[entry_mask] == 1, 1.0, -1.0)
+            # PnL for the chosen direction
+            chosen_pnl = np.where(
+                target_filtered[entry_mask] == 1,
+                buy_pnl_arr[entry_mask],
+                sell_pnl_arr[entry_mask],
+            )
+            # Exit label: CLOSE=1 if the trade ends in loss (holding was wrong)
+            exit_labels = (chosen_pnl < 0).astype(np.int32)
+
+            exit_df = exit_df_rows.with_columns(
+                pl.Series("pos_unrealized_pnl", chosen_pnl * 0.3),  # partial PnL
+                pl.Series("pos_duration_sec", np.full(len(exit_df_rows), 30.0)),
+                pl.Series("pos_direction", directions),
+            )
+
+            exit_result = trainer.train_exit(exit_df, exit_labels)
+            print(f"    Exit model: {exit_result.n_train} rows, "
+                  f"val_loss={exit_result.val_log_loss:.4f}")
+        else:
+            print("    Exit model: SKIP (< 50 entry rows)")
+
         # --- Phase 2: Test replay with live prediction ---
         print("  [2/2] Test replay + simulation...")
 
         simulator = TradeSimulator(config.sim_config)
+        # Cache latest features for exit model (updated on sampled ticks)
+        latest_features: dict[str, float] = {}
 
         def test_callback(
             tick: Tick,
@@ -270,16 +311,37 @@ async def run_midas_walk_forward(
             *,
             _tr: MidasTrainer = trainer,
             _sim: TradeSimulator = simulator,
+            _feat: dict[str, float] = latest_features,
         ) -> None:
+            _feat.update(features)
             signal, _conf = _tr.predict(features)
             _sim.on_signal(tick, signal)
+
+        last_tick_holder: list[Tick | None] = [None]
 
         def exit_hook(
             tick: Tick,
             *,
+            _tr: MidasTrainer = trainer,
             _sim: TradeSimulator = simulator,
+            _holder: list[Tick | None] = last_tick_holder,
+            _feat: dict[str, float] = latest_features,
         ) -> None:
+            # SL/TP mechanical exits
             _sim.on_tick(tick)
+            _holder[0] = tick
+            # Exit model: check if we should close early
+            if _tr.has_exit_model and _sim.open_count > 0 and _feat:
+                ctx = _sim.get_position_context(tick)
+                if ctx is not None:
+                    should_close, _ = _tr.predict_exit(
+                        _feat,
+                        pos_unrealized_pnl=ctx["pos_unrealized_pnl"],
+                        pos_duration_sec=ctx["pos_duration_sec"],
+                        pos_direction=ctx["pos_direction"],
+                    )
+                    if should_close:
+                        _sim.early_close(tick)
 
         test_registry = build_default_registry(instrument=config.instrument)
         test_registry.configure_all({})
@@ -298,14 +360,9 @@ async def run_midas_walk_forward(
         test_result = await test_engine.run()
         wr.n_test_ticks = test_result.total_ticks
 
-        # Force-close remaining positions at window end
-        if simulator.open_count > 0 and test_result.total_ticks > 0:
-            end_tick = Tick(
-                time=test_end,
-                bid=simulator._positions[0].entry_price,
-                ask=simulator._positions[0].entry_price,
-            )
-            simulator.close_all(end_tick)
+        # Force-close remaining positions at last observed market price
+        if simulator.open_count > 0 and last_tick_holder[0] is not None:
+            simulator.close_all(last_tick_holder[0])
 
         trades = simulator.closed_trades
         wr.n_trades = len(trades)

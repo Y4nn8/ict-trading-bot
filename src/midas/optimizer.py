@@ -169,6 +169,13 @@ async def _evaluate_oos_async(
         signal, _ = tr.predict(features)
         sim.on_signal(tick, signal)
 
+    def exit_hook(
+        tick: Tick,
+        *,
+        sim: TradeSimulator = _simulator,
+    ) -> None:
+        sim.on_tick(tick)
+
     registry = registry_factory()
     registry.configure_all(extractor_params)
 
@@ -181,6 +188,7 @@ async def _evaluate_oos_async(
             sample_rate=config.test_sample_rate,
         ),
         tick_callback=callback,
+        every_tick_hook=exit_hook,
     )
     await engine.run()
 
@@ -315,6 +323,13 @@ async def run_nested_optuna(
         df_filtered = df.filter(pl.Series(mask))
         target_filtered = target[mask]
 
+        # PnL-based sample weights
+        buy_pnls_f = [label_result.buy_pnls[i] for i, m in enumerate(mask) if m]
+        sell_pnls_f = [label_result.sell_pnls[i] for i, m in enumerate(mask) if m]
+        sample_weights = MidasTrainer.build_sample_weights(
+            buy_pnls_f, sell_pnls_f, target_filtered,
+        )
+
         n_buy = int((target_filtered == 1).sum())
         n_sell = int((target_filtered == 2).sum())
         n_pass = int((target_filtered == 0).sum())
@@ -349,7 +364,10 @@ async def run_nested_optuna(
 
             trainer = MidasTrainer(trainer_config)
             try:
-                trainer.train(df_filtered, target_filtered)
+                trainer.train(
+                    df_filtered, target_filtered,
+                    sample_weights=sample_weights,
+                )
             except Exception:
                 inner_study.tell(inner_trial, -1000.0)
                 continue
