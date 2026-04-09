@@ -14,10 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from src.common.logging import get_logger
 from src.news.interpreter import NewsAction
-
-logger = get_logger(__name__)
 
 
 @dataclass
@@ -64,11 +61,6 @@ class EventManager:
         if action == NewsAction.PAUSE:
             pause_end = event_time + timedelta(minutes=self._post_resume)
             self._state.paused_until = pause_end
-            logger.info(
-                "trading_paused",
-                until=pause_end.isoformat(),
-                reason=analysis.get("reasoning", ""),
-            )
 
         elif action == NewsAction.TIGHTEN_STOPS:
             self._state.tighten_stops_until = event_time + timedelta(
@@ -92,11 +84,6 @@ class EventManager:
             )
             # Also trigger entries
             self._state.pending_triggers.append(analysis)
-            logger.info(
-                "directional_action",
-                sentiments=self._state.instrument_sentiments,
-                reason=analysis.get("reasoning", ""),
-            )
 
     def is_paused(self, current_time: datetime) -> bool:
         """Check if trading is currently paused."""

@@ -200,3 +200,45 @@ max_total_drawdown_pct: 15.227
 - Multi-instrument optimization (GBP/USD, XAUUSD)
 - Investigate W6 worst MDD (10.5%) — news-driven?
 - Consider ensemble: run top-3 window params, take majority vote
+
+## Session 7 — 2026-04-08
+
+### Progress
+- Backtest performance: 8.8s → 2.8s/trial (removed news logs, breakdown skip, killed parallel processes)
+- XAUUSD walk-forward v3 (500 trials, 4 windows, --compare best/med-5/10/20)
+- News ablation tests on W1 and W2 — confirmed news module is detrimental
+- Reduced search space v2: 12 fixed + 9 restricted + 13 free params
+- IG platform migrated UK → FR (same specs, EUR/USD scaling issue found)
+- Tick data pipeline: Dukascopy validated vs IG, ticks hypertable + seed script created
+- M1 resolution supported on IG (`1Min`) and via Dukascopy tick aggregation
+
+### Decisions Made
+- **News module disabled for XAUUSD**: ablation shows -30% to -194 PnL impact. Added `--no-news` CLI flag. News PAUSE blocks profitable ICT trades, DIRECTIONAL trades have 0% WR
+- **Pivot to M1/tick-level trading**: M5 walk-forward produces poor OOS results even with spread/slippage. M1 should give tighter SL, better R:R, more trades per window for statistical significance
+- **Dukascopy for tick data**: free, 23 years history, validated against IG (0.2-0.8 pip diff). OANDA S5 is alternative
+- **No parallelization in walk-forward**: os.fork() deadlocks in asyncio context. Would need subprocess.Popen with separate worker script — deferred
+- **Per-window compare output**: walk-forward now shows best/med-5/10/20 with full params + TRAIN/TEST metrics per window, not just at the end
+- **`compute_breakdown=False` during Optuna**: ICT/News breakdown only calculated for final evaluations, not per trial
+
+### XAUUSD Walk-Forward Results (v2, 200 trials, no news, reduced search space)
+| Window | Dates OOS | best PnL | med-5 PnL | med-10 PnL | med-20 PnL |
+|--------|-----------|----------|-----------|------------|------------|
+| W1 | Mar 2-9 | -383 | -441 | -402 | -378 |
+| W2 | Mar 9-16 | -188 | -253 | -146 | -227 |
+| W3 | Mar 16-23 | -103 | +218 | -30 | +325 |
+| W4 | Mar 23-30 | +9 | +11 | -121 | -28 |
+Convergence: 33% (7/21 params). All methods negative total PnL.
+
+### Issues Encountered
+- 12 parallel walk-forward processes from run_overnight.sh saturated CPU — killed manually
+- Tick seed script launched 5 times → 2M duplicate ticks + DB locks. Need TRUNCATE after reboot
+- EUR/USD pricing on FR platform returns bid=13050 instead of 1.3050 (scaling factor issue)
+- Claude sandbox blocks `&`/`nohup` for long-running background processes
+
+### TODO / Next Session
+- Reboot, restart PostgreSQL, TRUNCATE ticks, relaunch single seed_ticks_dukascopy
+- Aggregate ticks into 10s / M1 / M5 candles (TimescaleDB continuous aggregates or batch script)
+- Build M1-based walk-forward with tighter SL for better R:R
+- Investigate EUR/USD scaling issue on IG FR platform
+- Fix random seed in simulator for reproducible results
+- Update avg_spread config for DOW30 (2.4→3.6) and GBP/USD (1.2→1.5)

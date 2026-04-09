@@ -176,6 +176,7 @@ def run_backtest(
     pip_size: float = 0.0001,
     min_stop_distance: float = 0.0,
     h1_candles: pl.DataFrame | None = None,
+    compute_breakdown: bool = True,
 ) -> tuple[list[Trade], PerformanceMetrics, SourceBreakdown]:
     """Run a single backtest, return trades, metrics, and source breakdown."""
     if candles.is_empty():
@@ -217,7 +218,11 @@ def run_backtest(
     )
     result = engine.run()
     metrics = compute_metrics(result.trades, initial_capital)
-    breakdown = compute_metrics_by_source(result.trades, initial_capital)
+    breakdown = (
+        compute_metrics_by_source(result.trades, initial_capital)
+        if compute_breakdown
+        else _empty_breakdown(initial_capital)
+    )
     return result.trades, metrics, breakdown
 
 
@@ -525,6 +530,8 @@ async def run_walk_forward(
     test_weeks: int | None = None,
     top_n_median: int = 0,
     compare_top_n: list[int] | None = None,
+    seed_params: dict[str, Any] | None = None,
+    disable_news: bool = False,
 ) -> None:
     """Run walk-forward validation with Optuna optimization.
 
@@ -565,7 +572,10 @@ async def run_walk_forward(
             end=str(data_end),
         )
 
-        all_news = await news_store.get_events(data_start, data_end)
+        all_news = (
+            [] if disable_news
+            else await news_store.get_events(data_start, data_end)
+        )
         await logger.ainfo("news_loaded", count=len(all_news))
 
         # Fetch H1 candles for multi-timeframe trend filtering
@@ -637,7 +647,9 @@ async def run_walk_forward(
         compare_results: dict[str, list[PerformanceMetrics]] = (
             defaultdict(list) if compare_top_n else {}
         )
-        prev_best_trial_params: dict[str, object] | None = None
+        prev_best_trial_params: dict[str, object] | None = (
+            dict(seed_params) if seed_params else None
+        )
 
         for i, (train_start, train_end, test_start, test_end) in enumerate(windows):
             print(f"\n{'='*60}")
@@ -695,7 +707,7 @@ async def run_walk_forward(
                 params = param_builder(trial)
                 _, metrics, _ = run_backtest(
                     _candles, instrument, params, _news, **bt_kwargs,
-                    h1_candles=_h1,
+                    h1_candles=_h1, compute_breakdown=False,
                 )
                 return score_trial(metrics, max_mdd_pct, _trading_days,
                                    initial_capital=initial_capital)
@@ -717,7 +729,6 @@ async def run_walk_forward(
 
             if top_n_median > 0 and len(viable) >= top_n_median:
                 chosen_params = _median_params(viable, top_n_median)
-                best_params = param_reconstructor(chosen_params)
                 best_score = viable[0].value
                 print(f"\n  Median of top {top_n_median} trials "
                       f"(best score={best_score:.4f}, "
@@ -726,7 +737,6 @@ async def run_walk_forward(
                     print(f"    {key}: {value}")
             else:
                 chosen_params = study.best_trial.params
-                best_params = param_reconstructor(chosen_params)
                 best_trial = study.best_trial
                 print(f"\n  Best params (trial #{best_trial.number}, "
                       f"score={best_trial.value:.4f}):")
@@ -736,39 +746,47 @@ async def run_walk_forward(
             prev_best_trial_params = chosen_params
             all_best_params.append(chosen_params)
 
-            # Evaluate on train and test
-            _, train_metrics, _ = run_backtest(
-                train_candles, instrument, best_params, train_news, **bt_kwargs,
-                h1_candles=train_h1,
-            )
-            _, test_metrics, test_breakdown = run_backtest(
-                test_candles, instrument, best_params, test_news, **bt_kwargs,
-                h1_candles=test_h1,
-            )
-            test_results.append(test_metrics)
-            all_test_breakdowns.append(test_breakdown)
-
-            print_window_results(test_metrics, test_breakdown, train_metrics)
-
-            # Compare multiple top-N strategies on OOS
+            # Evaluate variants on train and test
             if compare_top_n and viable:
-                variants = [("best", 0)] + [
+                variants: list[tuple[str, int]] = [("best", 0)] + [
                     (f"med-{n}", n) for n in compare_top_n
                 ]
-                for label, n in variants:
-                    if n == 0:
-                        vparams = param_reconstructor(viable[0].params)
-                    elif len(viable) >= n:
-                        vparams = param_reconstructor(
-                            _median_params(viable, n),
-                        )
-                    else:
-                        continue
-                    _, vm, _vb = run_backtest(
-                        test_candles, instrument, vparams,
-                        test_news, **bt_kwargs, h1_candles=test_h1,
-                    )
-                    compare_results[label].append(vm)
+            else:
+                # No compare: just evaluate the chosen params
+                variants = [(
+                    f"med-{top_n_median}" if top_n_median > 0 else "best", 0,
+                )]
+
+            for vi, (label, n) in enumerate(variants):
+                if n == 0 and compare_top_n:
+                    vdict = viable[0].params
+                elif n > 0 and len(viable) >= n:
+                    vdict = _median_params(viable, n)
+                else:
+                    vdict = chosen_params
+                vparams = param_reconstructor(vdict)
+
+                _, train_m, _ = run_backtest(
+                    train_candles, instrument, vparams, train_news,
+                    **bt_kwargs, h1_candles=train_h1, compute_breakdown=False,
+                )
+                _, test_m, test_bd = run_backtest(
+                    test_candles, instrument, vparams, test_news,
+                    **bt_kwargs, h1_candles=test_h1,
+                )
+
+                print(f"\n  --- {label.upper()} ---")
+                for key, value in sorted(vdict.items()):
+                    print(f"    {key}: {value}")
+                print_window_results(test_m, test_bd, train_m)
+
+                if compare_top_n:
+                    compare_results[label].append(test_m)
+
+                # Use first variant (main selection) for aggregated summary
+                if vi == 0:
+                    test_results.append(test_m)
+                    all_test_breakdowns.append(test_bd)
 
         # Aggregated reports
         print_summary(test_results, all_test_breakdowns, windows)
@@ -815,9 +833,21 @@ def run_walk_forward_cli(
                         help="Use median of top N trials instead of best (0=off)")
     parser.add_argument("--compare", action="store_true",
                         help="Compare best vs median-5/10/20 on OOS")
+    parser.add_argument("--seed-params", type=str, default=None,
+                        help="YAML file with params to warm-start W1")
+    parser.add_argument("--no-news", action="store_true",
+                        help="Disable news module (pass empty events)")
 
     args = parser.parse_args()
     compare = [5, 10, 20] if args.compare else None
+
+    seed: dict[str, Any] | None = None
+    if args.seed_params:
+        import yaml
+        with open(args.seed_params) as f:
+            seed = yaml.safe_load(f)
+        print(f"Seed params loaded from {args.seed_params}")
+
     asyncio.run(run_walk_forward(
         args.instrument, args.train_months, args.test_months,
         args.trials, args.capital, args.max_mdd,
@@ -826,4 +856,6 @@ def run_walk_forward_cli(
         test_weeks=args.test_weeks,
         top_n_median=args.top_n,
         compare_top_n=compare,
+        seed_params=seed,
+        disable_news=args.no_news,
     ))

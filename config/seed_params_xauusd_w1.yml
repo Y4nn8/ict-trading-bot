@@ -1,0 +1,23 @@
+# Seed params from XAUUSD v2 run W1 (median top-10, 132 viable, score=91.38)
+# Values clamped to v2 search space ranges for Optuna compatibility
+be_trigger_pct: 0.30
+disp_atr_period: 18
+disp_threshold: 1.7277547728015468
+liq_lookback: 101
+liq_min_touches: 4
+liq_tolerance_pct: 0.08028532386266263
+max_daily_gain_pct: 2.5
+max_positions: 8
+max_spread_pips: 5.45495615283027
+min_confluence: 0.49109037456002014
+ms_lookback_candles: 18
+ob_displacement_factor: 2.5
+risk_high_threshold: 0.8538459203396966
+risk_max_pct: 1.7134995316190857
+risk_pct: 0.2421349062816607
+swing_left_bars: 3
+swing_right_bars: 2
+weight_displacement: 0.8989754449000958
+weight_ms: 0.5206035558212709
+weight_ob: 0.4254994693981009
+weight_pd: 0.961321288829688

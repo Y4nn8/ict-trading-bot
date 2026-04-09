@@ -51,6 +51,7 @@ def _parse_currency_value(raw: str | None) -> float | None:
 
 
 _RESOLUTION_MAP: dict[str, str] = {
+    "M1": "1Min",
     "M5": "5Min",
     "H1": "1Hour",
     "H4": "4Hour",
