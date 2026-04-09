@@ -118,8 +118,8 @@ class MidasTrainer:
         Returns:
             TrainResult with metrics and feature importance.
         """
-        # Filter to trainable rows (exclude timeout labels from target)
-        # We keep PASS (0) rows since they're valid "don't trade" examples
+        # Extract feature columns (callers are responsible for filtering
+        # timeout rows before passing to train)
         feature_cols = [
             c for c in df.columns if c not in _META_COLUMNS
         ]
@@ -210,7 +210,7 @@ class MidasTrainer:
 
         Returns:
             (signal, confidence) where signal is 0=PASS, 1=BUY, 2=SELL
-            and confidence is the winning class probability.
+            and confidence is the probability of the emitted signal.
         """
         assert self._model is not None, "Model not trained"
         x = np.array(

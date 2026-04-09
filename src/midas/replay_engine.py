@@ -32,9 +32,15 @@ logger = get_logger(__name__)
 
 
 class TickCallback(Protocol):
-    """Protocol for streaming tick callbacks during test replay."""
+    """Protocol for sampled tick callbacks (features + signal)."""
 
     def __call__(self, tick: Tick, features: dict[str, float]) -> None: ...
+
+
+class EveryTickHook(Protocol):
+    """Protocol for per-tick hook (called on EVERY tick for exit checks)."""
+
+    def __call__(self, tick: Tick) -> None: ...
 
 
 @dataclass
@@ -94,6 +100,7 @@ class ReplayEngine:
         *,
         labeler: TickLabeler | None = None,
         tick_callback: TickCallback | None = None,
+        every_tick_hook: EveryTickHook | None = None,
     ) -> None:
         self._db = db
         self._registry = registry
@@ -103,6 +110,7 @@ class ReplayEngine:
         )
         self._labeler = labeler
         self._tick_callback = tick_callback
+        self._every_tick_hook = every_tick_hook
 
     async def run(self) -> ReplayResult:
         """Run the full replay and return results.
@@ -125,7 +133,7 @@ class ReplayEngine:
         query_end = cfg.end
         if self._labeler is not None:
             lookahead = timedelta(
-                seconds=self._labeler._config.timeout_seconds,
+                seconds=self._labeler.timeout_seconds,
             )
             query_end = cfg.end + lookahead
 
@@ -166,6 +174,10 @@ class ReplayEngine:
                     # Labeler sees every tick for lookahead resolution
                     if self._labeler is not None:
                         self._labeler.on_tick(tick)
+
+                    # Per-tick hook (e.g. TradeSimulator exit checks)
+                    if self._every_tick_hook is not None:
+                        self._every_tick_hook(tick)
 
                     # Process tick through candle builder
                     closed = self._builder.process_tick(tick)

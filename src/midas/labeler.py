@@ -76,6 +76,11 @@ class TickLabeler:
         self._resolved: list[_PendingLabel] = []
         self._next_index: int = 0
 
+    @property
+    def timeout_seconds(self) -> float:
+        """Label timeout in seconds (for lookahead query extension)."""
+        return self._config.timeout_seconds
+
     def add_entry(self, tick: Tick) -> int:
         """Register a tick as a candidate entry point.
 
@@ -110,7 +115,6 @@ class TickLabeler:
             tick: The current tick.
         """
         timeout = self._config.timeout_seconds
-        resolved_count = 0
 
         for pending in self._pending:
             # BUY evaluation: check bid for SL/TP
@@ -140,9 +144,6 @@ class TickLabeler:
                 if not pending.sell_resolved:
                     pending.sell_label = -1
                     pending.sell_resolved = True
-
-            if pending.fully_resolved:
-                resolved_count += 1
 
         # Move resolved entries out of pending
         while self._pending and self._pending[0].fully_resolved:

@@ -98,7 +98,7 @@ class TradeSimulator:
         """Number of open positions."""
         return len(self._positions)
 
-    def on_signal(self, tick: Tick, signal: int) -> MidasTrade | None:
+    def on_signal(self, tick: Tick, signal: int) -> list[MidasTrade]:
         """Process a model signal at a tick.
 
         Args:
@@ -106,7 +106,7 @@ class TradeSimulator:
             signal: 0=PASS, 1=BUY, 2=SELL.
 
         Returns:
-            A closed trade if one resolved on this tick, else None.
+            List of trades closed on this tick (may be empty).
         """
         # First, check existing positions for SL/TP
         closed = self._check_exits(tick)
@@ -117,14 +117,14 @@ class TradeSimulator:
 
         return closed
 
-    def on_tick(self, tick: Tick) -> MidasTrade | None:
+    def on_tick(self, tick: Tick) -> list[MidasTrade]:
         """Check exits without a new signal (for ticks between samples).
 
         Args:
             tick: Current tick.
 
         Returns:
-            A closed trade if one resolved.
+            List of trades closed on this tick.
         """
         return self._check_exits(tick)
 
@@ -158,31 +158,28 @@ class TradeSimulator:
         )
         self._positions.append(pos)
 
-    def _check_exits(self, tick: Tick) -> MidasTrade | None:
+    def _check_exits(self, tick: Tick) -> list[MidasTrade]:
         """Check all open positions for SL/TP hit.
 
         SL is checked before TP (pessimistic assumption).
-        Returns the first closed trade (max 1 per tick for simplicity).
+        Closes all eligible positions on the same tick.
         """
-        to_remove: int | None = None
+        closed: list[MidasTrade] = []
+        remaining: list[MidasPosition] = []
 
-        for i, pos in enumerate(self._positions):
+        for pos in self._positions:
             exit_price: float | None = None
             is_win = False
 
             if pos.direction == "BUY":
-                # BUY exits evaluated against bid
                 if tick.bid <= pos.sl_price:
                     exit_price = pos.sl_price
-                    is_win = False
                 elif tick.bid >= pos.tp_price:
                     exit_price = pos.tp_price
                     is_win = True
             else:
-                # SELL exits evaluated against ask
                 if tick.ask >= pos.sl_price:
                     exit_price = pos.sl_price
-                    is_win = False
                 elif tick.ask <= pos.tp_price:
                     exit_price = pos.tp_price
                     is_win = True
@@ -211,13 +208,12 @@ class TradeSimulator:
                 )
                 self._trades.append(trade)
                 self._capital += pnl
-                to_remove = i
-                break  # One exit per tick
+                closed.append(trade)
+            else:
+                remaining.append(pos)
 
-        if to_remove is not None:
-            self._positions.pop(to_remove)
-            return self._trades[-1]
-        return None
+        self._positions = remaining
+        return closed
 
     def close_all(self, tick: Tick) -> list[MidasTrade]:
         """Force-close all open positions at current market price.

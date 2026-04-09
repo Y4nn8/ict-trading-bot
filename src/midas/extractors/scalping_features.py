@@ -1,7 +1,8 @@
 """ScalpingFeatureExtractor: momentum, mean-reversion, and range features.
 
-Computed on multiple timeframes (10s, M1, M5, H1) using circular buffers.
-Lower-TF candles are aggregated internally into higher TFs.
+Computed on 10s and M1 timeframes using circular buffers.
+10s candles are aggregated internally into M1 via CandleAggregator.
+M5/H1 momentum is covered by the ICT extractor (trend + FVG/OB distances).
 """
 
 from __future__ import annotations
@@ -52,9 +53,9 @@ class _TFBuffers:
 
 
 class ScalpingFeatureExtractor(FeatureExtractor):
-    """Extract scalping features on multiple timeframes.
+    """Extract scalping features on 10s and M1 timeframes.
 
-    For each TF (10s, M1, M5, H1) produces:
+    For each TF (10s, M1) produces:
         scalp__{tf}_roc_fast: rate of change over fast period.
         scalp__{tf}_roc_slow: rate of change over slow period.
         scalp__{tf}_mean_rev_z: z-score of price vs rolling mean.

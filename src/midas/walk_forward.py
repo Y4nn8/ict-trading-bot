@@ -176,73 +176,21 @@ async def run_midas_walk_forward(
             test_end=test_end,
         )
 
-        # --- Phase 1: Training replay (features + labels) ---
-        print("  [1/3] Training replay + labeling...")
-
-        registry = build_default_registry(instrument=config.instrument)
-        registry.configure_all({})
-
-        labeler = TickLabeler(config.label_config)
-
-        train_replay = ReplayEngine(
-            db, registry,
-            ReplayConfig(
-                instrument=config.instrument,
-                start=train_start,
-                end=train_end,
-                sample_rate=config.sample_rate,
-            ),
-            labeler=labeler,
-        )
-
-        train_result = await train_replay.run()
-        label_result = train_result.label_result
-
-        if label_result is None or label_result.total_labeled == 0:
-            print("  SKIP: no labels produced")
-            results.append(wr)
-            continue
-
-        print(f"    Ticks: {train_result.total_ticks:,}, "
-              f"Features: {train_result.feature_rows:,}, "
-              f"Labels: {label_result.total_labeled:,}")
-        print(f"    BUY wins: {label_result.buy_wins}, "
-              f"losses: {label_result.buy_losses}, "
-              f"SELL wins: {label_result.sell_wins}, "
-              f"losses: {label_result.sell_losses}, "
-              f"timeouts: {label_result.timeouts}")
-
-        # --- Phase 2: Train LightGBM ---
-        print("  [2/3] Training LightGBM...")
-
-        # Build DataFrame from the collect-mode replay
-        # We need to re-extract features since they were collected internally
-        # The replay engine stores them in chunks; we need to reconstruct
-        # Actually, the replay already collected features. Let's read them.
-        # We need to re-run with output to get the DataFrame.
-        # Better approach: run a second replay that collects features + labels.
-
-        # Re-run replay to collect features (the first run already did this
-        # but we don't have access to the internal chunks).
-        # For efficiency, we should store them. Let me refactor:
-        # Actually the labeler was hooked into the first replay, and the
-        # features were collected in the ReplayEngine's internal chunks.
-        # But ReplayEngine.run() doesn't return the DataFrame directly.
-        # Let's write to a temp parquet and read it back.
+        # --- Phase 1: Training replay (features + labels) + train ---
+        print("  [1/2] Training replay + labeling + LightGBM...")
 
         import tempfile
         from pathlib import Path
 
+        registry = build_default_registry(instrument=config.instrument)
+        registry.configure_all({})
+        labeler = TickLabeler(config.label_config)
+
         with tempfile.TemporaryDirectory() as tmpdir:
             train_parquet = Path(tmpdir) / "train.parquet"
 
-            # Re-run with output path
-            registry2 = build_default_registry(instrument=config.instrument)
-            registry2.configure_all({})
-            labeler2 = TickLabeler(config.label_config)
-
-            train_replay2 = ReplayEngine(
-                db, registry2,
+            train_engine = ReplayEngine(
+                db, registry,
                 ReplayConfig(
                     instrument=config.instrument,
                     start=train_start,
@@ -250,36 +198,38 @@ async def run_midas_walk_forward(
                     sample_rate=config.sample_rate,
                     output_path=train_parquet,
                 ),
-                labeler=labeler2,
+                labeler=labeler,
             )
-            train_result2 = await train_replay2.run()
-            label_result2 = train_result2.label_result
+            train_result = await train_engine.run()
+            label_result = train_result.label_result
 
             if (
-                label_result2 is None
+                label_result is None
                 or not train_parquet.exists()
             ):
                 print("  SKIP: training data generation failed")
                 results.append(wr)
                 continue
 
+            print(f"    Ticks: {train_result.total_ticks:,}, "
+                  f"Features: {train_result.feature_rows:,}, "
+                  f"Labels: {label_result.total_labeled:,}")
+            print(f"    BUY wins: {label_result.buy_wins}, "
+                  f"losses: {label_result.buy_losses}, "
+                  f"SELL wins: {label_result.sell_wins}, "
+                  f"losses: {label_result.sell_losses}, "
+                  f"timeouts: {label_result.timeouts}")
+
             df = pl.read_parquet(train_parquet)
 
-        # Build target from labels
+        # Build target from labels (vectorized mask)
         target = MidasTrainer.build_target(
-            label_result2.buy_labels,
-            label_result2.sell_labels,
+            label_result.buy_labels,
+            label_result.sell_labels,
         )
-
-        # Filter out timeout rows (target stays 0=PASS for both-lose)
-        # But keep PASS rows as valid negatives
-        mask = np.ones(len(target), dtype=bool)
-        for j in range(len(target)):
-            if (
-                label_result2.buy_labels[j] == -1
-                and label_result2.sell_labels[j] == -1
-            ):
-                mask[j] = False
+        buy_arr = np.asarray(label_result.buy_labels)
+        sell_arr = np.asarray(label_result.sell_labels)
+        mask = ~((buy_arr == -1) & (sell_arr == -1))
 
         if mask.sum() < 100:
             print(f"  SKIP: only {mask.sum()} valid rows after filtering")
@@ -309,8 +259,8 @@ async def run_midas_walk_forward(
         print(f"    Class dist: {wr.class_dist}")
         print(f"    Top features: {[f[0] for f in sorted_imp]}")
 
-        # --- Phase 3: Test replay with live prediction ---
-        print("  [3/3] Test replay + simulation...")
+        # --- Phase 2: Test replay with live prediction ---
+        print("  [2/2] Test replay + simulation...")
 
         simulator = TradeSimulator(config.sim_config)
 
@@ -324,6 +274,13 @@ async def run_midas_walk_forward(
             signal, _conf = _tr.predict(features)
             _sim.on_signal(tick, signal)
 
+        def exit_hook(
+            tick: Tick,
+            *,
+            _sim: TradeSimulator = simulator,
+        ) -> None:
+            _sim.on_tick(tick)
+
         test_registry = build_default_registry(instrument=config.instrument)
         test_registry.configure_all({})
 
@@ -336,9 +293,19 @@ async def run_midas_walk_forward(
                 sample_rate=config.test_sample_rate,
             ),
             tick_callback=test_callback,
+            every_tick_hook=exit_hook,
         )
         test_result = await test_engine.run()
         wr.n_test_ticks = test_result.total_ticks
+
+        # Force-close remaining positions at window end
+        if simulator.open_count > 0 and test_result.total_ticks > 0:
+            end_tick = Tick(
+                time=test_end,
+                bid=simulator._positions[0].entry_price,
+                ask=simulator._positions[0].entry_price,
+            )
+            simulator.close_all(end_tick)
 
         trades = simulator.closed_trades
         wr.n_trades = len(trades)

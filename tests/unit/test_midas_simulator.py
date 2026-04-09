@@ -47,12 +47,12 @@ class TestTradeSimulator:
         sim.on_signal(_tick(0, bid=100.0, ask=101.0), signal=1)
 
         # TP at 103, bid reaches 103
-        trade = sim.on_tick(_tick(1, bid=103.0, ask=104.0))
+        trades = sim.on_tick(_tick(1, bid=103.0, ask=104.0))
 
-        assert trade is not None
-        assert trade.is_win is True
-        assert trade.pnl_points == pytest.approx(2.0)  # 103 - 101
-        assert trade.pnl == pytest.approx(2.0)  # 2pts * 0.1 * 10
+        assert len(trades) == 1
+        assert trades[0].is_win is True
+        assert trades[0].pnl_points == pytest.approx(2.0)  # 103 - 101
+        assert trades[0].pnl == pytest.approx(2.0)  # 2pts * 0.1 * 10
 
     def test_buy_sl_hit(self) -> None:
         sim = TradeSimulator(SimConfig(
@@ -62,12 +62,12 @@ class TestTradeSimulator:
         sim.on_signal(_tick(0, bid=100.0, ask=101.0), signal=1)
 
         # SL at 99, bid drops to 99
-        trade = sim.on_tick(_tick(1, bid=99.0, ask=100.0))
+        trades = sim.on_tick(_tick(1, bid=99.0, ask=100.0))
 
-        assert trade is not None
-        assert trade.is_win is False
-        assert trade.pnl_points == pytest.approx(-2.0)  # 99 - 101
-        assert trade.pnl == pytest.approx(-2.0)
+        assert len(trades) == 1
+        assert trades[0].is_win is False
+        assert trades[0].pnl_points == pytest.approx(-2.0)  # 99 - 101
+        assert trades[0].pnl == pytest.approx(-2.0)
 
     def test_sell_tp_hit(self) -> None:
         sim = TradeSimulator(SimConfig(
@@ -77,11 +77,11 @@ class TestTradeSimulator:
         sim.on_signal(_tick(0, bid=100.0, ask=101.0), signal=2)
 
         # SELL TP at 98, ask drops to 98
-        trade = sim.on_tick(_tick(1, bid=97.0, ask=98.0))
+        trades = sim.on_tick(_tick(1, bid=97.0, ask=98.0))
 
-        assert trade is not None
-        assert trade.is_win is True
-        assert trade.pnl_points == pytest.approx(2.0)  # 100 - 98
+        assert len(trades) == 1
+        assert trades[0].is_win is True
+        assert trades[0].pnl_points == pytest.approx(2.0)  # 100 - 98
 
     def test_max_positions_enforced(self) -> None:
         sim = TradeSimulator(SimConfig(max_open_positions=1))
