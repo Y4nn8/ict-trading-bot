@@ -12,7 +12,6 @@ from typing import Any
 
 import numpy as np
 
-from src.common.logging import get_logger
 from src.common.models import Direction, Trade
 from src.midas.labeler import TickLabeler
 from src.midas.replay_engine import (
@@ -23,8 +22,6 @@ from src.midas.replay_engine import (
 from src.midas.trade_simulator import MidasTrade, SimConfig, TradeSimulator
 from src.midas.trainer import MidasTrainer, TrainerConfig
 from src.midas.types import LabelConfig, Tick
-
-logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)

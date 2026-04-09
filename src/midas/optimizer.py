@@ -18,7 +18,6 @@ import numpy as np
 import optuna
 import polars as pl
 
-from src.common.logging import get_logger
 from src.midas.labeler import TickLabeler
 from src.midas.replay_engine import (
     ReplayConfig,
@@ -31,8 +30,6 @@ from src.midas.types import LabelConfig, Tick
 
 if TYPE_CHECKING:
     from src.common.db import Database
-
-logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,16 +78,14 @@ class OptimizationResult:
 def _suggest_outer_params(
     trial: optuna.Trial,
     registry_params: list[Any],
-) -> dict[str, float]:
+) -> dict[str, Any]:
     """Suggest extractor params + SL/TP for the outer loop."""
-    params: dict[str, float] = {}
+    params: dict[str, Any] = {}
 
     # Feature extractor tunable params
     for p in registry_params:
         if p.param_type == "int":
-            params[p.name] = float(
-                trial.suggest_int(p.name, int(p.low), int(p.high)),
-            )
+            params[p.name] = trial.suggest_int(p.name, int(p.low), int(p.high))
         else:
             params[p.name] = trial.suggest_float(p.name, p.low, p.high)
 
@@ -134,7 +129,7 @@ def _evaluate_oos(
 ) -> tuple[float, int, float]:
     """Run OOS test evaluation synchronously (called from Optuna).
 
-    Returns (score, n_trades, win_rate).
+    Returns (score, n_trades, win_rate, total_pnl).
     """
     import asyncio
 
@@ -169,12 +164,16 @@ async def _evaluate_oos_async(
         signal, _ = tr.predict(features)
         sim.on_signal(tick, signal)
 
+    last_tick_holder: list[Tick | None] = [None]
+
     def exit_hook(
         tick: Tick,
         *,
         sim: TradeSimulator = _simulator,
+        holder: list[Tick | None] = last_tick_holder,
     ) -> None:
         sim.on_tick(tick)
+        holder[0] = tick
 
     registry = registry_factory()
     registry.configure_all(extractor_params)
@@ -192,6 +191,10 @@ async def _evaluate_oos_async(
         every_tick_hook=exit_hook,
     )
     await engine.run()
+
+    # Force-close remaining positions at last market price
+    if simulator.open_count > 0 and last_tick_holder[0] is not None:
+        simulator.close_all(last_tick_holder[0])
 
     trades = simulator.closed_trades
     n_trades = len(trades)

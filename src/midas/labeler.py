@@ -1,14 +1,11 @@
-"""TickLabeler: label ticks for entry and exit model training.
+"""TickLabeler: label ticks for entry model training.
 
-Entry labels: for each sampled tick, evaluates hypothetical BUY/SELL
-trades with SL/TP lookahead. Tracks actual PnL in points (not just win/loss).
-
-Exit labels: for each tick during an open position, determines whether
-closing now gives better PnL than holding to SL/TP resolution.
+For each sampled tick, evaluates hypothetical BUY/SELL trades with
+SL/TP lookahead. Tracks actual PnL in points (not just win/loss).
 
 Labels:
-    Entry: pnl_points (positive = profit, negative = loss, NaN = timeout)
-    Exit:  1 = CLOSE is better, 0 = HOLD is better, -1 = unresolved
+    buy_label/sell_label: 1=win, 0=loss, -1=timeout
+    buy_pnl/sell_pnl: actual PnL in price points
 """
 
 from __future__ import annotations
@@ -54,17 +51,6 @@ class _PendingEntry:
 
 
 @dataclass
-class _PendingExit:
-    """A tick during an open position, pending exit label."""
-
-    feature_index: int
-    direction: str  # "BUY" or "SELL"
-    unrealized_pnl: float  # PnL if we close now (points)
-    eventual_pnl: float | None = None  # PnL at SL/TP resolution
-    label: int = -1  # 1=CLOSE better, 0=HOLD better, -1=unresolved
-
-
-@dataclass
 class LabelResult:
     """Output of the labeling process."""
 
@@ -80,11 +66,6 @@ class LabelResult:
     sell_losses: int = 0
     timeouts: int = 0
 
-    # Exit labels (per tick with open position)
-    exit_feature_indices: list[int] = field(default_factory=list)
-    exit_labels: list[int] = field(default_factory=list)
-    exit_unrealized_pnls: list[float] = field(default_factory=list)
-    exit_directions: list[str] = field(default_factory=list)
 
 
 class TickLabeler:
