@@ -729,7 +729,6 @@ async def run_walk_forward(
 
             if top_n_median > 0 and len(viable) >= top_n_median:
                 chosen_params = _median_params(viable, top_n_median)
-                best_params = param_reconstructor(chosen_params)
                 best_score = viable[0].value
                 print(f"\n  Median of top {top_n_median} trials "
                       f"(best score={best_score:.4f}, "
@@ -738,7 +737,6 @@ async def run_walk_forward(
                     print(f"    {key}: {value}")
             else:
                 chosen_params = study.best_trial.params
-                best_params = param_reconstructor(chosen_params)
                 best_trial = study.best_trial
                 print(f"\n  Best params (trial #{best_trial.number}, "
                       f"score={best_trial.value:.4f}):")
