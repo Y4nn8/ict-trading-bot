@@ -66,3 +66,18 @@ class MidasSignal(StrEnum):
     PASS = "PASS"
     HOLD = "HOLD"
     CLOSE = "CLOSE"
+
+
+@dataclass(frozen=True, slots=True)
+class LabelConfig:
+    """Configuration for tick labeling with SL/TP lookahead.
+
+    Args:
+        sl_points: Stop loss distance in price points.
+        tp_points: Take profit distance in price points.
+        timeout_seconds: Max lookahead for SL/TP resolution.
+    """
+
+    sl_points: float = 3.0
+    tp_points: float = 3.0
+    timeout_seconds: float = 300.0

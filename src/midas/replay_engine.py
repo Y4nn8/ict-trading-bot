@@ -2,13 +2,20 @@
 
 Streams ticks from TimescaleDB, builds 10s candles, runs all feature
 extractors at every tick, and collects the feature matrix.
+
+Supports two modes:
+  - **Collect mode** (default): accumulates features → Parquet file.
+  - **Callback mode**: streams features to a user callback for live
+    prediction + trade simulation (used during walk-forward testing).
+
+Optionally integrates a TickLabeler for training data generation.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import TYPE_CHECKING
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Protocol
 
 from src.common.logging import get_logger
 from src.midas.candle_builder import CandleBuilder
@@ -20,8 +27,15 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from src.common.db import Database
+    from src.midas.labeler import LabelResult, TickLabeler
 
 logger = get_logger(__name__)
+
+
+class TickCallback(Protocol):
+    """Protocol for streaming tick callbacks during test replay."""
+
+    def __call__(self, tick: Tick, features: dict[str, float]) -> None: ...
 
 
 @dataclass
@@ -32,6 +46,7 @@ class ReplayResult:
     total_candles: int = 0
     feature_rows: int = 0
     output_path: Path | None = None
+    label_result: LabelResult | None = None
 
 
 @dataclass
@@ -66,6 +81,10 @@ class ReplayEngine:
         db: Database connection.
         registry: Feature extractor registry.
         config: Replay configuration.
+        labeler: Optional tick labeler for training data generation.
+        tick_callback: Optional callback for streaming test evaluation.
+            When set, features are passed to the callback instead of
+            being accumulated in memory.
     """
 
     def __init__(
@@ -73,6 +92,9 @@ class ReplayEngine:
         db: Database,
         registry: FeatureRegistry,
         config: ReplayConfig,
+        *,
+        labeler: TickLabeler | None = None,
+        tick_callback: TickCallback | None = None,
     ) -> None:
         self._db = db
         self._registry = registry
@@ -80,12 +102,15 @@ class ReplayEngine:
         self._builder = CandleBuilder(
             bucket_seconds=config.bucket_seconds,
         )
+        self._labeler = labeler
+        self._tick_callback = tick_callback
 
     async def run(self) -> ReplayResult:
         """Run the full replay and return results.
 
         Streams ticks in chunks via asyncpg cursor for memory efficiency.
-        Writes features to Parquet in streaming chunks if output_path is set.
+        When labeler is set, extends query range by timeout_seconds for
+        lookahead data.
         """
         import polars as pl
 
@@ -95,6 +120,15 @@ class ReplayEngine:
         current_chunk: list[dict[str, float]] = []
         chunk_flush_size = 100_000
         tick_counter = 0
+        is_callback_mode = self._tick_callback is not None
+
+        # Extend query range for labeler lookahead
+        query_end = cfg.end
+        if self._labeler is not None:
+            lookahead = timedelta(
+                seconds=self._labeler._config.timeout_seconds,
+            )
+            query_end = cfg.end + lookahead
 
         await logger.ainfo(
             "replay_start",
@@ -102,67 +136,92 @@ class ReplayEngine:
             start=str(cfg.start),
             end=str(cfg.end),
             sample_rate=cfg.sample_rate,
+            mode="callback" if is_callback_mode else "collect",
+            labeling=self._labeler is not None,
         )
 
         async with self._db.pool.acquire() as conn, conn.transaction():
-                cursor = conn.cursor(
-                    "SELECT time, bid, ask FROM ticks "
-                    "WHERE instrument = $1 AND time >= $2 AND time < $3 "
-                    "ORDER BY time ASC",
-                    cfg.instrument,
-                    cfg.start,
-                    cfg.end,
-                )
+            cursor = conn.cursor(
+                "SELECT time, bid, ask FROM ticks "
+                "WHERE instrument = $1 AND time >= $2 AND time < $3 "
+                "ORDER BY time ASC",
+                cfg.instrument,
+                cfg.start,
+                query_end,
+            )
 
-                while True:
-                    rows = await cursor.fetch(cfg.chunk_size)
-                    if not rows:
-                        break
+            while True:
+                rows = await cursor.fetch(cfg.chunk_size)
+                if not rows:
+                    break
 
-                    for row in rows:
-                        tick = Tick(
-                            time=row["time"],
-                            bid=float(row["bid"]),
-                            ask=float(row["ask"]),
+                for row in rows:
+                    tick = Tick(
+                        time=row["time"],
+                        bid=float(row["bid"]),
+                        ask=float(row["ask"]),
+                    )
+                    result.total_ticks += 1
+                    tick_counter += 1
+
+                    # Labeler sees every tick for lookahead resolution
+                    if self._labeler is not None:
+                        self._labeler.on_tick(tick)
+
+                    # Process tick through candle builder
+                    closed = self._builder.process_tick(tick)
+                    if closed is not None:
+                        result.total_candles += 1
+                        self._registry.on_candle_close(
+                            closed, self._builder.candle_index - 1,
                         )
-                        result.total_ticks += 1
-                        tick_counter += 1
+                        self._record_spread_on_close(tick.spread)
 
-                        # Process tick through candle builder
-                        closed = self._builder.process_tick(tick)
-                        if closed is not None:
-                            result.total_candles += 1
-                            self._registry.on_candle_close(
-                                closed, self._builder.candle_index - 1,
+                    # Only extract features within the nominal window
+                    in_window = tick.time < cfg.end
+
+                    # Extract features (respecting sample rate)
+                    if (
+                        in_window
+                        and tick_counter % cfg.sample_rate == 0
+                    ):
+                        partial = self._builder.partial
+                        if partial is not None:
+                            features = self._registry.extract_all(
+                                tick,
+                                partial,
+                                self._builder.candle_index,
                             )
-                            # Record spread for tick extractor
-                            self._record_spread_on_close(tick.spread)
+                            features["_time"] = tick.time.timestamp()
+                            features["_bid"] = tick.bid
+                            features["_ask"] = tick.ask
 
-                        # Extract features (respecting sample rate)
-                        if tick_counter % cfg.sample_rate == 0:
-                            partial = self._builder.partial
-                            if partial is not None:
-                                features = self._registry.extract_all(
-                                    tick,
-                                    partial,
-                                    self._builder.candle_index,
-                                )
-                                features["_time"] = tick.time.timestamp()
-                                features["_bid"] = tick.bid
-                                features["_ask"] = tick.ask
+                            # Register entry for labeling
+                            if self._labeler is not None:
+                                self._labeler.add_entry(tick)
+
+                            # Callback mode: stream directly
+                            if is_callback_mode:
+                                assert self._tick_callback is not None
+                                self._tick_callback(tick, features)
+                            else:
                                 current_chunk.append(features)
-                                result.feature_rows += 1
 
-                        # Flush chunk to list
-                        if len(current_chunk) >= chunk_flush_size:
-                            feature_chunks.append(current_chunk)
-                            current_chunk = []
-                            await logger.ainfo(
-                                "replay_progress",
-                                ticks=result.total_ticks,
-                                candles=result.total_candles,
-                                features=result.feature_rows,
-                            )
+                            result.feature_rows += 1
+
+                    # Flush chunk to list (collect mode only)
+                    if (
+                        not is_callback_mode
+                        and len(current_chunk) >= chunk_flush_size
+                    ):
+                        feature_chunks.append(current_chunk)
+                        current_chunk = []
+                        await logger.ainfo(
+                            "replay_progress",
+                            ticks=result.total_ticks,
+                            candles=result.total_candles,
+                            features=result.feature_rows,
+                        )
 
         # Flush last partial candle
         last_candle = self._builder.flush()
@@ -173,8 +232,12 @@ class ReplayEngine:
             )
 
         # Flush remaining features
-        if current_chunk:
+        if not is_callback_mode and current_chunk:
             feature_chunks.append(current_chunk)
+
+        # Finalize labeler
+        if self._labeler is not None:
+            result.label_result = self._labeler.finalize()
 
         await logger.ainfo(
             "replay_complete",
@@ -183,8 +246,8 @@ class ReplayEngine:
             feature_rows=result.feature_rows,
         )
 
-        # Write output
-        if feature_chunks:
+        # Write output (collect mode only)
+        if not is_callback_mode and feature_chunks:
             all_rows = [
                 row for chunk in feature_chunks for row in chunk
             ]
@@ -212,7 +275,7 @@ def build_default_registry(instrument: str = "XAUUSD") -> FeatureRegistry:
     """Create a FeatureRegistry with all default extractors.
 
     Args:
-        instrument: Instrument name for ICT/HTF extractors.
+        instrument: Instrument name for ICT extractors.
 
     Returns:
         Configured FeatureRegistry.
