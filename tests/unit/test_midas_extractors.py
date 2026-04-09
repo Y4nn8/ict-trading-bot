@@ -103,10 +103,40 @@ class TestTickFeatureExtractor:
         features = ext.extract(_make_tick(), partial, 0)
         assert features["tick__elapsed_pct"] == pytest.approx(0.75)
 
+    def test_spread_z_nonzero_after_candle_history(self) -> None:
+        ext = TickFeatureExtractor()
+        ext.configure({"spread_avg_period": 5})
+
+        # Feed 5 candles with varying spreads
+        for i in range(5):
+            spread = 0.5 + i * 0.1
+            ext.on_candle_close(
+                {"time": None, "open": 100, "high": 101, "low": 99,
+                 "close": 100, "tick_count": 10,
+                 "bid": 100 - spread / 2, "ask": 100 + spread / 2},
+                i,
+            )
+
+        # Tick with a very wide spread should have positive z-score
+        features = ext.extract(
+            _make_tick(spread=2.0), _make_partial(), 5,
+        )
+        assert features["tick__spread_z"] > 1.0  # well above average
+
+        # Tick with a tight spread should have negative z-score
+        features_tight = ext.extract(
+            _make_tick(spread=0.1), _make_partial(), 5,
+        )
+        assert features_tight["tick__spread_z"] < -1.0
+
     def test_reset_clears_state(self) -> None:
         ext = TickFeatureExtractor()
         ext.configure({})
-        ext._record_spread(0.5)
+        ext.on_candle_close(
+            {"time": None, "open": 100, "high": 101, "low": 99,
+             "close": 100, "tick_count": 10, "bid": 99.75, "ask": 100.25},
+            0,
+        )
         ext.reset()
         assert len(ext._candle_spreads) == 0
 
@@ -140,7 +170,7 @@ class TestScalpingFeatureExtractor:
             assert f"scalp__{tf}_range_ratio" in features
             assert f"scalp__{tf}_body_ratio" in features
             assert f"scalp__{tf}_direction_streak" in features
-        # M5/H1 not produced (covered by htf__ extractor)
+        # M5/H1 momentum not produced here (covered by ict__ extractor)
         assert "scalp__m5_roc_fast" not in features
         assert "scalp__h1_roc_fast" not in features
 

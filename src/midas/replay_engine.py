@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Protocol
 
 from src.common.logging import get_logger
 from src.midas.candle_builder import CandleBuilder
-from src.midas.extractors.tick_features import TickFeatureExtractor
 from src.midas.feature_extractor import FeatureRegistry
 from src.midas.types import Tick
 
@@ -175,7 +174,6 @@ class ReplayEngine:
                         self._registry.on_candle_close(
                             closed, self._builder.candle_index - 1,
                         )
-                        self._record_spread_on_close(tick.spread)
 
                     # Only extract features within the nominal window
                     in_window = tick.time < cfg.end
@@ -263,12 +261,6 @@ class ReplayEngine:
                 )
 
         return result
-
-    def _record_spread_on_close(self, spread: float) -> None:
-        """Record spread in TickFeatureExtractor on candle close."""
-        for ext in self._registry.extractors:
-            if isinstance(ext, TickFeatureExtractor):
-                ext._record_spread(spread)
 
 
 def build_default_registry(instrument: str = "XAUUSD") -> FeatureRegistry:

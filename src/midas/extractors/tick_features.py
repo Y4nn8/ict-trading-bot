@@ -19,18 +19,21 @@ class TickFeatureExtractor(FeatureExtractor):
 
     Features:
         tick__spread: current bid-ask spread.
-        tick__spread_z: spread z-score vs recent candle avg spreads.
+        tick__spread_z: spread z-score vs recent candle close spreads.
         tick__partial_range: current partial candle range.
         tick__position_in_range: close position in candle range (0-1).
         tick__elapsed_pct: fraction of bucket duration elapsed (0-1).
         tick__tick_count: number of ticks in current partial candle.
         tick__mid: current mid price.
+
+    Args:
+        bucket_seconds: Duration of candle buckets (must match CandleBuilder).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, bucket_seconds: int = 10) -> None:
         self._spread_avg_period: int = 30
         self._candle_spreads: deque[float] = deque()
-        self._bucket_seconds: float = 10.0
+        self._bucket_seconds: float = float(bucket_seconds)
 
     @property
     def name(self) -> str:
@@ -52,14 +55,11 @@ class TickFeatureExtractor(FeatureExtractor):
         closed_candle: dict[str, Any],
         candle_index: int,
     ) -> None:
-        # Record the candle's spread for z-score computation
-        # avg spread = ask - bid at close (approximated from last tick)
-        # Since we don't store spread in closed candle, use what we have
-        pass
-
-    def _record_spread(self, spread: float) -> None:
-        """Record a tick spread for z-score computation on candle close."""
-        self._candle_spreads.append(spread)
+        # Record the candle's close spread (bid/ask from last tick of candle)
+        bid = closed_candle.get("bid")
+        ask = closed_candle.get("ask")
+        if bid is not None and ask is not None:
+            self._candle_spreads.append(float(ask) - float(bid))
 
     def extract(
         self,
@@ -69,7 +69,7 @@ class TickFeatureExtractor(FeatureExtractor):
     ) -> dict[str, float]:
         spread = tick.spread
 
-        # Spread z-score
+        # Spread z-score vs recent candle close spreads
         if len(self._candle_spreads) >= 2:
             spreads = list(self._candle_spreads)
             avg = sum(spreads) / len(spreads)
@@ -78,11 +78,6 @@ class TickFeatureExtractor(FeatureExtractor):
             spread_z = (spread - avg) / std if std > 0 else 0.0
         else:
             spread_z = 0.0
-
-        # Record spread for future z-scores (once per candle close)
-        # We record on every tick but only the last value per candle matters;
-        # the deque is updated in extract since on_candle_close doesn't have
-        # spread info. We'll let the replay engine call _record_spread.
 
         return {
             "tick__spread": spread,

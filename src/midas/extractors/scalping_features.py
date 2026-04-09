@@ -158,9 +158,9 @@ class ScalpingFeatureExtractor(FeatureExtractor):
             recent_ranges = list(buf.ranges)[-self._atr_period:]
             atr = sum(recent_ranges) / len(recent_ranges)
 
-        # Range ratio (only meaningful for 10s where we have partial candle)
+        # Range ratio (only meaningful for 10s — partial_range is always 10s)
         range_ratio = 0.0
-        if atr > 0:
+        if tf == "10s" and atr > 0:
             range_ratio = partial_range / atr
 
         # Body ratio

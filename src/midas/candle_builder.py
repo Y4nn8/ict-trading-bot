@@ -116,7 +116,7 @@ class CandleBuilder:
 
         Returns:
             A closed candle dict (time, open, high, low, close, tick_count,
-            avg_spread) if a candle just closed, else None.
+            bid, ask) if a candle just closed, else None.
         """
         mid = tick.mid
         bucket = self._bucket_start(tick.time)
@@ -177,6 +177,8 @@ class CandleBuilder:
             "low": p.low,
             "close": p.close,
             "tick_count": p.tick_count,
+            "bid": p.bid,
+            "ask": p.ask,
         }
 
     def flush(self) -> dict[str, Any] | None:
