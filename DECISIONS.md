@@ -242,3 +242,45 @@ Convergence: 33% (7/21 params). All methods negative total PnL.
 - Investigate EUR/USD scaling issue on IG FR platform
 - Fix random seed in simulator for reproducible results
 - Update avg_spread config for DOW30 (2.4→3.6) and GBP/USD (1.2→1.5)
+
+## Session 8 — 2026-04-09
+
+### Progress
+- Merged PR #14: walk-forward v2 (reduced search space, no-news flag, seed params)
+- Built entire Midas ML scalping engine (PR #15, feat/midas-core):
+  - Feature extraction: 42 features (tick, scalping 10s+M1, ICT M5+H1)
+  - Labeling: SL/TP lookahead with real bid/ask, PnL tracking
+  - LightGBM: entry model (3-class BUY/SELL/PASS, PnL-weighted) + exit model (binary HOLD/CLOSE)
+  - Trade simulator: tick-level, entry@ask/exit@bid, spread accounted
+  - Walk-forward + nested Optuna optimizer
+- First smoke test: 2 windows, 90 trades, PnL -98.78, WR 33.6% (default params)
+- First Optuna run launched (30x30, score=pnl, train Jan, test Feb 1-3)
+
+### Decisions Made
+- **ICT on M5/H1 only**: 10s candles too noisy for SMC concepts (FVG, OB, BOS/CHoCH)
+- **Scalping features on 10s+M1**: M5/H1 momentum covered by ICT trend/FVG distances
+- **Sample on candle close**: features extracted per 10s candle close, not every N ticks. Tick rate varies by session, candle close is deterministic
+- **No pre-aggregation needed**: M1/M5/H1 built on the fly during replay from 10s candles
+- **Exit model**: LightGBM binary HOLD/CLOSE, trained on losing entries. Can close before SL/TP
+- **PnL-weighted training**: trades with larger PnL (win or loss) weighted more
+- **Composite score** (not yet used): PnL * sqrt(WR) * log(trades) — balances profit, consistency, volume
+- **Spread accounted naturally**: BUY enters at ask, exits against bid. Dukascopy median ~0.89 USD
+- **No slippage simulation yet**: SL/TP exit at exact price level, to be added later
+
+### First Optuna Results (partial, trials 1-7 of 30)
+- SL 5-6pts + TP 3-5pts works best (wide SL, medium TP)
+- SL < 3pts always loses (spread eats too much)
+- Low threshold (~0.37) = more trades, better PnL
+- Best: trial 4, SL=6.2, TP=3.5, PnL=+10.98
+
+### Issues Encountered
+- asyncpg `conn.cursor()` returns CursorFactory, not cursor — need `conn.prepare()` + `stmt.cursor()`
+- Coverage dropped to 69.47% with new modules — added utility tests to reach 71%+
+
+### TODO / Next Session
+- Analyze Optuna results, decide on SL/TP range
+- Re-run Optuna with composite score (PnL * sqrt(WR) * log(trades))
+- Add slippage simulation (random or tick-price-based SL/TP exit)
+- Position sizing optimization (after finding profitable strategy)
+- Merge PR #15 and update DECISIONS.md
+- Consider longer train window (2+ months) for more data
