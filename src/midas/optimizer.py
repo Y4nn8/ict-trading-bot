@@ -153,8 +153,8 @@ async def _evaluate_oos_async(
     config: OptimizerConfig,
     registry_factory: Any,
     extractor_params: dict[str, float],
-) -> tuple[float, int, float]:
-    """Run OOS test and return (score, n_trades, win_rate)."""
+) -> tuple[float, int, float, float]:
+    """Run OOS test and return (score, n_trades, win_rate, total_pnl)."""
     simulator = TradeSimulator(sim_config)
     _trainer = trainer
     _simulator = simulator
@@ -187,7 +187,7 @@ async def _evaluate_oos_async(
     trades = simulator.closed_trades
     n_trades = len(trades)
     if n_trades == 0:
-        return -1000.0, 0, 0.0
+        return -1000.0, 0, 0.0, 0.0
 
     total_pnl = sum(t.pnl for t in trades)
     wins = sum(1 for t in trades if t.is_win)
@@ -200,7 +200,7 @@ async def _evaluate_oos_async(
     else:
         score = total_pnl
 
-    return score, n_trades, win_rate
+    return score, n_trades, win_rate, total_pnl
 
 
 async def run_nested_optuna(
@@ -302,14 +302,10 @@ async def run_nested_optuna(
             label_result.sell_labels,
         )
 
-        # Filter timeout rows
-        mask = np.ones(len(target), dtype=bool)
-        for j in range(len(target)):
-            if (
-                label_result.buy_labels[j] == -1
-                and label_result.sell_labels[j] == -1
-            ):
-                mask[j] = False
+        # Filter timeout rows (vectorized)
+        buy_arr = np.asarray(label_result.buy_labels)
+        sell_arr = np.asarray(label_result.sell_labels)
+        mask = ~((buy_arr == -1) & (sell_arr == -1))
 
         if mask.sum() < 100:
             print(f"  SKIP: only {mask.sum()} valid rows")
@@ -365,7 +361,7 @@ async def run_nested_optuna(
                 max_spread=2.0,
             )
 
-            score, _n_trades, _wr = await _evaluate_oos_async(
+            score, _n_trades, _wr, _pnl = await _evaluate_oos_async(
                 trainer, sim_config, db, config,
                 registry_factory, extractor_params,
             )
@@ -391,12 +387,11 @@ async def run_nested_optuna(
 
             # Re-evaluate to get trade stats
             if best_inner_trainer is not None:
-                _, best_trades, best_wr = await _evaluate_oos_async(
+                _, best_trades, best_wr, best_pnl = await _evaluate_oos_async(
                     best_inner_trainer,
                     SimConfig(sl_points=sl, tp_points=tp, max_spread=2.0),
                     db, config, registry_factory, extractor_params,
                 )
-                best_pnl = best_score
 
     result.best_outer_params = best_outer
     result.best_inner_params = best_inner

@@ -308,6 +308,41 @@ class TestICTFeatureExtractor:
         features = ext.extract(_make_tick(price=103.0), _make_partial(), 30)
         assert "ict__m5_trend" in features
 
+    def test_ict_with_price_movement(self) -> None:
+        """Feed enough candles with a trend to exercise detection paths."""
+        ext = ICTFeatureExtractor()
+        ext.configure({"lookback": 5, "fvg_max_age": 50})
+
+        # Feed 90 candles (3 M5 candles) with uptrend
+        for i in range(90):
+            price = 100.0 + i * 0.5
+            ext.on_candle_close(
+                _make_candle(i, open_=price, close=price + 0.3,
+                             high=price + 1.0, low=price - 0.5),
+                i,
+            )
+
+        features = ext.extract(
+            _make_tick(price=145.0, hour=8), _make_partial(price=145.0), 90,
+        )
+        # With 3 M5 candles of uptrend, some features should be non-zero
+        assert features["ict__killzone"] == 1.0  # 8:00 = London KZ
+        # ATR-normalized distances are >= 0
+        assert features["ict__m5_fvg_distance"] >= 0.0
+        assert features["ict__m5_ob_distance"] >= 0.0
+
+    def test_ict_reset(self) -> None:
+        ext = ICTFeatureExtractor()
+        ext.configure({})
+        for i in range(30):
+            ext.on_candle_close(
+                _make_candle(i, open_=100, close=101, high=102, low=99),
+                i,
+            )
+        ext.reset()
+        features = ext.extract(_make_tick(), _make_partial(), 0)
+        assert features["ict__m5_trend"] == 0.0
+
 
 class TestFeatureRegistry:
     """Tests for FeatureRegistry composition."""
