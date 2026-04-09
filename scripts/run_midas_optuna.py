@@ -94,8 +94,8 @@ def cli() -> None:
     parser.add_argument("--inner-trials", type=int, default=30)
     parser.add_argument("--sample-on-tick", action="store_true",
                         help="Sample every tick instead of on candle close")
-    parser.add_argument("--score", default="pnl",
-                        choices=["pnl", "win_rate", "pnl_per_trade"])
+    parser.add_argument("--score", default="composite",
+                        choices=["composite", "pnl", "win_rate", "pnl_per_trade"])
     parser.add_argument("--output", type=str, default=None,
                         help="Save best params to YAML file")
     args = parser.parse_args()

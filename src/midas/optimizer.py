@@ -46,7 +46,7 @@ class OptimizerConfig:
         inner_trials: Number of inner loop trials per outer.
         sample_on_candle: Extract features on candle close (default).
         sample_rate: Legacy tick-based sampling.
-        score_metric: Metric to optimize ("pnl", "win_rate", "pnl_per_trade").
+        score_metric: Metric to optimize ("composite", "pnl", "win_rate", "pnl_per_trade").
     """
 
     instrument: str = "XAUUSD"
@@ -58,7 +58,7 @@ class OptimizerConfig:
     inner_trials: int = 30
     sample_on_candle: bool = True
     sample_rate: int = 1
-    score_metric: str = "pnl"
+    score_metric: str = "composite"
 
 
 @dataclass
@@ -205,7 +205,12 @@ async def _evaluate_oos_async(
     wins = sum(1 for t in trades if t.is_win)
     win_rate = wins / n_trades
 
-    if config.score_metric == "win_rate":
+    if config.score_metric == "composite":
+        # PnL * sqrt(WR) * log(n_trades) — balances profit, consistency, volume
+        import math
+
+        score = total_pnl * (win_rate**0.5) * math.log(n_trades + 1)
+    elif config.score_metric == "win_rate":
         score = win_rate
     elif config.score_metric == "pnl_per_trade":
         score = total_pnl / n_trades
