@@ -131,3 +131,43 @@ class TestTradeSimulator:
         assert sim.open_count == 0
         assert len(sim.closed_trades) == 0
         assert sim.capital == 5000.0
+
+    def test_early_close(self) -> None:
+        sim = TradeSimulator(SimConfig(
+            sl_points=5.0, tp_points=5.0,
+            size=0.1, value_per_point=10.0,
+        ))
+        sim.on_signal(_tick(0, bid=100.0, ask=101.0), signal=1)
+
+        # Close early at +1.0 points (bid=102)
+        trade = sim.early_close(_tick(5, bid=102.0, ask=103.0))
+
+        assert trade is not None
+        assert trade.pnl_points == pytest.approx(1.0)  # 102 - 101
+        assert trade.is_win is True
+        assert sim.open_count == 0
+
+    def test_get_position_context(self) -> None:
+        sim = TradeSimulator(SimConfig(sl_points=5.0, tp_points=5.0))
+        sim.on_signal(_tick(0, bid=100.0, ask=101.0), signal=1)
+
+        ctx = sim.get_position_context(_tick(30, bid=102.0, ask=103.0))
+
+        assert ctx is not None
+        assert ctx["pos_unrealized_pnl"] == pytest.approx(1.0)  # bid - entry
+        assert ctx["pos_duration_sec"] == pytest.approx(30.0)
+        assert ctx["pos_direction"] == 1.0  # BUY
+
+    def test_get_position_context_sell(self) -> None:
+        sim = TradeSimulator(SimConfig(sl_points=5.0, tp_points=5.0))
+        sim.on_signal(_tick(0, bid=100.0, ask=101.0), signal=2)
+
+        ctx = sim.get_position_context(_tick(10, bid=98.0, ask=99.0))
+
+        assert ctx is not None
+        assert ctx["pos_unrealized_pnl"] == pytest.approx(1.0)  # entry - ask
+        assert ctx["pos_direction"] == -1.0  # SELL
+
+    def test_get_position_context_empty(self) -> None:
+        sim = TradeSimulator()
+        assert sim.get_position_context(_tick(0, bid=100.0, ask=101.0)) is None

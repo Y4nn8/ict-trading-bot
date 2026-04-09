@@ -119,3 +119,85 @@ class TestMidasTrainer:
 
         # High threshold should produce fewer entries
         assert high_entries <= low_entries
+
+    def test_sample_weights(self) -> None:
+        """PnL-based weights should be larger for higher PnL trades."""
+        buy_pnls = [3.0, -2.0, 0.0, 5.0, -1.0]
+        sell_pnls = [-1.0, 2.0, 0.0, -3.0, 1.0]
+        target = MidasTrainer.build_target(
+            [1, 0, -1, 1, 0], [0, 1, -1, 0, 1],
+        )
+        weights = MidasTrainer.build_sample_weights(
+            buy_pnls, sell_pnls, target,
+        )
+        # BUY target[0]: weight = |3.0| + 1 = 4.0
+        assert weights[0] == 4.0
+        # SELL target[1]: weight = |2.0| + 1 = 3.0
+        assert weights[1] == 3.0
+        # PASS target[2]: weight = 1.0
+        assert weights[2] == 1.0
+
+    def test_train_with_weights(self) -> None:
+        df = _make_features(300)
+        target = _make_target(300)
+        weights = np.ones(300)
+
+        trainer = MidasTrainer(TrainerConfig(n_estimators=10))
+        result = trainer.train(df, target, sample_weights=weights)
+        assert trainer.is_trained
+        assert result.n_train > 0
+
+    def test_exit_model_training(self) -> None:
+        """Exit model should train on features + position context."""
+        rng = np.random.default_rng(42)
+        n = 300
+        df = pl.DataFrame({
+            "feat_1": rng.normal(0, 1, n).tolist(),
+            "feat_2": rng.normal(0, 1, n).tolist(),
+            "pos_unrealized_pnl": rng.normal(0, 2, n).tolist(),
+            "pos_duration_sec": rng.uniform(0, 300, n).tolist(),
+            "pos_direction": rng.choice([1.0, -1.0], n).tolist(),
+            "_time": list(range(n)),
+        })
+        labels = rng.choice([0, 1], n).astype(np.int32)
+
+        trainer = MidasTrainer(TrainerConfig(n_estimators=10))
+        result = trainer.train_exit(df, labels)
+
+        assert trainer.has_exit_model
+        assert "pos_unrealized_pnl" in result.feature_names
+        assert "pos_duration_sec" in result.feature_names
+        assert result.n_train > 0
+
+    def test_predict_exit(self) -> None:
+        rng = np.random.default_rng(42)
+        n = 300
+        df = pl.DataFrame({
+            "feat_1": rng.normal(0, 1, n).tolist(),
+            "pos_unrealized_pnl": rng.normal(0, 2, n).tolist(),
+            "pos_duration_sec": rng.uniform(0, 300, n).tolist(),
+            "pos_direction": rng.choice([1.0, -1.0], n).tolist(),
+        })
+        labels = rng.choice([0, 1], n).astype(np.int32)
+
+        trainer = MidasTrainer(TrainerConfig(
+            n_estimators=10, exit_threshold=0.5,
+        ))
+        trainer.train_exit(df, labels)
+
+        should_close, confidence = trainer.predict_exit(
+            {"feat_1": 0.5},
+            pos_unrealized_pnl=1.5,
+            pos_duration_sec=60.0,
+            pos_direction=1.0,
+        )
+        assert isinstance(should_close, bool)
+        assert 0.0 <= confidence <= 1.0
+
+    def test_predict_exit_without_model(self) -> None:
+        trainer = MidasTrainer()
+        should_close, confidence = trainer.predict_exit(
+            {}, pos_unrealized_pnl=0, pos_duration_sec=0, pos_direction=1,
+        )
+        assert should_close is False
+        assert confidence == 0.0

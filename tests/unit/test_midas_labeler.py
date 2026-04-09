@@ -75,8 +75,8 @@ class TestTickLabeler:
         result = labeler.finalize()
         assert result.sell_labels[0] == 0  # loss
 
-    def test_timeout(self) -> None:
-        """Neither SL nor TP hit within timeout → label=-1."""
+    def test_timeout_closes_at_market(self) -> None:
+        """On timeout, position closes at market price (not skipped)."""
         labeler = TickLabeler(
             LabelConfig(sl_points=10.0, tp_points=10.0, timeout_seconds=5.0),
         )
@@ -89,9 +89,12 @@ class TestTickLabeler:
         labeler.on_tick(_tick(6, bid=100.0, ask=101.0))
 
         result = labeler.finalize()
-        assert result.buy_labels[0] == -1
-        assert result.sell_labels[0] == -1
-        assert result.timeouts == 1
+        # BUY: pnl = bid - ask_entry = 100 - 101 = -1 → loss
+        assert result.buy_labels[0] == 0
+        assert result.buy_pnls[0] == -1.0
+        # SELL: pnl = bid_entry - ask = 100 - 101 = -1 → loss
+        assert result.sell_labels[0] == 0
+        assert result.sell_pnls[0] == -1.0
 
     def test_sl_before_tp_same_tick(self) -> None:
         """SL checked before TP (pessimistic)."""
@@ -151,3 +154,48 @@ class TestTickLabeler:
 
         result = labeler.finalize()
         assert result.buy_labels[0] == 1
+
+    def test_pnl_tracking_buy_win(self) -> None:
+        """PnL should be positive for a winning BUY."""
+        labeler = TickLabeler(LabelConfig(sl_points=2.0, tp_points=3.0))
+
+        entry = _tick(0, bid=100.0, ask=101.0)
+        labeler.on_tick(entry)
+        labeler.add_entry(entry)
+
+        # BUY TP = 101 + 3 = 104
+        labeler.on_tick(_tick(1, bid=104.0, ask=105.0))
+
+        result = labeler.finalize()
+        assert result.buy_pnls[0] == 3.0  # TP - entry_ask = 104 - 101
+
+    def test_pnl_tracking_sell_loss(self) -> None:
+        """PnL should be negative for a losing SELL."""
+        labeler = TickLabeler(LabelConfig(sl_points=2.0, tp_points=2.0))
+
+        entry = _tick(0, bid=100.0, ask=101.0)
+        labeler.on_tick(entry)
+        labeler.add_entry(entry)
+
+        # SELL SL = 100 + 2 = 102, ask hits 102
+        labeler.on_tick(_tick(1, bid=101.0, ask=102.0))
+
+        result = labeler.finalize()
+        assert result.sell_pnls[0] == -2.0  # entry_bid - SL = 100 - 102
+
+    def test_timeout_pnl_at_market(self) -> None:
+        """On timeout, PnL is the unrealized P&L at the timeout tick."""
+        labeler = TickLabeler(
+            LabelConfig(sl_points=10.0, tp_points=10.0, timeout_seconds=5.0),
+        )
+
+        entry = _tick(0, bid=100.0, ask=101.0)
+        labeler.on_tick(entry)
+        labeler.add_entry(entry)
+
+        # After timeout, price moved a bit
+        labeler.on_tick(_tick(6, bid=102.0, ask=103.0))
+
+        result = labeler.finalize()
+        # BUY PnL = bid at timeout - entry_ask = 102 - 101 = 1.0
+        assert result.buy_pnls[0] == 1.0

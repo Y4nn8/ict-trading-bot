@@ -118,7 +118,7 @@ class TradeSimulator:
         return closed
 
     def on_tick(self, tick: Tick) -> list[MidasTrade]:
-        """Check exits without a new signal (for ticks between samples).
+        """Check SL/TP exits without a new signal.
 
         Args:
             tick: Current tick.
@@ -127,6 +127,78 @@ class TradeSimulator:
             List of trades closed on this tick.
         """
         return self._check_exits(tick)
+
+    def early_close(self, tick: Tick, position_index: int = 0) -> MidasTrade | None:
+        """Close a specific position early (exit model decision).
+
+        Args:
+            tick: Current tick for exit price.
+            position_index: Index into open positions list.
+
+        Returns:
+            The closed trade, or None if index is invalid.
+        """
+        if position_index >= len(self._positions):
+            return None
+
+        pos = self._positions.pop(position_index)
+        exit_price = tick.bid if pos.direction == "BUY" else tick.ask
+        pnl_points = (
+            (exit_price - pos.entry_price)
+            if pos.direction == "BUY"
+            else (pos.entry_price - exit_price)
+        )
+        pnl = pnl_points * pos.size * self._config.value_per_point
+
+        trade = MidasTrade(
+            trade_id=pos.trade_id,
+            direction=pos.direction,
+            entry_price=pos.entry_price,
+            exit_price=exit_price,
+            entry_time=pos.entry_time,
+            exit_time=tick.time,
+            sl_price=pos.sl_price,
+            tp_price=pos.tp_price,
+            size=pos.size,
+            pnl=pnl,
+            pnl_points=pnl_points,
+            is_win=pnl > 0,
+        )
+        self._trades.append(trade)
+        self._capital += pnl
+        return trade
+
+    def get_position_context(
+        self, tick: Tick, position_index: int = 0,
+    ) -> dict[str, float] | None:
+        """Get position context features for the exit model.
+
+        Args:
+            tick: Current tick.
+            position_index: Index into open positions list.
+
+        Returns:
+            Dict with pos_unrealized_pnl, pos_duration_sec, pos_direction.
+            None if no position at that index.
+        """
+        if position_index >= len(self._positions):
+            return None
+
+        pos = self._positions[position_index]
+        if pos.direction == "BUY":
+            unrealized = tick.bid - pos.entry_price
+            direction = 1.0
+        else:
+            unrealized = pos.entry_price - tick.ask
+            direction = -1.0
+
+        duration = (tick.time - pos.entry_time).total_seconds()
+
+        return {
+            "pos_unrealized_pnl": unrealized,
+            "pos_duration_sec": duration,
+            "pos_direction": direction,
+        }
 
     def _can_open(self, tick: Tick) -> bool:
         """Check if we can open a new position."""
