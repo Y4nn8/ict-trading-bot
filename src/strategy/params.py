@@ -490,7 +490,7 @@ class StrategyParams:
         if total == 0:
             total = 1.0
 
-        # Sizing: group into single risk_pct (all tiers diverged)
+        # Sizing: risk_high_pct converged at 3.75 (fixed), low/medium diverged → grouped
         risk_pct = trial.suggest_float("risk_pct", 0.1, 5.0)
 
         return StrategyParams(
@@ -499,7 +499,7 @@ class StrategyParams:
             rr_ratio=4.35,
             max_hold_candles=218,
             require_killzone=False,
-            risk_high_pct=3.75,
+            risk_high_pct=3.75,  # converged: 3.7 / 3.8 across windows
             risk_low_threshold=0.54,
             max_daily_drawdown_pct=4.4,
             max_total_drawdown_pct=16.7,
@@ -558,7 +558,7 @@ class StrategyParams:
         risk = float(params.get("risk_pct", 1.0))
 
         return StrategyParams(
-            # Fixed converged
+            # Fixed converged (risk_high_pct converged independently at 3.75)
             sl_atr_multiple=2.83,
             rr_ratio=4.35,
             max_hold_candles=218,

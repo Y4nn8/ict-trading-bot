@@ -42,7 +42,7 @@ class TestIGClient:
         with pytest.raises(MarketDataError, match="Unsupported resolution"):
             ig_client.fetch_historical_candles(
                 epic="CS.D.EURUSD.CFD.IP",
-                resolution="M1",
+                resolution="M2",
                 start=datetime(2024, 1, 1, tzinfo=UTC),
                 end=datetime(2024, 1, 2, tzinfo=UTC),
             )

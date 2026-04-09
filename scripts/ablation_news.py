@@ -14,13 +14,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import yaml
 from dotenv import load_dotenv
 
-from src.backtest.metrics import PerformanceMetrics, compute_metrics_by_source
 from src.backtest.walk_forward import run_backtest
 from src.common.config import load_config
 from src.common.db import Database
@@ -29,12 +28,21 @@ from src.market_data.storage import CandleStorage
 from src.news.store import NewsStore
 from src.strategy.params import StrategyParams
 
+if TYPE_CHECKING:
+    from src.backtest.metrics import PerformanceMetrics
+
 
 def _load_best_params(path: str = "config/best_params.yml") -> StrategyParams:
     """Load best params from YAML file."""
     with open(path) as f:
         raw = yaml.safe_load(f)
     return StrategyParams.from_dict(raw)
+
+
+def _print_row(label: str, wn: float, won: float, fmt: str = ".2f") -> None:
+    """Print a summary row with delta."""
+    delta = wn - won
+    print(f"  {label:25} {wn:>15{fmt}} {won:>15{fmt}} {delta:>+15{fmt}}")
 
 
 def _print_comparison(
@@ -56,7 +64,9 @@ def _print_comparison(
     print(header)
     print(f"  {'-'*len(header.strip())}")
 
-    for i, (wn, won) in enumerate(zip(with_news, without_news)):
+    for i, (wn, won) in enumerate(
+        zip(with_news, without_news, strict=True),
+    ):
         dates = ""
         if i < len(windows):
             dates = f"{windows[i][2].date()} → {windows[i][3].date()}"
@@ -75,7 +85,10 @@ def _print_comparison(
         total_trades = sum(m.total_trades for m in results)
         total_pnl = sum(m.total_pnl for m in results)
         avg_sharpe = sum(m.sharpe_ratio for m in results) / len(results)
-        finite_pfs = [m.profit_factor for m in results if m.profit_factor != float("inf")]
+        finite_pfs = [
+            m.profit_factor for m in results
+            if m.profit_factor != float("inf")
+        ]
         avg_pf = sum(finite_pfs) / len(finite_pfs) if finite_pfs else 0.0
         avg_wr = sum(m.win_rate for m in results) / len(results)
         worst_mdd = max(m.max_drawdown_pct for m in results)
@@ -97,18 +110,38 @@ def _print_comparison(
     print(f"\n{'='*80}")
     print("SUMMARY")
     print(f"{'='*80}")
-    print(f"  {'':25} {'With News':>15} {'Without News':>15} {'Delta':>15}")
+    print(
+        f"  {'':25} {'With News':>15} {'Without News':>15}"
+        f" {'Delta':>15}",
+    )
     print(f"  {'-'*70}")
-    print(f"  {'Total trades':25} {wn_agg['trades']:>15.0f} {won_agg['trades']:>15.0f} {wn_agg['trades']-won_agg['trades']:>+15.0f}")
-    print(f"  {'Total PnL':25} {wn_agg['pnl']:>15.2f} {won_agg['pnl']:>15.2f} {wn_agg['pnl']-won_agg['pnl']:>+15.2f}")
-    print(f"  {'Avg Sharpe':25} {wn_agg['sharpe']:>15.3f} {won_agg['sharpe']:>15.3f} {wn_agg['sharpe']-won_agg['sharpe']:>+15.3f}")
-    print(f"  {'Avg PF':25} {wn_agg['pf']:>15.2f} {won_agg['pf']:>15.2f} {wn_agg['pf']-won_agg['pf']:>+15.2f}")
-    print(f"  {'Avg Win Rate':25} {wn_agg['wr']*100:>14.1f}% {won_agg['wr']*100:>14.1f}% {(wn_agg['wr']-won_agg['wr'])*100:>+14.1f}%")
-    print(f"  {'Worst MDD':25} {wn_agg['mdd']*100:>14.1f}% {won_agg['mdd']*100:>14.1f}%")
-    print(f"  {'Profitable windows':25} {wn_agg['profitable']}/{wn_agg['total']:>11} {won_agg['profitable']}/{won_agg['total']:>11}")
+    _print_row("Total trades", wn_agg["trades"], won_agg["trades"], ".0f")
+    _print_row("Total PnL", wn_agg["pnl"], won_agg["pnl"])
+    _print_row("Avg Sharpe", wn_agg["sharpe"], won_agg["sharpe"], ".3f")
+    _print_row("Avg PF", wn_agg["pf"], won_agg["pf"])
+    print(
+        f"  {'Avg Win Rate':25}"
+        f" {wn_agg['wr']*100:>14.1f}%"
+        f" {won_agg['wr']*100:>14.1f}%"
+        f" {(wn_agg['wr']-won_agg['wr'])*100:>+14.1f}%",
+    )
+    print(
+        f"  {'Worst MDD':25}"
+        f" {wn_agg['mdd']*100:>14.1f}%"
+        f" {won_agg['mdd']*100:>14.1f}%",
+    )
+    print(
+        f"  {'Profitable windows':25}"
+        f" {wn_agg['profitable']}/{wn_agg['total']:>11}"
+        f" {won_agg['profitable']}/{won_agg['total']:>11}",
+    )
 
     # Verdict
-    pnl_delta_pct = ((wn_agg["pnl"] - won_agg["pnl"]) / abs(won_agg["pnl"]) * 100) if won_agg["pnl"] != 0 else 0
+    pnl_delta_pct = (
+        (wn_agg["pnl"] - won_agg["pnl"]) / abs(won_agg["pnl"]) * 100
+        if won_agg["pnl"] != 0
+        else 0
+    )
     print(f"\n  News module PnL impact: {pnl_delta_pct:+.1f}%")
     if wn_agg["pnl"] > won_agg["pnl"]:
         print("  → News module HELPS (+PnL)")
@@ -145,7 +178,10 @@ async def run_ablation(
 
         data_start = all_candles["time"][0]
         data_end = all_candles["time"][-1]
-        print(f"Data: {len(all_candles)} candles, {data_start.date()} → {data_end.date()}")
+        print(
+            f"Data: {len(all_candles)} candles,"
+            f" {data_start.date()} → {data_end.date()}",
+        )
 
         all_news = await news_store.get_events(data_start, data_end)
         print(f"News: {len(all_news)} events")
@@ -156,12 +192,20 @@ async def run_ablation(
         # Instrument specs
         inst_config = config.get_instrument(instrument)
         leverage = float(inst_config.leverage) if inst_config else 30.0
-        value_per_point = float(inst_config.value_per_point) if inst_config else 1.0
+        value_per_point = (
+            float(inst_config.value_per_point) if inst_config else 1.0
+        )
         min_size = float(inst_config.min_size) if inst_config else 0.5
         size_step = float(inst_config.size_step) if inst_config else 0.5
         pip_size = float(inst_config.pip_size) if inst_config else 0.0001
-        avg_spread = float(inst_config.avg_spread) * pip_size if inst_config else 0.0
-        min_stop_distance = float(inst_config.min_stop_distance) * pip_size if inst_config else 0.0
+        avg_spread = (
+            float(inst_config.avg_spread) * pip_size if inst_config else 0.0
+        )
+        min_stop_distance = (
+            float(inst_config.min_stop_distance) * pip_size
+            if inst_config
+            else 0.0
+        )
 
         bt_kwargs: dict[str, Any] = {
             "initial_capital": initial_capital,
@@ -193,15 +237,25 @@ async def run_ablation(
         results_with_news: list[PerformanceMetrics] = []
         results_without_news: list[PerformanceMetrics] = []
 
-        for i, (train_start, train_end, test_start, test_end) in enumerate(windows):
-            print(f"\n  Window {i+1}/{len(windows)}: {test_start.date()} → {test_end.date()}")
+        for i, (_train_start, _train_end, test_start, test_end) in enumerate(
+            windows,
+        ):
+            print(
+                f"\n  Window {i+1}/{len(windows)}:"
+                f" {test_start.date()} → {test_end.date()}",
+            )
 
             test_candles = all_candles.filter(
-                (pl.col("time") >= test_start) & (pl.col("time") < test_end)
+                (pl.col("time") >= test_start) & (pl.col("time") < test_end),
             )
-            test_h1 = all_h1.filter(
-                (pl.col("time") >= test_start - h1_lookback) & (pl.col("time") < test_end)
-            ) if not all_h1.is_empty() else all_h1
+            test_h1 = (
+                all_h1.filter(
+                    (pl.col("time") >= test_start - h1_lookback)
+                    & (pl.col("time") < test_end),
+                )
+                if not all_h1.is_empty()
+                else all_h1
+            )
 
             test_news = [
                 n for n in all_news
@@ -226,10 +280,16 @@ async def run_ablation(
             )
             results_without_news.append(metrics_won)
 
-            print(f"    With news:    {metrics_wn.total_trades} trades, "
-                  f"PnL {metrics_wn.total_pnl:+.0f}, PF {metrics_wn.profit_factor:.2f}")
-            print(f"    Without news: {metrics_won.total_trades} trades, "
-                  f"PnL {metrics_won.total_pnl:+.0f}, PF {metrics_won.profit_factor:.2f}")
+            print(
+                f"    With news:    {metrics_wn.total_trades} trades, "
+                f"PnL {metrics_wn.total_pnl:+.0f},"
+                f" PF {metrics_wn.profit_factor:.2f}",
+            )
+            print(
+                f"    Without news: {metrics_won.total_trades} trades, "
+                f"PnL {metrics_won.total_pnl:+.0f},"
+                f" PF {metrics_won.profit_factor:.2f}",
+            )
 
         _print_comparison(windows, results_with_news, results_without_news)
 
