@@ -65,8 +65,8 @@ async def main(args: argparse.Namespace) -> None:
                 initial_capital=args.capital,
                 max_spread=args.max_spread,
             ),
+            sample_on_candle=not args.sample_on_tick,
             sample_rate=args.sample_rate,
-            test_sample_rate=args.test_sample_rate,
         )
 
         await run_midas_walk_forward(
@@ -101,10 +101,10 @@ def cli() -> None:
                         help="Entry probability threshold")
     parser.add_argument("--capital", type=float, default=10000.0)
     parser.add_argument("--max-spread", type=float, default=2.0)
-    parser.add_argument("--sample-rate", type=int, default=10,
-                        help="Train: extract features every N ticks")
-    parser.add_argument("--test-sample-rate", type=int, default=1,
-                        help="Test: extract features every N ticks")
+    parser.add_argument("--sample-on-tick", action="store_true",
+                        help="Sample every tick instead of on candle close")
+    parser.add_argument("--sample-rate", type=int, default=1,
+                        help="When --sample-on-tick: every N ticks")
     args = parser.parse_args()
     args.start = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=UTC)
     args.end = datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=UTC)

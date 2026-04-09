@@ -54,8 +54,7 @@ async def main(args: argparse.Namespace) -> None:
             test_end=args.test_end,
             outer_trials=args.outer_trials,
             inner_trials=args.inner_trials,
-            sample_rate=args.sample_rate,
-            test_sample_rate=args.test_sample_rate,
+            sample_on_candle=not args.sample_on_tick,
             score_metric=args.score,
         )
 
@@ -93,8 +92,8 @@ def cli() -> None:
     parser.add_argument("--test-end", required=True, help="YYYY-MM-DD")
     parser.add_argument("--outer-trials", type=int, default=30)
     parser.add_argument("--inner-trials", type=int, default=30)
-    parser.add_argument("--sample-rate", type=int, default=10)
-    parser.add_argument("--test-sample-rate", type=int, default=1)
+    parser.add_argument("--sample-on-tick", action="store_true",
+                        help="Sample every tick instead of on candle close")
     parser.add_argument("--score", default="pnl",
                         choices=["pnl", "win_rate", "pnl_per_trade"])
     parser.add_argument("--output", type=str, default=None,

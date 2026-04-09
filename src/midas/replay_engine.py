@@ -66,8 +66,10 @@ class ReplayConfig:
         chunk_size: Number of ticks per DB fetch.
         output_path: Path to write Parquet output.
             None means features are collected in memory.
-        sample_rate: Extract features every N ticks (1 = every tick).
-            Higher values reduce output size for initial exploration.
+        sample_on_candle: Extract features on each candle close (recommended).
+            When True, sample_rate is ignored.
+        sample_rate: Legacy: extract features every N ticks.
+            Only used when sample_on_candle is False.
     """
 
     instrument: str = "XAUUSD"
@@ -76,6 +78,7 @@ class ReplayConfig:
     bucket_seconds: int = 10
     chunk_size: int = 500_000
     output_path: Path | None = None
+    sample_on_candle: bool = True
     sample_rate: int = 1
 
 
@@ -127,6 +130,7 @@ class ReplayEngine:
         current_chunk: list[dict[str, float]] = []
         chunk_flush_size = 100_000
         tick_counter = 0
+        candle_just_closed = False
         is_callback_mode = self._tick_callback is not None
 
         # Extend query range for labeler lookahead
@@ -181,20 +185,25 @@ class ReplayEngine:
 
                     # Process tick through candle builder
                     closed = self._builder.process_tick(tick)
+                    candle_just_closed = False
                     if closed is not None:
                         result.total_candles += 1
                         self._registry.on_candle_close(
                             closed, self._builder.candle_index - 1,
                         )
+                        candle_just_closed = True
 
                     # Only extract features within the nominal window
                     in_window = tick.time < cfg.end
 
-                    # Extract features (respecting sample rate)
-                    if (
-                        in_window
-                        and tick_counter % cfg.sample_rate == 0
-                    ):
+                    # Determine if we should extract features
+                    should_extract = (
+                        candle_just_closed
+                        if cfg.sample_on_candle
+                        else (tick_counter % cfg.sample_rate == 0)
+                    )
+
+                    if in_window and should_extract:
                         partial = self._builder.partial
                         if partial is not None:
                             features = self._registry.extract_all(

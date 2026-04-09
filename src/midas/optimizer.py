@@ -47,8 +47,8 @@ class OptimizerConfig:
         test_end: OOS test data end.
         outer_trials: Number of outer loop trials.
         inner_trials: Number of inner loop trials per outer.
-        sample_rate: Feature extraction sample rate during training.
-        test_sample_rate: Feature extraction sample rate during testing.
+        sample_on_candle: Extract features on candle close (default).
+        sample_rate: Legacy tick-based sampling.
         score_metric: Metric to optimize ("pnl", "win_rate", "pnl_per_trade").
     """
 
@@ -59,8 +59,8 @@ class OptimizerConfig:
     test_end: datetime = field(default_factory=datetime.now)
     outer_trials: int = 30
     inner_trials: int = 30
-    sample_rate: int = 10
-    test_sample_rate: int = 1
+    sample_on_candle: bool = True
+    sample_rate: int = 1
     score_metric: str = "pnl"
 
 
@@ -185,7 +185,8 @@ async def _evaluate_oos_async(
             instrument=config.instrument,
             start=config.test_start,
             end=config.test_end,
-            sample_rate=config.test_sample_rate,
+            sample_on_candle=config.sample_on_candle,
+            sample_rate=config.sample_rate,
         ),
         tick_callback=callback,
         every_tick_hook=exit_hook,
@@ -284,6 +285,7 @@ async def run_nested_optuna(
                     instrument=config.instrument,
                     start=config.train_start,
                     end=config.train_end,
+                    sample_on_candle=config.sample_on_candle,
                     sample_rate=config.sample_rate,
                     output_path=parquet_path,
                 ),

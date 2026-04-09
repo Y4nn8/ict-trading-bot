@@ -39,8 +39,8 @@ class WalkForwardConfig:
         label_config: Labeling SL/TP configuration.
         trainer_config: LightGBM configuration.
         sim_config: Trade simulation configuration.
-        sample_rate: Feature extraction sample rate during training.
-        test_sample_rate: Feature extraction sample rate during testing.
+        sample_on_candle: Extract features on candle close (default, recommended).
+        sample_rate: Legacy tick-based sampling (only when sample_on_candle=False).
     """
 
     instrument: str = "XAUUSD"
@@ -50,8 +50,8 @@ class WalkForwardConfig:
     label_config: LabelConfig = field(default_factory=LabelConfig)
     trainer_config: TrainerConfig = field(default_factory=TrainerConfig)
     sim_config: SimConfig = field(default_factory=SimConfig)
-    sample_rate: int = 10
-    test_sample_rate: int = 1
+    sample_on_candle: bool = True
+    sample_rate: int = 1
 
 
 @dataclass
@@ -195,6 +195,7 @@ async def run_midas_walk_forward(
                     instrument=config.instrument,
                     start=train_start,
                     end=train_end,
+                    sample_on_candle=config.sample_on_candle,
                     sample_rate=config.sample_rate,
                     output_path=train_parquet,
                 ),
@@ -352,7 +353,8 @@ async def run_midas_walk_forward(
                 instrument=config.instrument,
                 start=test_start,
                 end=test_end,
-                sample_rate=config.test_sample_rate,
+                sample_on_candle=config.sample_on_candle,
+                sample_rate=config.sample_rate,
             ),
             tick_callback=test_callback,
             every_tick_hook=exit_hook,
