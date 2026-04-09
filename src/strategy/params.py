@@ -464,6 +464,138 @@ class StrategyParams:
             be_offset_pct=float(params.get("be_offset_pct", 0.0)),
         )
 
+    @staticmethod
+    def from_optuna_trial_xauusd_v2(trial: optuna.Trial) -> StrategyParams:
+        """XAUUSD search space v2: fix 12 converged + restrict 9 close params.
+
+        Based on W1/W2 best-param convergence analysis (v3 run, 500 trials).
+        Fixes 12 params that converged (<20% spread between windows).
+        Restricts 9 params to narrower ranges (20-40% spread).
+        Optimizes 13 remaining divergent params freely.
+
+        Args:
+            trial: Optuna trial object.
+
+        Returns:
+            StrategyParams with fixed, restricted, and free values.
+        """
+        # --- Weights: fvg+killzone fixed, rest optimized, all normalized ---
+        raw_fvg = 0.43   # converged: 0.45 / 0.42
+        raw_kz = 0.53    # converged: 0.50 / 0.57
+        raw_ob = trial.suggest_float("weight_ob", 0.0, 1.0)
+        raw_disp = trial.suggest_float("weight_displacement", 0.0, 1.0)
+        raw_ms = trial.suggest_float("weight_ms", 0.0, 1.0)
+        raw_pd = trial.suggest_float("weight_pd", 0.0, 1.0)
+        total = raw_fvg + raw_kz + raw_ob + raw_disp + raw_ms + raw_pd
+        if total == 0:
+            total = 1.0
+
+        # Sizing: group into single risk_pct (all tiers diverged)
+        risk_pct = trial.suggest_float("risk_pct", 0.1, 5.0)
+
+        return StrategyParams(
+            # --- FIXED: 12 converged params (<20% spread) ---
+            sl_atr_multiple=2.83,
+            rr_ratio=4.35,
+            max_hold_candles=218,
+            require_killzone=False,
+            risk_high_pct=3.75,
+            risk_low_threshold=0.54,
+            max_daily_drawdown_pct=4.4,
+            max_total_drawdown_pct=16.7,
+            ob_atr_period=18,
+            be_offset_pct=0.031,
+            weight_fvg=raw_fvg / total,
+            weight_killzone=raw_kz / total,
+            # --- RESTRICTED: 9 close params (narrower ranges) ---
+            be_trigger_pct=trial.suggest_float("be_trigger_pct", 0.30, 0.50),
+            disp_threshold=trial.suggest_float("disp_threshold", 1.0, 2.0),
+            liq_lookback=trial.suggest_int("liq_lookback", 80, 140),
+            liq_min_touches=trial.suggest_int("liq_min_touches", 3, 5),
+            max_daily_gain_pct=trial.suggest_float("max_daily_gain_pct", 2.5, 4.5),
+            min_confluence=trial.suggest_float("min_confluence", 0.30, 0.55),
+            ms_lookback_candles=trial.suggest_int("ms_lookback_candles", 18, 35),
+            ob_displacement_factor=trial.suggest_float(
+                "ob_displacement_factor", 2.5, 4.0,
+            ),
+            risk_high_threshold=trial.suggest_float(
+                "risk_high_threshold", 0.65, 0.90,
+            ),
+            # --- FREE: 13 divergent params (full ranges) ---
+            disp_atr_period=trial.suggest_int("disp_atr_period", 10, 30),
+            liq_tolerance_pct=trial.suggest_float("liq_tolerance_pct", 0.01, 0.1),
+            max_positions=trial.suggest_int("max_positions", 1, 10),
+            max_spread_pips=trial.suggest_float("max_spread_pips", 0.5, 10.0),
+            swing_left_bars=trial.suggest_int("swing_left_bars", 1, 5),
+            swing_right_bars=trial.suggest_int("swing_right_bars", 1, 5),
+            risk_low_pct=risk_pct,
+            risk_medium_pct=risk_pct,
+            risk_max_pct=trial.suggest_float("risk_max_pct", 1.0, 5.0),
+            weight_ob=raw_ob / total,
+            weight_displacement=raw_disp / total,
+            weight_ms=raw_ms / total,
+            weight_pd=raw_pd / total,
+        )
+
+    @staticmethod
+    def from_xauusd_v2_dict(params: dict[str, Any]) -> StrategyParams:
+        """Reconstruct params from xauusd_v2 trial params dict.
+
+        Args:
+            params: Dict from best_trial.params.
+
+        Returns:
+            StrategyParams instance.
+        """
+        raw_fvg = 0.43
+        raw_kz = 0.53
+        raw_ob = float(params.get("weight_ob", 0.5))
+        raw_disp = float(params.get("weight_displacement", 0.5))
+        raw_ms = float(params.get("weight_ms", 0.5))
+        raw_pd = float(params.get("weight_pd", 0.5))
+        total = raw_fvg + raw_kz + raw_ob + raw_disp + raw_ms + raw_pd or 1.0
+
+        risk = float(params.get("risk_pct", 1.0))
+
+        return StrategyParams(
+            # Fixed converged
+            sl_atr_multiple=2.83,
+            rr_ratio=4.35,
+            max_hold_candles=218,
+            require_killzone=False,
+            risk_high_pct=3.75,
+            risk_low_threshold=0.54,
+            max_daily_drawdown_pct=4.4,
+            max_total_drawdown_pct=16.7,
+            ob_atr_period=18,
+            be_offset_pct=0.031,
+            weight_fvg=raw_fvg / total,
+            weight_killzone=raw_kz / total,
+            # Restricted + free from dict
+            be_trigger_pct=float(params.get("be_trigger_pct", 0.4)),
+            disp_threshold=float(params.get("disp_threshold", 1.5)),
+            liq_lookback=int(params.get("liq_lookback", 110)),
+            liq_min_touches=int(params.get("liq_min_touches", 4)),
+            max_daily_gain_pct=float(params.get("max_daily_gain_pct", 3.5)),
+            min_confluence=float(params.get("min_confluence", 0.43)),
+            ms_lookback_candles=int(params.get("ms_lookback_candles", 25)),
+            ob_displacement_factor=float(params.get("ob_displacement_factor", 3.0)),
+            risk_high_threshold=float(params.get("risk_high_threshold", 0.78)),
+            disp_atr_period=int(params.get("disp_atr_period", 16)),
+            liq_tolerance_pct=float(params.get("liq_tolerance_pct", 0.04)),
+            max_positions=int(params.get("max_positions", 5)),
+            max_spread_pips=float(params.get("max_spread_pips", 5.0)),
+            swing_left_bars=int(params.get("swing_left_bars", 4)),
+            swing_right_bars=int(params.get("swing_right_bars", 4)),
+            risk_low_pct=risk,
+            risk_medium_pct=risk,
+            risk_max_pct=float(params.get("risk_max_pct", 2.5)),
+            weight_ob=raw_ob / total,
+            weight_displacement=raw_disp / total,
+            weight_ms=raw_ms / total,
+            weight_pd=raw_pd / total,
+        )
+
     def to_dict(self) -> dict[str, object]:
         """Convert to dict for serialization."""
         return dict(self.__dict__)
