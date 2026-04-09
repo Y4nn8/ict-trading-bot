@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import optuna
 
-from src.midas.optimizer import _suggest_inner_params, _suggest_outer_params
+from src.midas.optimizer import (
+    OptimizerConfig,
+    _suggest_inner_params,
+    _suggest_outer_params,
+)
 from src.midas.replay_engine import build_default_registry
 
 
@@ -14,16 +18,15 @@ class TestOuterParams:
     def test_suggests_extractor_params(self) -> None:
         registry = build_default_registry()
         registry_params = registry.all_tunable_params()
+        config = OptimizerConfig()
 
         study = optuna.create_study()
         trial = study.ask()
-        params = _suggest_outer_params(trial, registry_params)
+        params = _suggest_outer_params(trial, registry_params, config)
 
-        # Should include all extractor params
         for p in registry_params:
             assert p.name in params
 
-        # Should include SL/TP/timeout
         assert "sl_points" in params
         assert "tp_points" in params
         assert "label_timeout" in params
@@ -31,13 +34,14 @@ class TestOuterParams:
     def test_sl_tp_ranges(self) -> None:
         registry = build_default_registry()
         registry_params = registry.all_tunable_params()
+        config = OptimizerConfig(sl_range=(5.0, 8.0), tp_range=(3.0, 6.0))
 
         study = optuna.create_study()
         trial = study.ask()
-        params = _suggest_outer_params(trial, registry_params)
+        params = _suggest_outer_params(trial, registry_params, config)
 
-        assert 1.5 <= params["sl_points"] <= 8.0
-        assert 1.5 <= params["tp_points"] <= 8.0
+        assert 5.0 <= params["sl_points"] <= 8.0
+        assert 3.0 <= params["tp_points"] <= 6.0
         assert 60.0 <= params["label_timeout"] <= 600.0
 
 
@@ -69,4 +73,4 @@ class TestInnerParams:
         assert 50 <= params["n_estimators"] <= 1000
         assert 0.01 <= params["learning_rate"] <= 0.3
         assert 3 <= params["max_depth"] <= 10
-        assert 0.35 <= params["entry_threshold"] <= 0.75
+        assert 0.25 <= params["entry_threshold"] <= 0.60

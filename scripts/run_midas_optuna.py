@@ -55,6 +55,8 @@ async def main(args: argparse.Namespace) -> None:
             outer_trials=args.outer_trials,
             inner_trials=args.inner_trials,
             sample_on_candle=not args.sample_on_tick,
+            sl_range=tuple(args.sl_range),
+            tp_range=tuple(args.tp_range),
             score_metric=args.score,
         )
 
@@ -96,6 +98,10 @@ def cli() -> None:
                         help="Sample every tick instead of on candle close")
     parser.add_argument("--score", default="composite",
                         choices=["composite", "pnl", "win_rate", "pnl_per_trade"])
+    parser.add_argument("--sl-range", type=float, nargs=2, default=[1.5, 8.0],
+                        metavar=("MIN", "MAX"), help="SL search range")
+    parser.add_argument("--tp-range", type=float, nargs=2, default=[1.5, 8.0],
+                        metavar=("MIN", "MAX"), help="TP search range")
     parser.add_argument("--output", type=str, default=None,
                         help="Save best params to YAML file")
     args = parser.parse_args()

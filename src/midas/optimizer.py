@@ -59,6 +59,8 @@ class OptimizerConfig:
     sample_on_candle: bool = True
     sample_rate: int = 1
     score_metric: str = "composite"
+    sl_range: tuple[float, float] = (1.5, 8.0)
+    tp_range: tuple[float, float] = (1.5, 8.0)
 
 
 @dataclass
@@ -78,6 +80,7 @@ class OptimizationResult:
 def _suggest_outer_params(
     trial: optuna.Trial,
     registry_params: list[Any],
+    config: OptimizerConfig,
 ) -> dict[str, Any]:
     """Suggest extractor params + SL/TP for the outer loop."""
     params: dict[str, Any] = {}
@@ -89,9 +92,13 @@ def _suggest_outer_params(
         else:
             params[p.name] = trial.suggest_float(p.name, p.low, p.high)
 
-    # SL/TP in price points (XAUUSD: 1 point = $1)
-    params["sl_points"] = trial.suggest_float("sl_points", 1.5, 8.0)
-    params["tp_points"] = trial.suggest_float("tp_points", 1.5, 8.0)
+    # SL/TP in price points (ranges from config)
+    params["sl_points"] = trial.suggest_float(
+        "sl_points", config.sl_range[0], config.sl_range[1],
+    )
+    params["tp_points"] = trial.suggest_float(
+        "tp_points", config.tp_range[0], config.tp_range[1],
+    )
     params["label_timeout"] = trial.suggest_float(
         "label_timeout", 60.0, 600.0,
     )
@@ -114,7 +121,7 @@ def _suggest_inner_params(trial: optuna.Trial) -> dict[str, Any]:
             "colsample_bytree", 0.5, 1.0,
         ),
         "entry_threshold": trial.suggest_float(
-            "entry_threshold", 0.35, 0.75,
+            "entry_threshold", 0.25, 0.60,
         ),
     }
 
@@ -206,10 +213,10 @@ async def _evaluate_oos_async(
     win_rate = wins / n_trades
 
     if config.score_metric == "composite":
-        # PnL * sqrt(WR) * log(n_trades) — balances profit, consistency, volume
-        import math
-
-        score = total_pnl * (win_rate**0.5) * math.log(n_trades + 1)
+        # PnL * sqrt(WR) * sqrt(n_trades) — rewards volume more than log
+        if n_trades < 10:
+            return -1000.0, n_trades, win_rate, total_pnl
+        score = total_pnl * (win_rate**0.5) * (n_trades**0.5)
     elif config.score_metric == "win_rate":
         score = win_rate
     elif config.score_metric == "pnl_per_trade":
@@ -256,11 +263,12 @@ async def run_nested_optuna(
     outer_study = optuna.create_study(
         direction="maximize",
         study_name="midas_outer",
+        sampler=optuna.samplers.TPESampler(n_startup_trials=5),
     )
 
     for outer_i in range(config.outer_trials):
         outer_trial = outer_study.ask()
-        outer_params = _suggest_outer_params(outer_trial, registry_params)
+        outer_params = _suggest_outer_params(outer_trial, registry_params, config)
 
         sl = outer_params["sl_points"]
         tp = outer_params["tp_points"]
