@@ -362,6 +362,9 @@ async def run_nested_optuna(
 
         best_inner_score = -float("inf")
         best_inner_trainer: MidasTrainer | None = None
+        best_inner_trades = 0
+        best_inner_wr = 0.0
+        best_inner_pnl = 0.0
         best_inner_params_local: dict[str, Any] = {}
 
         for _inner_i in range(config.inner_trials):
@@ -397,7 +400,7 @@ async def run_nested_optuna(
                 max_spread=2.0,
             )
 
-            score, _n_trades, _wr, _pnl = await _evaluate_oos_async(
+            score, n_tr, wr, pnl = await _evaluate_oos_async(
                 trainer, sim_config, db, config,
                 registry_factory, extractor_params,
             )
@@ -408,13 +411,19 @@ async def run_nested_optuna(
                 best_inner_score = score
                 best_inner_trainer = trainer
                 best_inner_params_local = dict(inner_params)
+                best_inner_trades = n_tr
+                best_inner_wr = wr
+                best_inner_pnl = pnl
 
         # Report best inner score to outer
         outer_study.tell(outer_trial, best_inner_score)
         result.total_inner_trials += config.inner_trials
 
         print(f"  Best inner: score={best_inner_score:+.2f}, "
-              f"params={best_inner_params_local.get('entry_threshold', '?')}")
+              f"trades={best_inner_trades}, "
+              f"WR={best_inner_wr*100:.0f}%, "
+              f"PnL={best_inner_pnl:+.1f}, "
+              f"threshold={best_inner_params_local.get('entry_threshold', '?')}")
 
         if best_inner_score > best_score:
             best_score = best_inner_score
