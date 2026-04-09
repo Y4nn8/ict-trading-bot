@@ -152,13 +152,13 @@ class ReplayEngine:
         )
 
         async with self._db.pool.acquire() as conn, conn.transaction():
-            cursor = conn.cursor(
+            stmt = await conn.prepare(
                 "SELECT time, bid, ask FROM ticks "
                 "WHERE instrument = $1 AND time >= $2 AND time < $3 "
                 "ORDER BY time ASC",
-                cfg.instrument,
-                cfg.start,
-                query_end,
+            )
+            cursor = await stmt.cursor(
+                cfg.instrument, cfg.start, query_end,
             )
 
             while True:
