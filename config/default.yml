@@ -97,13 +97,13 @@ instruments:
     avg_spread: 10.0
     min_stop_distance: 1.0  # IG API: minStepDistance=1.0 (in points)
   - name: XAUUSD
-    epic: CS.D.CFDGOLD.CFM.IP
+    epic: CS.D.CFEGOLD.CFE.IP
     asset_class: commodity
-    leverage: 10
+    leverage: 20  # 5% margin = 1/20
     min_size: 0.1  # IG API: minDealSize=0.1
     size_step: 0.1
-    value_per_point: 10.0  # $10 per point (10oz mini)
-    point_currency: USD
+    value_per_point: 1.0  # 1€ per point per contract (Contrat 1€)
+    point_currency: EUR
     pip_size: 1.0  # 1 point = $1 in gold price
     min_spread: 0.3
     avg_spread: 0.5
