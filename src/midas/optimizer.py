@@ -268,11 +268,10 @@ async def run_nested_optuna(
     )
 
     for outer_i in range(config.outer_trials):
+        outer_trial = outer_study.ask()
         if config.fixed_outer_params is not None:
             outer_params = dict(config.fixed_outer_params)
-            outer_study.tell(outer_study.ask(), 0.0)  # dummy
         else:
-            outer_trial = outer_study.ask()
             outer_params = _suggest_outer_params(
                 outer_trial, registry_params, config,
             )
