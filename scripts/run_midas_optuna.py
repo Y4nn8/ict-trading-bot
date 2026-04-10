@@ -53,11 +53,11 @@ async def main(args: argparse.Namespace) -> None:
 
             with open(args.fix_outer_params) as f:
                 raw = yaml.safe_load(f)
-            # Extract outer params (extractor + SL/TP + timeout)
+            # Extract outer params (extractor only, not SL/TP/LightGBM)
             inner_keys = {
                 "n_estimators", "learning_rate", "max_depth", "num_leaves",
                 "min_child_samples", "subsample", "colsample_bytree",
-                "entry_threshold",
+                "entry_threshold", "sl_points", "tp_points", "label_timeout",
             }
             fixed_outer = {
                 k: v for k, v in raw.items()

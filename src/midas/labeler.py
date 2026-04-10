@@ -1,7 +1,9 @@
 """TickLabeler: label ticks for entry model training.
 
-For each sampled tick, evaluates hypothetical BUY/SELL trades with
-SL/TP lookahead. Tracks actual PnL in points (not just win/loss).
+Two modes:
+  - Streaming: during replay, evaluates SL/TP lookahead tick-by-tick.
+  - DataFrame: relabel a features DataFrame with new SL/TP params
+    (fast, no DB access needed).
 
 Labels:
     buy_label/sell_label: 1=win, 0=loss, -1=timeout
@@ -15,8 +17,12 @@ from dataclasses import dataclass, field
 from math import nan
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 if TYPE_CHECKING:
     from datetime import datetime
+
+    import polars as pl
 
     from src.midas.types import LabelConfig, Tick
 
@@ -224,3 +230,106 @@ class TickLabeler:
         self._pending.clear()
         self._resolved.clear()
         self._next_index = 0
+
+
+def relabel_dataframe(
+    df: pl.DataFrame,
+    sl_points: float,
+    tp_points: float,
+    timeout_seconds: float,
+) -> LabelResult:
+    """Relabel a features DataFrame with new SL/TP params.
+
+    Fast alternative to streaming labeling — works on already-extracted
+    features without DB access. Scans forward in the DataFrame for each
+    row to check SL/TP hit.
+
+    Requires columns: _time, _bid, _ask.
+
+    Args:
+        df: Features DataFrame with _time, _bid, _ask columns.
+        sl_points: Stop loss distance in price points.
+        tp_points: Take profit distance in price points.
+        timeout_seconds: Max lookahead in seconds.
+
+    Returns:
+        LabelResult with buy/sell labels and PnL arrays.
+    """
+    times = df["_time"].to_numpy()  # timestamps as float
+    bids = df["_bid"].to_numpy()
+    asks = df["_ask"].to_numpy()
+    n = len(times)
+
+    buy_labels = np.zeros(n, dtype=np.int32)
+    sell_labels = np.zeros(n, dtype=np.int32)
+    buy_pnls = np.zeros(n, dtype=np.float64)
+    sell_pnls = np.zeros(n, dtype=np.float64)
+
+    for i in range(n):
+        entry_ask = asks[i]
+        entry_bid = bids[i]
+        entry_time = times[i]
+
+        buy_sl = entry_ask - sl_points
+        buy_tp = entry_ask + tp_points
+        sell_sl = entry_bid + sl_points
+        sell_tp = entry_bid - tp_points
+
+        buy_resolved = False
+        sell_resolved = False
+
+        # Scan forward
+        for j in range(i + 1, n):
+            if times[j] - entry_time > timeout_seconds:
+                # Timeout: close at market
+                if not buy_resolved:
+                    buy_pnls[i] = bids[j] - entry_ask
+                    buy_labels[i] = 1 if buy_pnls[i] > 0 else (0 if buy_pnls[i] < 0 else -1)
+                    buy_resolved = True
+                if not sell_resolved:
+                    sell_pnls[i] = entry_bid - asks[j]
+                    sell_labels[i] = 1 if sell_pnls[i] > 0 else (0 if sell_pnls[i] < 0 else -1)
+                    sell_resolved = True
+                break
+
+            if not buy_resolved:
+                if bids[j] <= buy_sl:
+                    buy_pnls[i] = buy_sl - entry_ask
+                    buy_labels[i] = 0
+                    buy_resolved = True
+                elif bids[j] >= buy_tp:
+                    buy_pnls[i] = buy_tp - entry_ask
+                    buy_labels[i] = 1
+                    buy_resolved = True
+
+            if not sell_resolved:
+                if asks[j] >= sell_sl:
+                    sell_pnls[i] = entry_bid - sell_sl
+                    sell_labels[i] = 0
+                    sell_resolved = True
+                elif asks[j] <= sell_tp:
+                    sell_pnls[i] = entry_bid - sell_tp
+                    sell_labels[i] = 1
+                    sell_resolved = True
+
+            if buy_resolved and sell_resolved:
+                break
+
+        # End of data: unresolved → timeout
+        if not buy_resolved:
+            buy_labels[i] = -1
+        if not sell_resolved:
+            sell_labels[i] = -1
+
+    # Build result
+    result = LabelResult(total_labeled=n)
+    result.buy_labels = buy_labels.tolist()
+    result.sell_labels = sell_labels.tolist()
+    result.buy_pnls = buy_pnls.tolist()
+    result.sell_pnls = sell_pnls.tolist()
+    result.buy_wins = int((buy_labels == 1).sum())
+    result.buy_losses = int((buy_labels == 0).sum())
+    result.sell_wins = int((sell_labels == 1).sum())
+    result.sell_losses = int((sell_labels == 0).sum())
+    result.timeouts = int(((buy_labels == -1) | (sell_labels == -1)).sum())
+    return result

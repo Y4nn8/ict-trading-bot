@@ -1,9 +1,9 @@
 """Nested Optuna optimizer for the Midas scalping engine.
 
-Outer loop: tunes feature extractor params + SL/TP (expensive, re-replays ticks).
-Inner loop: tunes LightGBM hyperparams + entry threshold (cheap, retrains only).
+Outer loop: tunes feature extractor params (expensive, re-replays ticks).
+Inner loop: tunes SL/TP + LightGBM hyperparams (cheap, relabels in-memory).
 
-Score = walk-forward OOS metric (total PnL, Sharpe, or custom).
+Score = walk-forward OOS metric (composite, pnl, win_rate, pnl_per_trade).
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import numpy as np
 import optuna
 import polars as pl
 
-from src.midas.labeler import TickLabeler
+from src.midas.labeler import relabel_dataframe
 from src.midas.replay_engine import (
     ReplayConfig,
     ReplayEngine,
@@ -26,10 +26,10 @@ from src.midas.replay_engine import (
 )
 from src.midas.trade_simulator import SimConfig, TradeSimulator
 from src.midas.trainer import MidasTrainer, TrainerConfig
-from src.midas.types import LabelConfig, Tick
 
 if TYPE_CHECKING:
     from src.common.db import Database
+    from src.midas.types import Tick
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,11 +42,14 @@ class OptimizerConfig:
         train_end: Training data end.
         test_start: OOS test data start.
         test_end: OOS test data end.
-        outer_trials: Number of outer loop trials.
-        inner_trials: Number of inner loop trials per outer.
+        outer_trials: Number of outer loop trials (extractor params).
+        inner_trials: Number of inner loop trials (SL/TP + LightGBM).
         sample_on_candle: Extract features on candle close (default).
         sample_rate: Legacy tick-based sampling.
-        score_metric: Metric to optimize ("composite", "pnl", "win_rate", "pnl_per_trade").
+        score_metric: Metric to optimize.
+        sl_range: SL search range in points.
+        tp_range: TP search range in points.
+        fixed_outer_params: Fixed extractor params (skip outer search).
     """
 
     instrument: str = "XAUUSD"
@@ -81,35 +84,34 @@ class OptimizationResult:
 def _suggest_outer_params(
     trial: optuna.Trial,
     registry_params: list[Any],
-    config: OptimizerConfig,
 ) -> dict[str, Any]:
-    """Suggest extractor params + SL/TP for the outer loop."""
+    """Suggest extractor params only for the outer loop."""
     params: dict[str, Any] = {}
-
-    # Feature extractor tunable params
     for p in registry_params:
         if p.param_type == "int":
             params[p.name] = trial.suggest_int(p.name, int(p.low), int(p.high))
         else:
             params[p.name] = trial.suggest_float(p.name, p.low, p.high)
-
-    # SL/TP in price points (ranges from config)
-    params["sl_points"] = trial.suggest_float(
-        "sl_points", config.sl_range[0], config.sl_range[1],
-    )
-    params["tp_points"] = trial.suggest_float(
-        "tp_points", config.tp_range[0], config.tp_range[1],
-    )
-    params["label_timeout"] = trial.suggest_float(
-        "label_timeout", 60.0, 600.0,
-    )
-
     return params
 
 
-def _suggest_inner_params(trial: optuna.Trial) -> dict[str, Any]:
-    """Suggest LightGBM hyperparams + entry threshold."""
+def _suggest_inner_params(
+    trial: optuna.Trial,
+    config: OptimizerConfig,
+) -> dict[str, Any]:
+    """Suggest SL/TP + LightGBM hyperparams + entry threshold."""
     return {
+        # Trading params (relabeled per inner trial)
+        "sl_points": trial.suggest_float(
+            "sl_points", config.sl_range[0], config.sl_range[1],
+        ),
+        "tp_points": trial.suggest_float(
+            "tp_points", config.tp_range[0], config.tp_range[1],
+        ),
+        "label_timeout": trial.suggest_float(
+            "label_timeout", 60.0, 600.0,
+        ),
+        # LightGBM hyperparams
         "n_estimators": trial.suggest_int("n_estimators", 50, 1000),
         "learning_rate": trial.suggest_float(
             "learning_rate", 0.01, 0.3, log=True,
@@ -127,35 +129,13 @@ def _suggest_inner_params(trial: optuna.Trial) -> dict[str, Any]:
     }
 
 
-def _evaluate_oos(
-    trainer: MidasTrainer,
-    sim_config: SimConfig,
-    db: Any,
-    config: OptimizerConfig,
-    registry_factory: Any,
-    extractor_params: dict[str, float],
-) -> tuple[float, int, float]:
-    """Run OOS test evaluation synchronously (called from Optuna).
-
-    Returns (score, n_trades, win_rate, total_pnl).
-    """
-    import asyncio
-
-    return asyncio.get_event_loop().run_until_complete(
-        _evaluate_oos_async(
-            trainer, sim_config, db, config,
-            registry_factory, extractor_params,
-        ),
-    )
-
-
 async def _evaluate_oos_async(
     trainer: MidasTrainer,
     sim_config: SimConfig,
     db: Any,
     config: OptimizerConfig,
     registry_factory: Any,
-    extractor_params: dict[str, float],
+    extractor_params: dict[str, Any],
 ) -> tuple[float, int, float, float]:
     """Run OOS test and return (score, n_trades, win_rate, total_pnl)."""
     simulator = TradeSimulator(sim_config)
@@ -214,7 +194,6 @@ async def _evaluate_oos_async(
     win_rate = wins / n_trades
 
     if config.score_metric == "composite":
-        # PnL * sqrt(WR) * sqrt(n_trades) — rewards volume more than log
         if n_trades < 10:
             return -1000.0, n_trades, win_rate, total_pnl
         score = total_pnl * (win_rate**0.5) * (n_trades**0.5)
@@ -234,23 +213,21 @@ async def run_nested_optuna(
 ) -> OptimizationResult:
     """Run the nested Optuna optimization.
 
-    Outer loop: extractor params + SL/TP → replay + label → features.
-    Inner loop: LightGBM params + threshold → train + evaluate OOS.
+    Outer loop: extractor params → replay ticks → features DataFrame.
+    Inner loop: SL/TP → relabel DataFrame → train LightGBM → evaluate OOS.
     """
     result = OptimizationResult()
 
     def registry_factory() -> Any:
         return build_default_registry(instrument=config.instrument)
 
-    # Get all tunable params from registry
     sample_registry = registry_factory()
     registry_params = sample_registry.all_tunable_params()
 
     print(f"\nNested Optuna: {config.outer_trials} outer x "
           f"{config.inner_trials} inner trials")
-    print(f"  Tunable extractor params: {len(registry_params)}")
-    print(f"  + SL/TP + timeout = {len(registry_params) + 3} outer params")
-    print("  + 8 LightGBM inner params")
+    print(f"  Outer: {len(registry_params)} extractor params")
+    print("  Inner: SL/TP/timeout + 8 LightGBM params = 11 params")
     print(f"  Train: {config.train_start.date()} → {config.train_end.date()}")
     print(f"  Test:  {config.test_start.date()} → {config.test_end.date()}")
 
@@ -270,34 +247,18 @@ async def run_nested_optuna(
     for outer_i in range(config.outer_trials):
         outer_trial = outer_study.ask()
         if config.fixed_outer_params is not None:
-            outer_params = dict(config.fixed_outer_params)
+            extractor_params = dict(config.fixed_outer_params)
         else:
-            outer_params = _suggest_outer_params(
-                outer_trial, registry_params, config,
+            extractor_params = _suggest_outer_params(
+                outer_trial, registry_params,
             )
 
-        sl = float(outer_params["sl_points"])
-        tp = float(outer_params["tp_points"])
-        timeout = float(outer_params["label_timeout"])
-
-        print(f"\n--- Outer trial {outer_i + 1}/{config.outer_trials} "
-              f"(SL={sl:.1f}, TP={tp:.1f}, timeout={timeout:.0f}s)"
+        print(f"\n--- Outer trial {outer_i + 1}/{config.outer_trials}"
               f"{' [FIXED]' if config.fixed_outer_params else ''} ---")
 
-        # --- Outer: replay + label with these params ---
+        # --- Outer: replay to extract features (no labeling) ---
         registry = registry_factory()
-        extractor_params = {
-            k: v for k, v in outer_params.items()
-            if k not in ("sl_points", "tp_points", "label_timeout")
-        }
         registry.configure_all(extractor_params)
-
-        label_config = LabelConfig(
-            sl_points=sl,
-            tp_points=tp,
-            timeout_seconds=timeout,
-        )
-        labeler = TickLabeler(label_config)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             parquet_path = Path(tmpdir) / "features.parquet"
@@ -312,59 +273,24 @@ async def run_nested_optuna(
                     sample_rate=config.sample_rate,
                     output_path=parquet_path,
                 ),
-                labeler=labeler,
             )
             replay_result = await replay.run()
-            label_result = replay_result.label_result
 
-            if (
-                label_result is None
-                or label_result.total_labeled < 100
-                or not parquet_path.exists()
-            ):
-                print(f"  SKIP: insufficient labels "
-                      f"({label_result.total_labeled if label_result else 0})")
+            if not parquet_path.exists() or replay_result.feature_rows < 100:
+                print(f"  SKIP: insufficient features "
+                      f"({replay_result.feature_rows})")
                 outer_study.tell(outer_trial, -1000.0)
                 continue
 
             df = pl.read_parquet(parquet_path)
 
-        # Build target
-        target = MidasTrainer.build_target(
-            label_result.buy_labels,
-            label_result.sell_labels,
-        )
+        print(f"  Features: {len(df)} rows")
 
-        # Filter timeout rows (vectorized)
-        buy_arr = np.asarray(label_result.buy_labels)
-        sell_arr = np.asarray(label_result.sell_labels)
-        mask = ~((buy_arr == -1) & (sell_arr == -1))
-
-        if mask.sum() < 100:
-            print(f"  SKIP: only {mask.sum()} valid rows")
-            outer_study.tell(outer_trial, -1000.0)
-            continue
-
-        df_filtered = df.filter(pl.Series(mask))
-        target_filtered = target[mask]
-
-        # PnL-based sample weights
-        buy_pnls_f = [label_result.buy_pnls[i] for i, m in enumerate(mask) if m]
-        sell_pnls_f = [label_result.sell_pnls[i] for i, m in enumerate(mask) if m]
-        sample_weights = MidasTrainer.build_sample_weights(
-            buy_pnls_f, sell_pnls_f, target_filtered,
-        )
-
-        n_buy = int((target_filtered == 1).sum())
-        n_sell = int((target_filtered == 2).sum())
-        n_pass = int((target_filtered == 0).sum())
-        print(f"  Labels: {len(df_filtered)} rows "
-              f"(BUY={n_buy}, SELL={n_sell}, PASS={n_pass})")
-
-        # --- Inner: tune LightGBM on these features ---
+        # --- Inner: relabel + train + evaluate for each SL/TP combo ---
         inner_study = optuna.create_study(
             direction="maximize",
             study_name=f"midas_inner_{outer_i}",
+            sampler=optuna.samplers.TPESampler(n_startup_trials=5),
         )
 
         best_inner_score = -float("inf")
@@ -373,11 +299,44 @@ async def run_nested_optuna(
         best_inner_wr = 0.0
         best_inner_pnl = 0.0
         best_inner_params_local: dict[str, Any] = {}
+        best_inner_sl = 0.0
+        best_inner_tp = 0.0
 
         for _inner_i in range(config.inner_trials):
             inner_trial = inner_study.ask()
-            inner_params = _suggest_inner_params(inner_trial)
+            inner_params = _suggest_inner_params(inner_trial, config)
 
+            sl = inner_params["sl_points"]
+            tp = inner_params["tp_points"]
+            timeout = inner_params["label_timeout"]
+
+            # Relabel in-memory (fast, no DB)
+            label_result = relabel_dataframe(df, sl, tp, timeout)
+
+            # Build target + filter
+            target = MidasTrainer.build_target(
+                label_result.buy_labels,
+                label_result.sell_labels,
+            )
+            buy_arr = np.asarray(label_result.buy_labels)
+            sell_arr = np.asarray(label_result.sell_labels)
+            mask = ~((buy_arr == -1) & (sell_arr == -1))
+
+            if mask.sum() < 100:
+                inner_study.tell(inner_trial, -1000.0)
+                continue
+
+            df_filtered = df.filter(pl.Series(mask))
+            target_filtered = target[mask]
+
+            # PnL weights
+            buy_pnls = [label_result.buy_pnls[i] for i, m in enumerate(mask) if m]
+            sell_pnls = [label_result.sell_pnls[i] for i, m in enumerate(mask) if m]
+            weights = MidasTrainer.build_sample_weights(
+                buy_pnls, sell_pnls, target_filtered,
+            )
+
+            # Train
             trainer_config = TrainerConfig(
                 n_estimators=inner_params["n_estimators"],
                 learning_rate=inner_params["learning_rate"],
@@ -392,10 +351,7 @@ async def run_nested_optuna(
 
             trainer = MidasTrainer(trainer_config)
             try:
-                trainer.train(
-                    df_filtered, target_filtered,
-                    sample_weights=sample_weights,
-                )
+                trainer.train(df_filtered, target_filtered, sample_weights=weights)
             except Exception:
                 inner_study.tell(inner_trial, -1000.0)
                 continue
@@ -406,7 +362,6 @@ async def run_nested_optuna(
                 tp_points=tp,
                 max_spread=2.0,
             )
-
             score, n_tr, wr, pnl = await _evaluate_oos_async(
                 trainer, sim_config, db, config,
                 registry_factory, extractor_params,
@@ -421,12 +376,15 @@ async def run_nested_optuna(
                 best_inner_trades = n_tr
                 best_inner_wr = wr
                 best_inner_pnl = pnl
+                best_inner_sl = sl
+                best_inner_tp = tp
 
-        # Report best inner score to outer
+        # Report to outer
         outer_study.tell(outer_trial, best_inner_score)
         result.total_inner_trials += config.inner_trials
 
         print(f"  Best inner: score={best_inner_score:+.2f}, "
+              f"SL={best_inner_sl:.1f}, TP={best_inner_tp:.1f}, "
               f"trades={best_inner_trades}, "
               f"WR={best_inner_wr*100:.0f}%, "
               f"PnL={best_inner_pnl:+.1f}, "
@@ -434,14 +392,17 @@ async def run_nested_optuna(
 
         if best_inner_score > best_score:
             best_score = best_inner_score
-            best_outer = dict(outer_params)
+            best_outer = dict(extractor_params)
             best_inner = best_inner_params_local
 
-            # Re-evaluate to get trade stats
             if best_inner_trainer is not None:
                 _, best_trades, best_wr, best_pnl = await _evaluate_oos_async(
                     best_inner_trainer,
-                    SimConfig(sl_points=sl, tp_points=tp, max_spread=2.0),
+                    SimConfig(
+                        sl_points=best_inner_sl,
+                        tp_points=best_inner_tp,
+                        max_spread=2.0,
+                    ),
                     db, config, registry_factory, extractor_params,
                 )
 
@@ -468,9 +429,9 @@ def _print_result(result: OptimizationResult) -> None:
           f"PnL: {result.best_pnl:+.2f}")
     print(f"  Outer trials: {result.total_outer_trials}, "
           f"Inner trials: {result.total_inner_trials}")
-    print("\n  Best outer params (extractor + SL/TP):")
+    print("\n  Best outer params (extractor):")
     for k, v in sorted(result.best_outer_params.items()):
         print(f"    {k}: {v}")
-    print("\n  Best inner params (LightGBM):")
+    print("\n  Best inner params (SL/TP + LightGBM):")
     for k, v in sorted(result.best_inner_params.items()):
         print(f"    {k}: {v}")
