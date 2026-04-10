@@ -32,7 +32,7 @@ class SimConfig:
 
     sl_points: float = 3.0
     tp_points: float = 3.0
-    initial_capital: float = 10_000.0
+    initial_capital: float = 5_000.0
     size: float = 0.1
     value_per_point: float = 1.0  # 1€/pt for XAUUSD Contrat 1€
     max_open_positions: int = 1

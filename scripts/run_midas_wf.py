@@ -99,7 +99,7 @@ def cli() -> None:
     parser.add_argument("--trees", type=int, default=500)
     parser.add_argument("--threshold", type=float, default=0.55,
                         help="Entry probability threshold")
-    parser.add_argument("--capital", type=float, default=10000.0)
+    parser.add_argument("--capital", type=float, default=5000.0)
     parser.add_argument("--max-spread", type=float, default=2.0)
     parser.add_argument("--sample-on-tick", action="store_true",
                         help="Sample every tick instead of on candle close")
