@@ -73,6 +73,7 @@ class OptimizationResult:
 
     best_outer_params: dict[str, Any] = field(default_factory=dict)
     best_inner_params: dict[str, Any] = field(default_factory=dict)
+    best_trainer: MidasTrainer | None = None
     best_score: float = 0.0
     total_outer_trials: int = 0
     total_inner_trials: int = 0
@@ -394,6 +395,7 @@ async def run_nested_optuna(
             best_score = best_inner_score
             best_outer = dict(extractor_params)
             best_inner = best_inner_params_local
+            result.best_trainer = best_inner_trainer
 
             if best_inner_trainer is not None:
                 _, best_trades, best_wr, best_pnl = await _evaluate_oos_async(
