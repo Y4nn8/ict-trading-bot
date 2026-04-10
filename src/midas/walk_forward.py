@@ -6,8 +6,10 @@ runs simulation replays, and reports metrics per window.
 
 from __future__ import annotations
 
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -175,9 +177,6 @@ async def run_midas_walk_forward(
 
         # --- Phase 1: Training replay (features + labels) + train ---
         print("  [1/2] Training replay + labeling + LightGBM...")
-
-        import tempfile
-        from pathlib import Path
 
         registry = build_default_registry(instrument=config.instrument)
         registry.configure_all({})

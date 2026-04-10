@@ -220,8 +220,7 @@ class ReplayEngine:
                                 self._labeler.add_entry(tick)
 
                             # Callback mode: stream directly
-                            if is_callback_mode:
-                                assert self._tick_callback is not None
+                            if is_callback_mode and self._tick_callback is not None:
                                 self._tick_callback(tick, features)
                             else:
                                 current_chunk.append(features)

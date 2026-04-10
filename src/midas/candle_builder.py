@@ -169,7 +169,9 @@ class CandleBuilder:
     def _close_candle(self) -> dict[str, Any]:
         """Convert the current partial candle to a closed candle dict."""
         p = self._partial
-        assert p is not None
+        if p is None:
+            msg = "Cannot close candle: no partial candle in progress"
+            raise RuntimeError(msg)
         return {
             "time": p.bucket_start,
             "open": p.open,

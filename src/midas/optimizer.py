@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import lightgbm as lgb
 import numpy as np
 import optuna
 import polars as pl
@@ -353,7 +354,7 @@ async def run_nested_optuna(
             trainer = MidasTrainer(trainer_config)
             try:
                 trainer.train(df_filtered, target_filtered, sample_weights=weights)
-            except Exception:
+            except (ValueError, lgb.basic.LightGBMError):
                 inner_study.tell(inner_trial, -1000.0)
                 continue
 

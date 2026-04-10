@@ -328,7 +328,9 @@ class MidasTrainer:
         Returns:
             (signal, confidence) where signal is 0=PASS, 1=BUY, 2=SELL.
         """
-        assert self._entry_model is not None, "Entry model not trained"
+        if self._entry_model is None:
+            msg = "Entry model not trained"
+            raise RuntimeError(msg)
         x = np.array(
             [[features.get(f, 0.0) for f in self._entry_features]],
         )
@@ -378,7 +380,9 @@ class MidasTrainer:
 
     def save(self, path: Path) -> None:
         """Save entry model to file."""
-        assert self._entry_model is not None
+        if self._entry_model is None:
+            msg = "Cannot save: entry model not trained"
+            raise RuntimeError(msg)
         self._entry_model.save_model(str(path))
 
     def load(self, path: Path) -> None:
