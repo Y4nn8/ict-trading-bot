@@ -278,9 +278,42 @@ Convergence: 33% (7/21 params). All methods negative total PnL.
 - Coverage dropped to 69.47% with new modules — added utility tests to reach 71%+
 
 ### TODO / Next Session
-- Analyze Optuna results, decide on SL/TP range
-- Re-run Optuna with composite score (PnL * sqrt(WR) * log(trades))
-- Add slippage simulation (random or tick-price-based SL/TP exit)
-- Position sizing optimization (after finding profitable strategy)
-- Merge PR #15 and update DECISIONS.md
-- Consider longer train window (2+ months) for more data
+- Check Optuna v4 results (midas_optuna_v4.log)
+- Fix walk-forward look-ahead bias (use relabel_dataframe instead of streaming labeler)
+- Run 2-year walk-forward validation with optimized params
+- Add slippage simulation
+- Dynamic position sizing with margin check
+- Merge PR #15
+
+## Session 9 — 2026-04-10
+
+### Progress
+- Ran 3 Optuna optimizations, progressively improving scoring and architecture
+- Refactored: SL/TP moved from outer to inner loop (relabel in-memory, 10x faster)
+- Composite score v2: PnL × sqrt(WR) × sqrt(trades), min 10 trades
+- Fixed XAUUSD instrument: CS.D.CFEGOLD.CFE.IP (Contrat 1€, 0.10€/pt)
+- Default capital set to 5000€
+- Added model .bin saving alongside params YAML
+- Added per-trial logging (trades, WR, PnL, SL, TP)
+- Run v4 launched: 50×50, train Mar 2026, test Apr 1-6
+
+### Decisions Made
+- **SL/TP in inner loop**: SL/TP change requires relabeling, not re-replay. Moving to inner makes each outer trial explore 50 SL/TP combos instead of 1. Uses relabel_dataframe() on in-memory features
+- **Composite score sqrt(trades)**: log(trades) too weak — 4 trades vs 50 not penalized enough. sqrt + min 10 trades forces volume
+- **Correct instrument**: CS.D.CFEGOLD.CFE.IP not CFM. value_per_point=1.0€ not 10.0$. Margin ~23€ not ~1400$
+- **Threshold range 0.25-0.60**: Was 0.35-0.75, too restrictive. Random 3-class = 33%, so 0.35 barely above random
+- **Bayesian startup 5**: Default 10 wastes too many trials on random with only 30-50 outer trials
+- **Look-ahead in walk-forward**: ~250s leak at train/test boundary via streaming labeler. Negligible but must be fixed (user: zero tolerance)
+
+### Optuna Results Summary
+| Run | Score | Trades | WR | PnL | SL | TP | Data |
+|-----|-------|--------|------|------|-----|-----|------|
+| v1 (pnl) | +10.98 | 4 | 100% | +10.98 | 6.2 | 3.5 | Jan→Feb 1-3 |
+| v2 (composite) | +264.75 | 58 | 62% | +44.12 | 6.7 | 5.2 | Jan→Feb 1-6 |
+| v4 (refactored) | in progress | — | 71-82% | — | 6.6-7.8 | 4.3-4.9 | Mar→Apr 1-6 |
+
+Consistent sweet spot: **SL 6-8, TP 4-5, timeout 100-250s**
+
+### Issues Encountered
+- outer_trial UnboundLocalError when using fixed_outer_params — always call ask() first
+- Run v4 uses old value_per_point=10.0 (launched before fix) — PnL in log is 10x, ratios valid
