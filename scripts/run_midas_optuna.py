@@ -46,6 +46,26 @@ async def main(args: argparse.Namespace) -> None:
             print("No ticks found. Exiting.")
             return
 
+        # Load fixed outer params if provided
+        fixed_outer = None
+        if args.fix_outer_params:
+            import yaml
+
+            with open(args.fix_outer_params) as f:
+                raw = yaml.safe_load(f)
+            # Extract outer params (extractor + SL/TP + timeout)
+            inner_keys = {
+                "n_estimators", "learning_rate", "max_depth", "num_leaves",
+                "min_child_samples", "subsample", "colsample_bytree",
+                "entry_threshold",
+            }
+            fixed_outer = {
+                k: v for k, v in raw.items()
+                if not k.startswith("_") and k not in inner_keys
+            }
+            print(f"Fixed outer params from {args.fix_outer_params}: "
+                  f"{len(fixed_outer)} params")
+
         opt_config = OptimizerConfig(
             instrument=args.instrument,
             train_start=args.train_start,
@@ -58,6 +78,7 @@ async def main(args: argparse.Namespace) -> None:
             sl_range=tuple(args.sl_range),
             tp_range=tuple(args.tp_range),
             score_metric=args.score,
+            fixed_outer_params=fixed_outer,
         )
 
         result = await run_nested_optuna(opt_config, db)
@@ -102,6 +123,8 @@ def cli() -> None:
                         metavar=("MIN", "MAX"), help="SL search range")
     parser.add_argument("--tp-range", type=float, nargs=2, default=[1.5, 8.0],
                         metavar=("MIN", "MAX"), help="TP search range")
+    parser.add_argument("--fix-outer-params", type=str, default=None,
+                        help="YAML file with fixed outer params (skip outer search)")
     parser.add_argument("--output", type=str, default=None,
                         help="Save best params to YAML file")
     args = parser.parse_args()

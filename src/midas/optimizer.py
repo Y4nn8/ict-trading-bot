@@ -61,6 +61,7 @@ class OptimizerConfig:
     score_metric: str = "composite"
     sl_range: tuple[float, float] = (1.5, 8.0)
     tp_range: tuple[float, float] = (1.5, 8.0)
+    fixed_outer_params: dict[str, Any] | None = None
 
 
 @dataclass
@@ -267,15 +268,22 @@ async def run_nested_optuna(
     )
 
     for outer_i in range(config.outer_trials):
-        outer_trial = outer_study.ask()
-        outer_params = _suggest_outer_params(outer_trial, registry_params, config)
+        if config.fixed_outer_params is not None:
+            outer_params = dict(config.fixed_outer_params)
+            outer_study.tell(outer_study.ask(), 0.0)  # dummy
+        else:
+            outer_trial = outer_study.ask()
+            outer_params = _suggest_outer_params(
+                outer_trial, registry_params, config,
+            )
 
-        sl = outer_params["sl_points"]
-        tp = outer_params["tp_points"]
-        timeout = outer_params["label_timeout"]
+        sl = float(outer_params["sl_points"])
+        tp = float(outer_params["tp_points"])
+        timeout = float(outer_params["label_timeout"])
 
         print(f"\n--- Outer trial {outer_i + 1}/{config.outer_trials} "
-              f"(SL={sl:.1f}, TP={tp:.1f}, timeout={timeout:.0f}s) ---")
+              f"(SL={sl:.1f}, TP={tp:.1f}, timeout={timeout:.0f}s)"
+              f"{' [FIXED]' if config.fixed_outer_params else ''} ---")
 
         # --- Outer: replay + label with these params ---
         registry = registry_factory()
