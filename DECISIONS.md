@@ -354,3 +354,27 @@ Consistent sweet spot: **SL 6-8, TP 4-5, timeout 100-250s**
 ### TODO / Next Session
 - PR #18: Dynamic sizing + margin cap
 - Run Optuna with ATR mode to validate k_sl/k_tp convergence
+
+## Session 12 — 2026-04-11
+
+### Progress
+- PR #18 merged: dynamic position sizing with gamma ramp + margin cap
+- 317 tests pass, ruff clean, mypy clean
+
+### Decisions Made
+- **Gamma ramp sizing**: `confidence = (proba - threshold) / (max_margin_proba - threshold)`, then `size = floor(confidence^gamma * size_max)`. Scales from min lot to full available margin based on model confidence
+- **sizing_threshold from entry_threshold**: the gamma ramp uses the same threshold as the entry gate (wired from Optuna `entry_threshold`), so confidence=0 exactly at the decision boundary. Initially hardcoded to 1/3, caught in review
+- **margin_used as computed property**: derived from `sum(pos.margin for pos in positions)` instead of manual increment/decrement tracking. Eliminates drift bugs, positions list is bounded by max_open_positions (typically 1)
+- **_close_position helper**: PnL computation + MidasTrade construction was duplicated in 3 exit paths (_check_exits, early_close, close_all). Extracted into single method
+- **_can_open uses mid price**: pre-check uses tick.mid for margin estimation; actual sizing in _open_position uses bid (SELL) or ask (BUY). Avoids rejecting SELL entries that would fit
+- **IEEE 754 epsilon in floor()**: `math.floor(x + 1e-9)` prevents under-allocation by one lot step due to floating-point representation (e.g., 0.3/0.1 → 2.999...)
+- **Optuna inner loop now 15 params**: 5 SL/TP + 2 sizing (gamma, max_margin_proba) + 7 LightGBM + entry_threshold
+
+### Issues Encountered
+- Floating-point precision in tests: `(0.59 - 0.33) / (0.85 - 0.33)` is not exactly 0.5 in IEEE 754. Fixed tests to use exact fractions or compute expected values with same formula
+- Copilot review caught 5 issues (margin pre-check inconsistency, min_lot guard, fp floor, test comment, print label) — all fixed
+
+### TODO / Next Session
+- PR #19: Proper HOLD/CLOSE exit model
+- Run Optuna with dynamic sizing to validate gamma/max_margin_proba convergence
+- Compare OOS PnL: fixed 0.1 lot vs dynamic sizing
