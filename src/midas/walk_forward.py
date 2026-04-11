@@ -323,8 +323,12 @@ async def run_midas_walk_forward(
             atr_col: str = _atr_col,
         ) -> None:
             _feat.update(features)
-            signal, _conf = _tr.predict(features)
-            _sim.on_signal(tick, signal, atr=features.get(atr_col, 0.0))
+            signal, confidence = _tr.predict(features)
+            _sim.on_signal(
+                tick, signal,
+                atr=features.get(atr_col, 0.0),
+                proba=confidence,
+            )
 
         last_tick_holder: list[Tick | None] = [None]
 

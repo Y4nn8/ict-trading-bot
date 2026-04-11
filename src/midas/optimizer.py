@@ -71,6 +71,8 @@ class OptimizerConfig:
     tp_range: tuple[float, float] = (1.5, 8.0)
     k_sl_range: tuple[float, float] = (0.5, 3.0)
     k_tp_range: tuple[float, float] = (0.5, 3.0)
+    gamma_range: tuple[float, float] = (0.5, 3.0)
+    max_margin_proba_range: tuple[float, float] = (0.70, 0.95)
     atr_column: str = ATR_COLUMN_DEFAULT
     fixed_outer_params: dict[str, Any] | None = None
 
@@ -108,7 +110,7 @@ def _suggest_inner_params(
     trial: optuna.Trial,
     config: OptimizerConfig,
 ) -> dict[str, Any]:
-    """Suggest k_sl/k_tp + LightGBM hyperparams + entry threshold."""
+    """Suggest k_sl/k_tp + sizing + LightGBM hyperparams + entry threshold."""
     return {
         # ATR-based SL/TP multipliers (relabeled per inner trial)
         "k_sl": trial.suggest_float(
@@ -125,6 +127,15 @@ def _suggest_inner_params(
         ),
         "label_timeout": trial.suggest_float(
             "label_timeout", 60.0, 600.0,
+        ),
+        # Dynamic sizing
+        "gamma": trial.suggest_float(
+            "gamma", config.gamma_range[0], config.gamma_range[1],
+        ),
+        "max_margin_proba": trial.suggest_float(
+            "max_margin_proba",
+            config.max_margin_proba_range[0],
+            config.max_margin_proba_range[1],
         ),
         # LightGBM hyperparams
         "n_estimators": trial.suggest_int("n_estimators", 50, 1000),
@@ -166,8 +177,12 @@ async def _evaluate_oos_async(
         sim: TradeSimulator = _simulator,
         atr_col: str = _atr_col,
     ) -> None:
-        signal, _ = tr.predict(features)
-        sim.on_signal(tick, signal, atr=features.get(atr_col, 0.0))
+        signal, confidence = tr.predict(features)
+        sim.on_signal(
+            tick, signal,
+            atr=features.get(atr_col, 0.0),
+            proba=confidence,
+        )
 
     last_tick_holder: list[Tick | None] = [None]
 
@@ -244,7 +259,8 @@ async def run_nested_optuna(
     print(f"\nNested Optuna: {config.outer_trials} outer x "
           f"{config.inner_trials} inner trials")
     print(f"  Outer: {len(registry_params)} extractor params")
-    print("  Inner: k_sl/k_tp/sl_fallback/tp_fallback/timeout + 8 LightGBM params = 13 params")
+    print("  Inner: 5 SL/TP + 2 sizing + 7 LightGBM"
+          " + entry_threshold = 15 params")
     print(f"  ATR column: {config.atr_column}")
     print(f"  Train: {config.train_start.date()} → {config.train_end.date()}")
     print(f"  Test:  {config.test_start.date()} → {config.test_end.date()}")
@@ -382,13 +398,16 @@ async def run_nested_optuna(
                 inner_study.tell(inner_trial, -1000.0)
                 continue
 
-            # Evaluate on OOS with ATR-based SL/TP
+            # Evaluate on OOS with ATR-based SL/TP + dynamic sizing
             sim_config = SimConfig(
                 sl_points=sl_fallback,
                 tp_points=tp_fallback,
                 k_sl=k_sl,
                 k_tp=k_tp,
                 max_spread=2.0,
+                gamma=inner_params["gamma"],
+                max_margin_proba=inner_params["max_margin_proba"],
+                sizing_threshold=inner_params["entry_threshold"],
             )
             score, n_tr, wr, pnl = await _evaluate_oos_async(
                 trainer, sim_config, db, config,
@@ -412,6 +431,7 @@ async def run_nested_optuna(
         print(f"  Best inner: score={best_inner_score:+.2f}, "
               f"k_sl={best_inner_params_local.get('k_sl', 0):.2f}, "
               f"k_tp={best_inner_params_local.get('k_tp', 0):.2f}, "
+              f"gamma={best_inner_params_local.get('gamma', 0):.2f}, "
               f"trades={best_inner_trades}, "
               f"WR={best_inner_wr*100:.0f}%, "
               f"PnL={best_inner_pnl:+.1f}, "
