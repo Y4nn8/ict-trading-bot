@@ -25,7 +25,7 @@ from src.midas.replay_engine import (
     ReplayEngine,
     build_default_registry,
 )
-from src.midas.trade_simulator import SimConfig, TradeSimulator
+from src.midas.trade_simulator import MidasTrade, SimConfig, TradeSimulator
 from src.midas.trainer import MidasTrainer, TrainerConfig
 from src.midas.types import ATR_COLUMN_DEFAULT
 
@@ -90,6 +90,7 @@ class OptimizationResult:
     best_n_trades: int = 0
     best_win_rate: float = 0.0
     best_pnl: float = 0.0
+    best_trades: list[MidasTrade] = field(default_factory=list)
 
 
 def _suggest_outer_params(
@@ -162,8 +163,8 @@ async def _evaluate_oos_async(
     config: OptimizerConfig,
     registry_factory: Any,
     extractor_params: dict[str, Any],
-) -> tuple[float, int, float, float]:
-    """Run OOS test and return (score, n_trades, win_rate, total_pnl)."""
+) -> tuple[float, int, float, float, list[MidasTrade]]:
+    """Run OOS test and return (score, n_trades, win_rate, total_pnl, trades)."""
     simulator = TradeSimulator(sim_config)
     _trainer = trainer
     _simulator = simulator
@@ -219,7 +220,7 @@ async def _evaluate_oos_async(
     trades = simulator.closed_trades
     n_trades = len(trades)
     if n_trades == 0:
-        return -1000.0, 0, 0.0, 0.0
+        return -1000.0, 0, 0.0, 0.0, []
 
     total_pnl = sum(t.pnl for t in trades)
     wins = sum(1 for t in trades if t.is_win)
@@ -227,7 +228,7 @@ async def _evaluate_oos_async(
 
     if config.score_metric == "composite":
         if n_trades < 10:
-            return -1000.0, n_trades, win_rate, total_pnl
+            return -1000.0, n_trades, win_rate, total_pnl, trades
         score = total_pnl * (win_rate**0.5) * (n_trades**0.5)
     elif config.score_metric == "win_rate":
         score = win_rate
@@ -236,7 +237,7 @@ async def _evaluate_oos_async(
     else:
         score = total_pnl
 
-    return score, n_trades, win_rate, total_pnl
+    return score, n_trades, win_rate, total_pnl, trades
 
 
 async def run_nested_optuna(
@@ -333,6 +334,7 @@ async def run_nested_optuna(
         best_inner_wr = 0.0
         best_inner_pnl = 0.0
         best_inner_params_local: dict[str, Any] = {}
+        best_inner_trades_list: list[MidasTrade] = []
 
         for _inner_i in range(config.inner_trials):
             inner_trial = inner_study.ask()
@@ -409,7 +411,7 @@ async def run_nested_optuna(
                 max_margin_proba=inner_params["max_margin_proba"],
                 sizing_threshold=inner_params["entry_threshold"],
             )
-            score, n_tr, wr, pnl = await _evaluate_oos_async(
+            score, n_tr, wr, pnl, trades_list = await _evaluate_oos_async(
                 trainer, sim_config, db, config,
                 registry_factory, extractor_params,
             )
@@ -423,6 +425,7 @@ async def run_nested_optuna(
                 best_inner_trades = n_tr
                 best_inner_wr = wr
                 best_inner_pnl = pnl
+                best_inner_trades_list = trades_list
 
         # Report to outer
         outer_study.tell(outer_trial, best_inner_score)
@@ -442,6 +445,7 @@ async def run_nested_optuna(
             best_outer = dict(extractor_params)
             best_inner = best_inner_params_local
             result.best_trainer = best_inner_trainer
+            result.best_trades = best_inner_trades_list
             best_trades = best_inner_trades
             best_wr = best_inner_wr
             best_pnl = best_inner_pnl

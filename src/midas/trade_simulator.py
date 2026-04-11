@@ -85,6 +85,7 @@ class MidasPosition:
     tp_price: float
     size: float
     margin: float = 0.0
+    proba: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +104,7 @@ class MidasTrade:
     pnl: float
     pnl_points: float
     is_win: bool
+    proba: float = 0.0
 
 
 class TradeSimulator:
@@ -326,6 +328,7 @@ class TradeSimulator:
             pnl=pnl,
             pnl_points=pnl_points,
             is_win=pnl > 0,
+            proba=pos.proba,
         )
         self._trades.append(trade)
         self._capital += pnl
@@ -389,6 +392,7 @@ class TradeSimulator:
             tp_price=tp,
             size=size,
             margin=margin,
+            proba=proba,
         )
         self._positions.append(pos)
 
