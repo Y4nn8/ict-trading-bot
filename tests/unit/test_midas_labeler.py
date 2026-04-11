@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from src.midas.labeler import TickLabeler
+import numpy as np
+import polars as pl
+
+from src.midas.labeler import TickLabeler, relabel_dataframe
 from src.midas.types import LabelConfig, Tick
 
 
@@ -199,3 +202,77 @@ class TestTickLabeler:
         result = labeler.finalize()
         # BUY PnL = bid at timeout - entry_ask = 102 - 101 = 1.0
         assert result.buy_pnls[0] == 1.0
+
+
+class TestRelabelNoLookahead:
+    """Verify relabel_dataframe does not look beyond the DataFrame."""
+
+    def test_boundary_entries_timeout_not_resolved(self) -> None:
+        """Entries near end of DataFrame cannot resolve beyond it.
+
+        This is the key anti-look-ahead property: relabel_dataframe
+        only scans within the DataFrame, so entries near the end that
+        can't hit SL/TP within timeout are labeled as timeout (-1).
+        """
+        base = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
+        n = 100
+        times = [
+            (base + timedelta(seconds=i * 10)).timestamp()
+            for i in range(n)
+        ]
+        # Flat price — SL/TP will never be hit
+        bids = [100.0] * n
+        asks = [100.5] * n
+
+        df = pl.DataFrame({
+            "_time": times,
+            "_bid": bids,
+            "_ask": asks,
+        })
+
+        result = relabel_dataframe(
+            df,
+            sl_points=5.0,
+            tp_points=5.0,
+            timeout_seconds=50.0,  # 5 candles of 10s
+        )
+
+        # Last 5 entries have < 50s of future data → should be timeout
+        last_labels_buy = result.buy_labels[-5:]
+        last_labels_sell = result.sell_labels[-5:]
+        assert all(lab == -1 for lab in last_labels_buy), (
+            "Last entries should be timeout (no future data to resolve)"
+        )
+        assert all(lab == -1 for lab in last_labels_sell)
+
+    def test_relabel_matches_streaming_within_boundary(self) -> None:
+        """relabel_dataframe and streaming labeler produce consistent
+        labels when both operate on the same data (no extension)."""
+        base = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
+        # Build sampled ticks with some price movement
+        rng = np.random.default_rng(42)
+        n = 50
+        prices = 100.0 + np.cumsum(rng.normal(0, 0.3, n))
+        times = [base + timedelta(seconds=i * 10) for i in range(n)]
+        bids = prices.tolist()
+        asks = (prices + 0.5).tolist()
+
+        # DataFrame labeler
+        df = pl.DataFrame({
+            "_time": [t.timestamp() for t in times],
+            "_bid": bids,
+            "_ask": asks,
+        })
+        df_result = relabel_dataframe(df, sl_points=2.0, tp_points=2.0, timeout_seconds=100.0)
+
+        # Streaming labeler (no extension — same data)
+        labeler = TickLabeler(LabelConfig(sl_points=2.0, tp_points=2.0, timeout_seconds=100.0))
+        for i in range(n):
+            tick = Tick(time=times[i], bid=bids[i], ask=asks[i])
+            labeler.on_tick(tick)
+            labeler.add_entry(tick)
+        stream_result = labeler.finalize()
+
+        # Both should agree on labels (same resolution, same data)
+        assert df_result.buy_labels == stream_result.buy_labels
+        assert df_result.sell_labels == stream_result.sell_labels

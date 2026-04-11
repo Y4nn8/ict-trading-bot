@@ -14,7 +14,7 @@ Optionally integrates a TickLabeler for training data generation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import TYPE_CHECKING, Protocol
 
 from src.common.logging import get_logger
@@ -133,13 +133,7 @@ class ReplayEngine:
         candle_just_closed = False
         is_callback_mode = self._tick_callback is not None
 
-        # Extend query range for labeler lookahead
         query_end = cfg.end
-        if self._labeler is not None:
-            lookahead = timedelta(
-                seconds=self._labeler.timeout_seconds,
-            )
-            query_end = cfg.end + lookahead
 
         await logger.ainfo(
             "replay_start",
