@@ -80,7 +80,7 @@ class LabelResult:
     timeouts: int = 0
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ExitDatasetResult:
     """Output of the exit dataset builder.
 
@@ -88,13 +88,13 @@ class ExitDatasetResult:
     optimal-close labels for training the HOLD/CLOSE exit model.
     """
 
-    row_indices: np.ndarray  # indices into the original features DataFrame
+    row_indices: np.ndarray
     directions: np.ndarray  # 1.0=BUY, -1.0=SELL
-    unrealized_pnls: np.ndarray  # unrealized PnL at each row
+    unrealized_pnls: np.ndarray
     durations: np.ndarray  # seconds since entry
     exit_labels: np.ndarray  # 0=HOLD, 1=CLOSE
-    n_entries: int = 0  # number of entry trades that spawned exit rows
-    n_rows: int = 0  # total exit dataset rows
+    n_entries: int = 0
+    n_rows: int = 0
 
 
 
@@ -351,6 +351,37 @@ def _relabel_core(
     return buy_labels, sell_labels, buy_pnls, sell_pnls
 
 
+def _build_price_arrays(
+    df: pl.DataFrame,
+    sl_points: float,
+    tp_points: float,
+    k_sl: float | None,
+    k_tp: float | None,
+    atr_column: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Extract price arrays and build per-row SL/TP distances.
+
+    Shared by ``relabel_dataframe`` and ``build_exit_dataset``.
+
+    Returns:
+        (times, bids, asks, sl_arr, tp_arr) as float64 numpy arrays.
+    """
+    times = df["_time"].to_numpy().astype(np.float64)
+    bids = df["_bid"].to_numpy().astype(np.float64)
+    asks = df["_ask"].to_numpy().astype(np.float64)
+    n = len(times)
+
+    if k_sl is not None and k_tp is not None:
+        atrs = df[atr_column].to_numpy().astype(np.float64)
+        sl_arr = np.where(atrs > 0.0, k_sl * atrs, sl_points)
+        tp_arr = np.where(atrs > 0.0, k_tp * atrs, tp_points)
+    else:
+        sl_arr = np.full(n, sl_points, dtype=np.float64)
+        tp_arr = np.full(n, tp_points, dtype=np.float64)
+
+    return times, bids, asks, sl_arr, tp_arr
+
+
 def relabel_dataframe(
     df: pl.DataFrame,
     sl_points: float,
@@ -389,24 +420,15 @@ def relabel_dataframe(
     Returns:
         LabelResult with buy/sell labels and PnL arrays.
     """
-    times = df["_time"].to_numpy().astype(np.float64)
-    bids = df["_bid"].to_numpy().astype(np.float64)
-    asks = df["_ask"].to_numpy().astype(np.float64)
-    n = len(times)
-
-    if k_sl is not None and k_tp is not None:
-        atrs = df[atr_column].to_numpy().astype(np.float64)
-        sl_arr = np.where(atrs > 0.0, k_sl * atrs, sl_points)
-        tp_arr = np.where(atrs > 0.0, k_tp * atrs, tp_points)
-    else:
-        sl_arr = np.full(n, sl_points, dtype=np.float64)
-        tp_arr = np.full(n, tp_points, dtype=np.float64)
+    times, bids, asks, sl_arr, tp_arr = _build_price_arrays(
+        df, sl_points, tp_points, k_sl, k_tp, atr_column,
+    )
 
     buy_labels, sell_labels, buy_pnls, sell_pnls = _relabel_core(
         times, bids, asks, sl_arr, tp_arr, timeout_seconds,
     )
 
-    result = LabelResult(total_labeled=n)
+    result = LabelResult(total_labeled=len(times))
     result.buy_labels = buy_labels.tolist()
     result.sell_labels = sell_labels.tolist()
     result.buy_pnls = buy_pnls.tolist()
@@ -581,22 +603,21 @@ def build_exit_dataset(
 
     Returns:
         ExitDatasetResult with row indices, position context, and labels.
+
+    Raises:
+        ValueError: If entry_target length doesn't match df length.
     """
-    times = df["_time"].to_numpy().astype(np.float64)
-    bids = df["_bid"].to_numpy().astype(np.float64)
-    asks = df["_ask"].to_numpy().astype(np.float64)
-    n = len(times)
+    if len(entry_target) != len(df):
+        msg = (
+            f"entry_target length ({len(entry_target)}) "
+            f"!= df length ({len(df)})"
+        )
+        raise ValueError(msg)
 
-    # Build per-row SL/TP arrays (same logic as relabel_dataframe)
-    if k_sl is not None and k_tp is not None:
-        atrs = df[atr_column].to_numpy().astype(np.float64)
-        sl_arr = np.where(atrs > 0.0, k_sl * atrs, sl_points)
-        tp_arr = np.where(atrs > 0.0, k_tp * atrs, tp_points)
-    else:
-        sl_arr = np.full(n, sl_points, dtype=np.float64)
-        tp_arr = np.full(n, tp_points, dtype=np.float64)
+    times, bids, asks, sl_arr, tp_arr = _build_price_arrays(
+        df, sl_points, tp_points, k_sl, k_tp, atr_column,
+    )
 
-    # Find entry rows (BUY=1 or SELL=2)
     entry_mask = entry_target != 0
     entry_indices = np.where(entry_mask)[0].astype(np.int64)
     entry_directions = entry_target[entry_mask].astype(np.int64)

@@ -229,7 +229,6 @@ async def run_midas_walk_forward(
               f"losses: {label_result.sell_losses}, "
               f"timeouts: {label_result.timeouts}")
 
-        # Build target from labels (vectorized mask)
         target = MidasTrainer.build_target(
             label_result.buy_labels,
             label_result.sell_labels,
