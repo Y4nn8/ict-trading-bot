@@ -54,6 +54,8 @@ async def main(args: argparse.Namespace) -> None:
                 sl_points=args.sl,
                 tp_points=args.tp,
                 timeout_seconds=args.timeout,
+                k_sl=args.k_sl,
+                k_tp=args.k_tp,
             ),
             trainer_config=TrainerConfig(
                 n_estimators=args.trees,
@@ -62,6 +64,8 @@ async def main(args: argparse.Namespace) -> None:
             sim_config=SimConfig(
                 sl_points=args.sl,
                 tp_points=args.tp,
+                k_sl=args.k_sl,
+                k_tp=args.k_tp,
                 initial_capital=args.capital,
                 max_spread=args.max_spread,
             ),
@@ -92,8 +96,14 @@ def cli() -> None:
     parser.add_argument("--train-days", type=int, default=30)
     parser.add_argument("--test-days", type=int, default=2)
     parser.add_argument("--step-days", type=int, default=2)
-    parser.add_argument("--sl", type=float, default=3.0, help="SL in points")
-    parser.add_argument("--tp", type=float, default=3.0, help="TP in points")
+    parser.add_argument("--sl", type=float, default=3.0,
+                        help="SL in points (fixed mode / ATR fallback)")
+    parser.add_argument("--tp", type=float, default=3.0,
+                        help="TP in points (fixed mode / ATR fallback)")
+    parser.add_argument("--k-sl", type=float, default=None,
+                        help="ATR multiplier for SL (enables ATR mode)")
+    parser.add_argument("--k-tp", type=float, default=None,
+                        help="ATR multiplier for TP (enables ATR mode)")
     parser.add_argument("--timeout", type=float, default=300.0,
                         help="Label timeout in seconds")
     parser.add_argument("--trees", type=int, default=500)

@@ -20,9 +20,18 @@ if TYPE_CHECKING:
 class SimConfig:
     """Trade simulation configuration.
 
+    Supports two SL/TP modes:
+      - **Fixed**: uses ``sl_points``/``tp_points`` directly.
+      - **ATR-based**: when ``k_sl``/``k_tp`` are set, computes
+        SL = k_sl * ATR, TP = k_tp * ATR from the ATR value passed
+        to ``on_signal``. Falls back to ``sl_points``/``tp_points``
+        when ATR is zero.
+
     Args:
-        sl_points: Stop loss distance in price points.
-        tp_points: Take profit distance in price points.
+        sl_points: Stop loss distance in price points (fixed mode / fallback).
+        tp_points: Take profit distance in price points (fixed mode / fallback).
+        k_sl: SL multiplier for ATR-based mode (None = fixed mode).
+        k_tp: TP multiplier for ATR-based mode (None = fixed mode).
         initial_capital: Starting capital.
         size: Position size per trade.
         value_per_point: Currency value per price point per unit size.
@@ -32,6 +41,8 @@ class SimConfig:
 
     sl_points: float = 3.0
     tp_points: float = 3.0
+    k_sl: float | None = None
+    k_tp: float | None = None
     initial_capital: float = 5_000.0
     size: float = 0.1
     value_per_point: float = 1.0  # 1€/pt for XAUUSD Contrat 1€
@@ -98,12 +109,19 @@ class TradeSimulator:
         """Number of open positions."""
         return len(self._positions)
 
-    def on_signal(self, tick: Tick, signal: int) -> list[MidasTrade]:
+    def on_signal(
+        self,
+        tick: Tick,
+        signal: int,
+        *,
+        atr: float = 0.0,
+    ) -> list[MidasTrade]:
         """Process a model signal at a tick.
 
         Args:
             tick: Current tick.
             signal: 0=PASS, 1=BUY, 2=SELL.
+            atr: Current ATR value (used in ATR-based SL/TP mode).
 
         Returns:
             List of trades closed on this tick (may be empty).
@@ -113,7 +131,7 @@ class TradeSimulator:
 
         # Then try to open new position
         if signal in (1, 2) and self._can_open(tick):
-            self._open_position(tick, "BUY" if signal == 1 else "SELL")
+            self._open_position(tick, "BUY" if signal == 1 else "SELL", atr=atr)
 
         return closed
 
@@ -206,18 +224,32 @@ class TradeSimulator:
             return False
         return tick.spread <= self._config.max_spread
 
-    def _open_position(self, tick: Tick, direction: str) -> None:
+    def _open_position(
+        self,
+        tick: Tick,
+        direction: str,
+        *,
+        atr: float = 0.0,
+    ) -> None:
         """Open a new position."""
         cfg = self._config
 
+        # Compute SL/TP distances (ATR-based or fixed)
+        if cfg.k_sl is not None and cfg.k_tp is not None and atr > 0.0:
+            sl_dist = cfg.k_sl * atr
+            tp_dist = cfg.k_tp * atr
+        else:
+            sl_dist = cfg.sl_points
+            tp_dist = cfg.tp_points
+
         if direction == "BUY":
             entry = tick.ask
-            sl = entry - cfg.sl_points
-            tp = entry + cfg.tp_points
+            sl = entry - sl_dist
+            tp = entry + tp_dist
         else:
             entry = tick.bid
-            sl = entry + cfg.sl_points
-            tp = entry - cfg.tp_points
+            sl = entry + sl_dist
+            tp = entry - tp_dist
 
         pos = MidasPosition(
             trade_id=str(uuid.uuid4())[:8],

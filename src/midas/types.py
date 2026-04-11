@@ -58,6 +58,10 @@ class PartialCandle:
         return (self.close - self.low) / r if r > 0 else 0.5
 
 
+ATR_COLUMN_DEFAULT: str = "scalp__m1_atr"
+"""Default column name for ATR values used in ATR-based SL/TP."""
+
+
 class MidasSignal(StrEnum):
     """LightGBM prediction outputs."""
 
@@ -72,12 +76,24 @@ class MidasSignal(StrEnum):
 class LabelConfig:
     """Configuration for tick labeling with SL/TP lookahead.
 
+    Supports two modes:
+      - **Fixed**: uses ``sl_points``/``tp_points`` directly.
+      - **ATR-based**: when ``k_sl``/``k_tp`` are set, computes
+        per-row SL = k_sl * ATR. Falls back to ``sl_points``/``tp_points``
+        when ATR is zero.
+
     Args:
-        sl_points: Stop loss distance in price points.
-        tp_points: Take profit distance in price points.
+        sl_points: Stop loss distance in price points (fixed / fallback).
+        tp_points: Take profit distance in price points (fixed / fallback).
         timeout_seconds: Max lookahead for SL/TP resolution.
+        k_sl: SL multiplier for ATR-based mode (None = fixed mode).
+        k_tp: TP multiplier for ATR-based mode (None = fixed mode).
+        atr_column: Column name containing ATR values.
     """
 
     sl_points: float = 3.0
     tp_points: float = 3.0
     timeout_seconds: float = 300.0
+    k_sl: float | None = None
+    k_tp: float | None = None
+    atr_column: str = ATR_COLUMN_DEFAULT

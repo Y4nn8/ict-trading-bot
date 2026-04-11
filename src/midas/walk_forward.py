@@ -150,13 +150,17 @@ async def run_midas_walk_forward(
         print("No windows generated. Check date range and window sizes.")
         return []
 
+    lc = config.label_config
     print(f"\nMidas Walk-Forward: {len(windows)} windows")
     print(f"  Train: {config.train_days}d, Test: {config.test_days}d, "
           f"Step: {config.step_days}d")
-    print(f"  SL: {config.label_config.sl_points}pts, "
-          f"TP: {config.label_config.tp_points}pts, "
-          f"Timeout: {config.label_config.timeout_seconds}s")
-    print(f"  Entry threshold: {config.trainer_config.entry_threshold}")
+    if lc.k_sl is not None and lc.k_tp is not None:
+        print(f"  SL: k_sl={lc.k_sl} * ATR, TP: k_tp={lc.k_tp} * ATR "
+              f"(fallback {lc.sl_points}/{lc.tp_points}pts)")
+    else:
+        print(f"  SL: {lc.sl_points}pts, TP: {lc.tp_points}pts")
+    print(f"  Timeout: {lc.timeout_seconds}s, "
+          f"Entry threshold: {config.trainer_config.entry_threshold}")
 
     results: list[WindowResult] = []
 
@@ -211,6 +215,9 @@ async def run_midas_walk_forward(
             sl_points=config.label_config.sl_points,
             tp_points=config.label_config.tp_points,
             timeout_seconds=config.label_config.timeout_seconds,
+            k_sl=config.label_config.k_sl,
+            k_tp=config.label_config.k_tp,
+            atr_column=config.label_config.atr_column,
         )
 
         print(f"    Ticks: {train_result.total_ticks:,}, "
@@ -304,6 +311,7 @@ async def run_midas_walk_forward(
         simulator = TradeSimulator(config.sim_config)
         # Cache latest features for exit model (updated on sampled ticks)
         latest_features: dict[str, float] = {}
+        _atr_col = config.label_config.atr_column
 
         def test_callback(
             tick: Tick,
@@ -312,10 +320,11 @@ async def run_midas_walk_forward(
             _tr: MidasTrainer = trainer,
             _sim: TradeSimulator = simulator,
             _feat: dict[str, float] = latest_features,
+            atr_col: str = _atr_col,
         ) -> None:
             _feat.update(features)
             signal, _conf = _tr.predict(features)
-            _sim.on_signal(tick, signal)
+            _sim.on_signal(tick, signal, atr=features.get(atr_col, 0.0))
 
         last_tick_holder: list[Tick | None] = [None]
 

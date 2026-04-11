@@ -53,11 +53,12 @@ async def main(args: argparse.Namespace) -> None:
 
             with open(args.fix_outer_params) as f:
                 raw = yaml.safe_load(f)
-            # Extract outer params (extractor only, not SL/TP/LightGBM)
+            # Extract outer params (extractor only, not inner params)
             inner_keys = {
                 "n_estimators", "learning_rate", "max_depth", "num_leaves",
                 "min_child_samples", "subsample", "colsample_bytree",
-                "entry_threshold", "sl_points", "tp_points", "label_timeout",
+                "entry_threshold", "k_sl", "k_tp", "sl_fallback", "tp_fallback",
+                "sl_points", "tp_points", "label_timeout",
             }
             fixed_outer = {
                 k: v for k, v in raw.items()
@@ -77,6 +78,8 @@ async def main(args: argparse.Namespace) -> None:
             sample_on_candle=not args.sample_on_tick,
             sl_range=tuple(args.sl_range),
             tp_range=tuple(args.tp_range),
+            k_sl_range=tuple(args.k_sl_range),
+            k_tp_range=tuple(args.k_tp_range),
             score_metric=args.score,
             fixed_outer_params=fixed_outer,
         )
@@ -127,9 +130,13 @@ def cli() -> None:
     parser.add_argument("--score", default="composite",
                         choices=["composite", "pnl", "win_rate", "pnl_per_trade"])
     parser.add_argument("--sl-range", type=float, nargs=2, default=[1.5, 8.0],
-                        metavar=("MIN", "MAX"), help="SL search range")
+                        metavar=("MIN", "MAX"), help="SL fallback search range (pts)")
     parser.add_argument("--tp-range", type=float, nargs=2, default=[1.5, 8.0],
-                        metavar=("MIN", "MAX"), help="TP search range")
+                        metavar=("MIN", "MAX"), help="TP fallback search range (pts)")
+    parser.add_argument("--k-sl-range", type=float, nargs=2, default=[0.5, 3.0],
+                        metavar=("MIN", "MAX"), help="k_sl ATR multiplier range")
+    parser.add_argument("--k-tp-range", type=float, nargs=2, default=[0.5, 3.0],
+                        metavar=("MIN", "MAX"), help="k_tp ATR multiplier range")
     parser.add_argument("--fix-outer-params", type=str, default=None,
                         help="YAML file with fixed outer params (skip outer search)")
     parser.add_argument("--output", type=str, default=None,
