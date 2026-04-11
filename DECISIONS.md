@@ -317,3 +317,20 @@ Consistent sweet spot: **SL 6-8, TP 4-5, timeout 100-250s**
 ### Issues Encountered
 - outer_trial UnboundLocalError when using fixed_outer_params — always call ask() first
 - Run v4 uses old value_per_point=10.0 (launched before fix) — PnL in log is 10x, ratios valid
+
+## Session 10 — 2026-04-11
+
+### Progress
+- PR #16 merged: fix train/test look-ahead bias in walk-forward labeling
+- Master clean, ready for PR #17
+
+### Decisions Made
+- **Labeling path unified**: `relabel_dataframe()` is now the sole labeling path for both walk-forward and optimizer. Streaming labeler no longer used for training (still available in ReplayEngine for other use cases)
+- **No query extension in ReplayEngine**: removed the automatic DB query range extension that leaked ~250s of test data into training labels. Entries near the train boundary that can't resolve SL/TP are correctly labeled as timeout (-1) and filtered out
+- **Vectorization of `relabel_dataframe` more critical**: now that it's the sole labeling path, the O(n^2) Python loop will bottleneck large Optuna runs. Vectorization with numba planned for PR #17
+
+### Issues Encountered
+- Copilot review caught stale docstring in `ReplayEngine.run()` — fixed before merge
+
+### TODO / Next Session
+- PR #17: ATR-based dynamic SL/TP (k_sl/k_tp multipliers) + vectorize relabel_dataframe with numba
