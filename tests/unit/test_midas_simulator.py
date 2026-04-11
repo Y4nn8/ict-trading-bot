@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -238,3 +239,224 @@ class TestATRBasedSLTP:
         pos = sim._positions[0]
         assert pos.sl_price == pytest.approx(99.0)   # fixed fallback
         assert pos.tp_price == pytest.approx(104.0)
+
+
+class TestDynamicSizing:
+    """Tests for dynamic position sizing with gamma ramp."""
+
+    def _dynamic_config(self, **overrides: float) -> SimConfig:
+        """Build a SimConfig with dynamic sizing enabled."""
+        defaults: dict[str, float] = {
+            "sl_points": 5.0,
+            "tp_points": 5.0,
+            "initial_capital": 5_000.0,
+            "value_per_point": 1.0,
+            "max_open_positions": 3,
+            "max_spread": 2.0,
+            "gamma": 1.0,
+            "max_margin_proba": 0.85,
+            "margin_pct": 0.05,
+            "min_lot_size": 0.1,
+        }
+        defaults.update(overrides)
+        return SimConfig(**defaults)  # type: ignore[arg-type]
+
+    def test_compute_dynamic_size_saturation(self) -> None:
+        """At max_margin_proba, use full available margin."""
+        # available=5000, price=1000 → margin_per_lot=50, size_max=100
+        size = TradeSimulator.compute_dynamic_size(
+            proba=0.90, threshold=0.33, gamma=1.0,
+            max_margin_proba=0.85, available_margin=5000.0,
+            margin_per_lot=50.0, min_lot_size=0.1,
+        )
+        # floor(5000 / 50 / 0.1) * 0.1 = 100.0
+        assert size == pytest.approx(100.0)
+
+    def test_compute_dynamic_size_linear_ramp(self) -> None:
+        """gamma=1 → linear mapping from confidence to size."""
+        # Use exact fractions to avoid IEEE 754 drift
+        size = TradeSimulator.compute_dynamic_size(
+            proba=0.75, threshold=0.50, gamma=1.0,
+            max_margin_proba=1.0, available_margin=5000.0,
+            margin_per_lot=50.0, min_lot_size=0.1,
+        )
+        # confidence = (0.75 - 0.50) / (1.0 - 0.50) = 0.5
+        # size_max = floor(5000 / 50 / 0.1) * 0.1 = 100.0
+        # size = floor(0.5 * 100 / 0.1) * 0.1 = 50.0
+        assert size == pytest.approx(50.0)
+
+    def test_compute_dynamic_size_conservative_gamma(self) -> None:
+        """gamma=2 → quadratic ramp, smaller size at low confidence."""
+        size = TradeSimulator.compute_dynamic_size(
+            proba=0.75, threshold=0.50, gamma=2.0,
+            max_margin_proba=1.0, available_margin=5000.0,
+            margin_per_lot=50.0, min_lot_size=0.1,
+        )
+        # confidence = 0.5, gamma=2 → 0.25
+        # size = floor(0.25 * 100 / 0.1) * 0.1 = 25.0
+        assert size == pytest.approx(25.0)
+
+    def test_compute_dynamic_size_aggressive_gamma(self) -> None:
+        """gamma=0.5 → sqrt ramp, larger size at low confidence."""
+        # confidence = 0.5, gamma=0.5 → sqrt(0.5) ≈ 0.7071
+        # size = floor(0.7071 * 100 / 0.1) * 0.1 = 70.7
+        size = TradeSimulator.compute_dynamic_size(
+            proba=0.59, threshold=0.33, gamma=0.5,
+            max_margin_proba=0.85, available_margin=5000.0,
+            margin_per_lot=50.0, min_lot_size=0.1,
+        )
+        expected = math.floor(0.5**0.5 * 100.0 / 0.1) * 0.1
+        assert size == pytest.approx(expected)
+
+    def test_compute_dynamic_size_below_min_lot(self) -> None:
+        """Low proba with high gamma → size below min_lot → None."""
+        # confidence ~0.04, gamma=3 → 0.04^3 ≈ 6e-5, * 100 → 0.006
+        # floor(0.006 / 0.1) * 0.1 = 0.0 < 0.1 → None
+        size = TradeSimulator.compute_dynamic_size(
+            proba=0.35, threshold=0.33, gamma=3.0,
+            max_margin_proba=0.85, available_margin=5000.0,
+            margin_per_lot=50.0, min_lot_size=0.1,
+        )
+        assert size is None
+
+    def test_compute_dynamic_size_no_available_margin(self) -> None:
+        """Zero available margin → None."""
+        size = TradeSimulator.compute_dynamic_size(
+            proba=0.90, threshold=0.33, gamma=1.0,
+            max_margin_proba=0.85, available_margin=0.0,
+            margin_per_lot=50.0, min_lot_size=0.1,
+        )
+        assert size is None
+
+    def test_dynamic_sizing_entry_uses_proba(self) -> None:
+        """on_signal with proba → dynamic size, not fixed."""
+        cfg = self._dynamic_config()
+        sim = TradeSimulator(cfg)
+        # price=1000, threshold=1/3 (hardcoded in _open_position)
+        tick = _tick(0, bid=999.0, ask=1000.0)
+        sim.on_signal(tick, signal=1, proba=0.59)
+
+        assert sim.open_count == 1
+        pos = sim._positions[0]
+        # Compute expected size with same formula
+        margin_per_lot = 1000.0 * 0.05
+        size_max = math.floor(5000.0 / margin_per_lot / 0.1) * 0.1
+        conf = (0.59 - 1 / 3) / (0.85 - 1 / 3)
+        expected = math.floor(conf * size_max / 0.1) * 0.1
+        assert pos.size == pytest.approx(expected)
+        assert pos.margin == pytest.approx(expected * margin_per_lot)
+
+    def test_dynamic_sizing_margin_tracking(self) -> None:
+        """Margin is tracked across open positions and released on close."""
+        cfg = self._dynamic_config(max_open_positions=3)
+        sim = TradeSimulator(cfg)
+
+        tick = _tick(0, bid=999.0, ask=1000.0)
+        sim.on_signal(tick, signal=1, proba=0.85)  # saturation → 100 lots
+        assert sim.margin_used == pytest.approx(100.0 * 50.0)  # 5000
+
+        # Second trade: no available margin → skipped
+        sim.on_signal(_tick(1, bid=999.0, ask=1000.0), signal=2, proba=0.85)
+        assert sim.open_count == 1  # second entry rejected
+
+    def test_dynamic_sizing_margin_released_on_sl(self) -> None:
+        """Margin is released when position hits SL."""
+        cfg = self._dynamic_config()
+        sim = TradeSimulator(cfg)
+
+        sim.on_signal(_tick(0, bid=999.0, ask=1000.0), signal=1, proba=0.59)
+        margin_before = sim.margin_used
+        assert margin_before > 0
+
+        # SL hit (entry=1000, sl=995, bid drops to 995)
+        sim.on_tick(_tick(1, bid=995.0, ask=996.0))
+        assert sim.open_count == 0
+        assert sim.margin_used == pytest.approx(0.0)
+
+    def test_dynamic_sizing_margin_released_on_close_all(self) -> None:
+        """close_all releases all margin."""
+        cfg = self._dynamic_config()
+        sim = TradeSimulator(cfg)
+
+        sim.on_signal(_tick(0, bid=999.0, ask=1000.0), signal=1, proba=0.70)
+        assert sim.margin_used > 0
+
+        sim.close_all(_tick(5, bid=1001.0, ask=1002.0))
+        assert sim.margin_used == pytest.approx(0.0)
+
+    def test_dynamic_sizing_margin_released_on_early_close(self) -> None:
+        """early_close releases margin."""
+        cfg = self._dynamic_config()
+        sim = TradeSimulator(cfg)
+
+        sim.on_signal(_tick(0, bid=999.0, ask=1000.0), signal=1, proba=0.70)
+        assert sim.margin_used > 0
+
+        sim.early_close(_tick(5, bid=1001.0, ask=1002.0))
+        assert sim.margin_used == pytest.approx(0.0)
+
+    def test_dynamic_sizing_pnl_uses_dynamic_size(self) -> None:
+        """PnL computation uses the dynamic size, not fixed."""
+        cfg = self._dynamic_config(value_per_point=1.0)
+        sim = TradeSimulator(cfg)
+
+        sim.on_signal(_tick(0, bid=999.0, ask=1000.0), signal=1, proba=0.59)
+        actual_size = sim._positions[0].size
+        trades = sim.on_tick(_tick(1, bid=1005.0, ask=1006.0))  # TP hit
+
+        assert len(trades) == 1
+        # pnl = 5pts * dynamic_size * 1.0
+        assert trades[0].pnl == pytest.approx(5.0 * actual_size)
+        assert trades[0].size == pytest.approx(actual_size)
+
+    def test_dynamic_sizing_reset_clears_margin(self) -> None:
+        """reset() clears margin_used."""
+        cfg = self._dynamic_config()
+        sim = TradeSimulator(cfg)
+
+        sim.on_signal(_tick(0, bid=999.0, ask=1000.0), signal=1, proba=0.70)
+        sim.reset()
+        assert sim.margin_used == pytest.approx(0.0)
+
+    def test_fixed_sizing_unchanged(self) -> None:
+        """Without gamma, sizing is still fixed (backward compat)."""
+        sim = TradeSimulator(SimConfig(
+            sl_points=5.0, tp_points=5.0, size=0.5,
+        ))
+        sim.on_signal(_tick(0, bid=999.0, ask=1000.0), signal=1, proba=0.90)
+
+        pos = sim._positions[0]
+        assert pos.size == pytest.approx(0.5)  # fixed
+        assert pos.margin == pytest.approx(0.0)  # no margin tracking
+
+    def test_can_open_rejects_insufficient_margin(self) -> None:
+        """_can_open returns False when margin is exhausted."""
+        cfg = self._dynamic_config(initial_capital=100.0)
+        sim = TradeSimulator(cfg)
+
+        # price=1000, margin_per_lot=50, min_lot=0.1 → min_margin=5
+        # capital=100, first trade at saturation uses ~100 margin
+        sim.on_signal(_tick(0, bid=999.0, ask=1000.0), signal=1, proba=0.85)
+        # Second entry: no margin left
+        sim.on_signal(_tick(1, bid=999.0, ask=1000.0), signal=2, proba=0.85)
+        assert sim.open_count == 1
+
+    def test_dynamic_sizing_sell_uses_bid_for_margin(self) -> None:
+        """SELL uses bid price for margin computation."""
+        cfg = self._dynamic_config()
+        sim = TradeSimulator(cfg)
+
+        # SELL: entry at bid=999, margin based on bid=999
+        sim.on_signal(_tick(0, bid=999.0, ask=1000.0), signal=2, proba=0.59)
+
+        pos = sim._positions[0]
+        expected_margin_per_lot = 999.0 * 0.05
+        expected_size_max = (
+            math.floor(5000.0 / expected_margin_per_lot / 0.1) * 0.1
+        )
+        conf = (0.59 - 1 / 3) / (0.85 - 1 / 3)
+        expected_size = math.floor(
+            conf * expected_size_max / 0.1,
+        ) * 0.1
+        assert pos.size == pytest.approx(expected_size)
+        assert pos.margin == pytest.approx(expected_size * expected_margin_per_lot)

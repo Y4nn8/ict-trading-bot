@@ -1,11 +1,16 @@
 """Tick-level trade simulator for the Midas scalping engine.
 
-Manages open positions tick-by-tick with fixed SL/TP.
+Manages open positions tick-by-tick with fixed or dynamic SL/TP.
 Entry at ask (BUY) or bid (SELL), exit evaluated against bid/ask.
+
+Dynamic sizing maps LightGBM probability → contract size via a
+gamma-ramp curve, scaling up to the full available margin when
+confidence is high.
 """
 
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -27,16 +32,26 @@ class SimConfig:
         to ``on_signal``. Falls back to ``sl_points``/``tp_points``
         when ATR is zero.
 
+    Supports two sizing modes:
+      - **Fixed**: uses ``size`` for every trade.
+      - **Dynamic**: when ``gamma`` is set, computes position size from
+        the model's probability via a gamma-ramp curve, scaling up to
+        the full available margin at ``max_margin_proba``.
+
     Args:
         sl_points: Stop loss distance in price points (fixed mode / fallback).
         tp_points: Take profit distance in price points (fixed mode / fallback).
         k_sl: SL multiplier for ATR-based mode (None = fixed mode).
         k_tp: TP multiplier for ATR-based mode (None = fixed mode).
         initial_capital: Starting capital.
-        size: Position size per trade.
+        size: Position size per trade (fixed sizing mode).
         value_per_point: Currency value per price point per unit size.
         max_open_positions: Max simultaneous positions.
         max_spread: Skip entries when spread exceeds this.
+        gamma: Ramp curvature for dynamic sizing (None = fixed sizing).
+        max_margin_proba: Probability threshold for 100% margin usage.
+        margin_pct: Margin requirement as fraction of price (e.g. 0.05 = 5%).
+        min_lot_size: Minimum tradeable lot size.
     """
 
     sl_points: float = 3.0
@@ -48,6 +63,10 @@ class SimConfig:
     value_per_point: float = 1.0  # 1€/pt for XAUUSD Contrat 1€
     max_open_positions: int = 1
     max_spread: float = 2.0
+    gamma: float | None = None
+    max_margin_proba: float = 0.85
+    margin_pct: float = 0.05
+    min_lot_size: float = 0.1
 
 
 @dataclass
@@ -61,6 +80,7 @@ class MidasPosition:
     sl_price: float
     tp_price: float
     size: float
+    margin: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +102,7 @@ class MidasTrade:
 
 
 class TradeSimulator:
-    """Tick-level position manager with fixed SL/TP.
+    """Tick-level position manager with fixed or dynamic SL/TP and sizing.
 
     Args:
         config: Simulation configuration.
@@ -93,6 +113,7 @@ class TradeSimulator:
         self._positions: list[MidasPosition] = []
         self._trades: list[MidasTrade] = []
         self._capital: float = self._config.initial_capital
+        self._margin_used: float = 0.0
 
     @property
     def closed_trades(self) -> list[MidasTrade]:
@@ -105,6 +126,11 @@ class TradeSimulator:
         return self._capital
 
     @property
+    def margin_used(self) -> float:
+        """Total margin currently locked by open positions."""
+        return self._margin_used
+
+    @property
     def open_count(self) -> int:
         """Number of open positions."""
         return len(self._positions)
@@ -115,6 +141,7 @@ class TradeSimulator:
         signal: int,
         *,
         atr: float = 0.0,
+        proba: float = 0.0,
     ) -> list[MidasTrade]:
         """Process a model signal at a tick.
 
@@ -122,6 +149,8 @@ class TradeSimulator:
             tick: Current tick.
             signal: 0=PASS, 1=BUY, 2=SELL.
             atr: Current ATR value (used in ATR-based SL/TP mode).
+            proba: Model probability for the predicted class (used in
+                dynamic sizing mode).
 
         Returns:
             List of trades closed on this tick (may be empty).
@@ -131,7 +160,10 @@ class TradeSimulator:
 
         # Then try to open new position
         if signal in (1, 2) and self._can_open(tick):
-            self._open_position(tick, "BUY" if signal == 1 else "SELL", atr=atr)
+            self._open_position(
+                tick, "BUY" if signal == 1 else "SELL",
+                atr=atr, proba=proba,
+            )
 
         return closed
 
@@ -184,6 +216,7 @@ class TradeSimulator:
         )
         self._trades.append(trade)
         self._capital += pnl
+        self._margin_used -= pos.margin
         return trade
 
     def get_position_context(
@@ -222,7 +255,62 @@ class TradeSimulator:
         """Check if we can open a new position."""
         if len(self._positions) >= self._config.max_open_positions:
             return False
-        return tick.spread <= self._config.max_spread
+        if tick.spread > self._config.max_spread:
+            return False
+        # Margin check: at least one min lot must fit
+        if self._config.gamma is not None:
+            price = tick.ask  # conservative (higher price = higher margin)
+            margin_one_lot = price * self._config.margin_pct
+            available = self._capital - self._margin_used
+            if margin_one_lot * self._config.min_lot_size > available:
+                return False
+        return True
+
+    @staticmethod
+    def compute_dynamic_size(
+        proba: float,
+        threshold: float,
+        gamma: float,
+        max_margin_proba: float,
+        available_margin: float,
+        margin_per_lot: float,
+        min_lot_size: float,
+    ) -> float | None:
+        """Compute position size from model probability via gamma ramp.
+
+        Args:
+            proba: Model probability for the predicted class.
+            threshold: Entry threshold (minimum proba to trade).
+            gamma: Ramp curvature (>1 conservative, <1 aggressive).
+            max_margin_proba: Proba at which 100% of available margin is used.
+            available_margin: Capital minus margin already locked.
+            margin_per_lot: Margin required per 1.0 lot.
+            min_lot_size: Minimum tradeable lot.
+
+        Returns:
+            Position size in lots, or None if below min_lot_size.
+        """
+        if margin_per_lot <= 0 or available_margin <= 0:
+            return None
+
+        size_max = math.floor(available_margin / margin_per_lot / min_lot_size) * min_lot_size
+
+        if size_max < min_lot_size:
+            return None
+
+        if proba >= max_margin_proba:
+            size = size_max
+        else:
+            denom = max_margin_proba - threshold
+            if denom <= 0:
+                return None
+            confidence = (proba - threshold) / denom
+            confidence = max(confidence, 0.0)
+            size = math.floor(
+                (confidence ** gamma) * size_max / min_lot_size,
+            ) * min_lot_size
+
+        return size if size >= min_lot_size else None
 
     def _open_position(
         self,
@@ -230,6 +318,7 @@ class TradeSimulator:
         direction: str,
         *,
         atr: float = 0.0,
+        proba: float = 0.0,
     ) -> None:
         """Open a new position."""
         cfg = self._config
@@ -251,6 +340,33 @@ class TradeSimulator:
             sl = entry + sl_dist
             tp = entry - tp_dist
 
+        # Compute position size
+        if cfg.gamma is not None:
+            price = tick.ask if direction == "BUY" else tick.bid
+            margin_per_lot = price * cfg.margin_pct
+            available = self._capital - self._margin_used
+            # threshold = 1/3 (random 3-class baseline) when not provided
+            # The actual threshold is the entry_threshold from TrainerConfig,
+            # but proba already passed that check if we got a signal.
+            # Use the config's entry threshold via the proba floor:
+            # proba is always >= entry_threshold when signal != PASS.
+            # We use min_lot_size as the floor for confidence=0.
+            size = self.compute_dynamic_size(
+                proba=proba,
+                threshold=1 / 3,  # 3-class random baseline
+                gamma=cfg.gamma,
+                max_margin_proba=cfg.max_margin_proba,
+                available_margin=available,
+                margin_per_lot=margin_per_lot,
+                min_lot_size=cfg.min_lot_size,
+            )
+            if size is None:
+                return  # skip: insufficient margin
+            margin = size * margin_per_lot
+        else:
+            size = cfg.size
+            margin = 0.0  # fixed mode: no margin tracking
+
         pos = MidasPosition(
             trade_id=str(uuid.uuid4())[:8],
             direction=direction,
@@ -258,9 +374,11 @@ class TradeSimulator:
             entry_time=tick.time,
             sl_price=sl,
             tp_price=tp,
-            size=cfg.size,
+            size=size,
+            margin=margin,
         )
         self._positions.append(pos)
+        self._margin_used += margin
 
     def _check_exits(self, tick: Tick) -> list[MidasTrade]:
         """Check all open positions for SL/TP hit.
@@ -312,6 +430,7 @@ class TradeSimulator:
                 )
                 self._trades.append(trade)
                 self._capital += pnl
+                self._margin_used -= pos.margin
                 closed.append(trade)
             else:
                 remaining.append(pos)
@@ -355,6 +474,7 @@ class TradeSimulator:
             )
             self._trades.append(trade)
             self._capital += pnl
+            self._margin_used -= pos.margin
             closed.append(trade)
 
         self._positions.clear()
@@ -365,3 +485,4 @@ class TradeSimulator:
         self._positions.clear()
         self._trades.clear()
         self._capital = self._config.initial_capital
+        self._margin_used = 0.0
