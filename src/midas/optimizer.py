@@ -120,6 +120,9 @@ def _suggest_inner_params(
         "sl_fallback": trial.suggest_float(
             "sl_fallback", config.sl_range[0], config.sl_range[1],
         ),
+        "tp_fallback": trial.suggest_float(
+            "tp_fallback", config.tp_range[0], config.tp_range[1],
+        ),
         "label_timeout": trial.suggest_float(
             "label_timeout", 60.0, 600.0,
         ),
@@ -241,7 +244,7 @@ async def run_nested_optuna(
     print(f"\nNested Optuna: {config.outer_trials} outer x "
           f"{config.inner_trials} inner trials")
     print(f"  Outer: {len(registry_params)} extractor params")
-    print("  Inner: k_sl/k_tp/sl_fallback/timeout + 8 LightGBM params = 12 params")
+    print("  Inner: k_sl/k_tp/sl_fallback/tp_fallback/timeout + 8 LightGBM params = 13 params")
     print(f"  ATR column: {config.atr_column}")
     print(f"  Train: {config.train_start.date()} → {config.train_end.date()}")
     print(f"  Test:  {config.test_start.date()} → {config.test_end.date()}")
@@ -322,13 +325,14 @@ async def run_nested_optuna(
             k_sl = inner_params["k_sl"]
             k_tp = inner_params["k_tp"]
             sl_fallback = inner_params["sl_fallback"]
+            tp_fallback = inner_params["tp_fallback"]
             timeout = inner_params["label_timeout"]
 
             # Relabel in-memory with ATR-based SL/TP (fast, no DB)
             label_result = relabel_dataframe(
                 df,
                 sl_points=sl_fallback,
-                tp_points=sl_fallback,  # symmetric fallback
+                tp_points=tp_fallback,
                 timeout_seconds=timeout,
                 k_sl=k_sl,
                 k_tp=k_tp,
@@ -381,7 +385,7 @@ async def run_nested_optuna(
             # Evaluate on OOS with ATR-based SL/TP
             sim_config = SimConfig(
                 sl_points=sl_fallback,
-                tp_points=sl_fallback,
+                tp_points=tp_fallback,
                 k_sl=k_sl,
                 k_tp=k_tp,
                 max_spread=2.0,

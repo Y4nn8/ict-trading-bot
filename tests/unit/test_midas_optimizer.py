@@ -45,6 +45,7 @@ class TestInnerParams:
         assert "k_sl" in params
         assert "k_tp" in params
         assert "sl_fallback" in params
+        assert "tp_fallback" in params
         assert "label_timeout" in params
 
         # LightGBM params
@@ -56,6 +57,7 @@ class TestInnerParams:
             k_sl_range=(0.8, 2.5),
             k_tp_range=(0.5, 2.0),
             sl_range=(3.0, 6.0),
+            tp_range=(2.0, 5.0),
         )
         study = optuna.create_study()
         trial = study.ask()
@@ -64,4 +66,5 @@ class TestInnerParams:
         assert 0.8 <= params["k_sl"] <= 2.5
         assert 0.5 <= params["k_tp"] <= 2.0
         assert 3.0 <= params["sl_fallback"] <= 6.0
+        assert 2.0 <= params["tp_fallback"] <= 5.0
         assert 0.25 <= params["entry_threshold"] <= 0.60

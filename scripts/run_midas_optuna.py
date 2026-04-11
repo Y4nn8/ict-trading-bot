@@ -57,7 +57,7 @@ async def main(args: argparse.Namespace) -> None:
             inner_keys = {
                 "n_estimators", "learning_rate", "max_depth", "num_leaves",
                 "min_child_samples", "subsample", "colsample_bytree",
-                "entry_threshold", "k_sl", "k_tp", "sl_fallback",
+                "entry_threshold", "k_sl", "k_tp", "sl_fallback", "tp_fallback",
                 "sl_points", "tp_points", "label_timeout",
             }
             fixed_outer = {
