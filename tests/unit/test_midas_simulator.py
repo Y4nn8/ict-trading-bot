@@ -460,3 +460,25 @@ class TestDynamicSizing:
         ) * 0.1
         assert pos.size == pytest.approx(expected_size)
         assert pos.margin == pytest.approx(expected_size * expected_margin_per_lot)
+
+    def test_proba_propagated_to_closed_trade(self) -> None:
+        """Proba from entry signal is recorded on the closed trade."""
+        cfg = self._dynamic_config()
+        sim = TradeSimulator(cfg)
+
+        sim.on_signal(_tick(0, bid=999.0, ask=1000.0), signal=1, proba=0.72)
+        trades = sim.on_tick(_tick(1, bid=1005.0, ask=1006.0))  # TP hit
+
+        assert len(trades) == 1
+        assert trades[0].proba == pytest.approx(0.72)
+
+    def test_proba_propagated_on_early_close(self) -> None:
+        """Proba is preserved through early_close."""
+        cfg = self._dynamic_config()
+        sim = TradeSimulator(cfg)
+
+        sim.on_signal(_tick(0, bid=999.0, ask=1000.0), signal=1, proba=0.65)
+        trade = sim.early_close(_tick(5, bid=1001.0, ask=1002.0))
+
+        assert trade is not None
+        assert trade.proba == pytest.approx(0.65)
