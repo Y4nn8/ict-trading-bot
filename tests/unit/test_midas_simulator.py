@@ -332,7 +332,7 @@ class TestDynamicSizing:
         """on_signal with proba → dynamic size, not fixed."""
         cfg = self._dynamic_config()
         sim = TradeSimulator(cfg)
-        # price=1000, threshold=1/3 (hardcoded in _open_position)
+        # price=1000, threshold=1/3 (the default SimConfig.sizing_threshold)
         tick = _tick(0, bid=999.0, ask=1000.0)
         sim.on_signal(tick, signal=1, proba=0.59)
 

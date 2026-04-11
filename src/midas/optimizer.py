@@ -259,8 +259,8 @@ async def run_nested_optuna(
     print(f"\nNested Optuna: {config.outer_trials} outer x "
           f"{config.inner_trials} inner trials")
     print(f"  Outer: {len(registry_params)} extractor params")
-    print("  Inner: k_sl/k_tp/sl_fb/tp_fb/timeout"
-          " + gamma/max_margin_proba + 8 LightGBM = 15 params")
+    print("  Inner: 5 SL/TP + 2 sizing + 7 LightGBM"
+          " + entry_threshold = 15 params")
     print(f"  ATR column: {config.atr_column}")
     print(f"  Train: {config.train_start.date()} → {config.train_end.date()}")
     print(f"  Test:  {config.test_start.date()} → {config.test_end.date()}")

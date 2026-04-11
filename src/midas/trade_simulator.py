@@ -235,7 +235,8 @@ class TradeSimulator:
         if tick.spread > self._config.max_spread:
             return False
         if self._config.gamma is not None:
-            price = tick.ask  # conservative (higher price = higher margin)
+            # Use mid price for the pre-check; actual margin uses bid/ask in _open_position
+            price = tick.mid
             min_margin = price * self._config.margin_pct * self._config.min_lot_size
             if min_margin > self._capital - self.margin_used:
                 return False
@@ -265,10 +266,13 @@ class TradeSimulator:
         Returns:
             Position size in lots, or None if below min_lot_size.
         """
-        if margin_per_lot <= 0 or available_margin <= 0:
+        if margin_per_lot <= 0 or available_margin <= 0 or min_lot_size <= 0:
             return None
 
-        size_max = math.floor(available_margin / margin_per_lot / min_lot_size) * min_lot_size
+        # Small epsilon avoids floor under-allocating due to IEEE 754 drift
+        eps = 1e-9
+        lot_steps = available_margin / margin_per_lot / min_lot_size
+        size_max = math.floor(lot_steps + eps) * min_lot_size
 
         if size_max < min_lot_size:
             return None
@@ -281,9 +285,8 @@ class TradeSimulator:
                 return None
             confidence = (proba - threshold) / denom
             confidence = max(confidence, 0.0)
-            size = math.floor(
-                (confidence ** gamma) * size_max / min_lot_size,
-            ) * min_lot_size
+            raw_steps = (confidence ** gamma) * size_max / min_lot_size
+            size = math.floor(raw_steps + eps) * min_lot_size
 
         return size if size >= min_lot_size else None
 
