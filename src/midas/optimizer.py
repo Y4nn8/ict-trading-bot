@@ -407,6 +407,7 @@ async def run_nested_optuna(
                 max_spread=2.0,
                 gamma=inner_params["gamma"],
                 max_margin_proba=inner_params["max_margin_proba"],
+                sizing_threshold=inner_params["entry_threshold"],
             )
             score, n_tr, wr, pnl = await _evaluate_oos_async(
                 trainer, sim_config, db, config,

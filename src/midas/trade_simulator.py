@@ -52,6 +52,9 @@ class SimConfig:
         max_margin_proba: Probability threshold for 100% margin usage.
         margin_pct: Margin requirement as fraction of price (e.g. 0.05 = 5%).
         min_lot_size: Minimum tradeable lot size.
+        sizing_threshold: Probability floor for the gamma ramp. Should
+            match the model's entry_threshold so confidence=0 at the
+            decision boundary.
     """
 
     sl_points: float = 3.0
@@ -67,6 +70,7 @@ class SimConfig:
     max_margin_proba: float = 0.85
     margin_pct: float = 0.05
     min_lot_size: float = 0.1
+    sizing_threshold: float = 1 / 3
 
 
 @dataclass
@@ -113,7 +117,6 @@ class TradeSimulator:
         self._positions: list[MidasPosition] = []
         self._trades: list[MidasTrade] = []
         self._capital: float = self._config.initial_capital
-        self._margin_used: float = 0.0
 
     @property
     def closed_trades(self) -> list[MidasTrade]:
@@ -128,7 +131,7 @@ class TradeSimulator:
     @property
     def margin_used(self) -> float:
         """Total margin currently locked by open positions."""
-        return self._margin_used
+        return sum(pos.margin for pos in self._positions)
 
     @property
     def open_count(self) -> int:
@@ -155,10 +158,8 @@ class TradeSimulator:
         Returns:
             List of trades closed on this tick (may be empty).
         """
-        # First, check existing positions for SL/TP
         closed = self._check_exits(tick)
 
-        # Then try to open new position
         if signal in (1, 2) and self._can_open(tick):
             self._open_position(
                 tick, "BUY" if signal == 1 else "SELL",
@@ -193,31 +194,7 @@ class TradeSimulator:
 
         pos = self._positions.pop(position_index)
         exit_price = tick.bid if pos.direction == "BUY" else tick.ask
-        pnl_points = (
-            (exit_price - pos.entry_price)
-            if pos.direction == "BUY"
-            else (pos.entry_price - exit_price)
-        )
-        pnl = pnl_points * pos.size * self._config.value_per_point
-
-        trade = MidasTrade(
-            trade_id=pos.trade_id,
-            direction=pos.direction,
-            entry_price=pos.entry_price,
-            exit_price=exit_price,
-            entry_time=pos.entry_time,
-            exit_time=tick.time,
-            sl_price=pos.sl_price,
-            tp_price=pos.tp_price,
-            size=pos.size,
-            pnl=pnl,
-            pnl_points=pnl_points,
-            is_win=pnl > 0,
-        )
-        self._trades.append(trade)
-        self._capital += pnl
-        self._margin_used -= pos.margin
-        return trade
+        return self._close_position(pos, exit_price, tick.time)
 
     def get_position_context(
         self, tick: Tick, position_index: int = 0,
@@ -257,12 +234,10 @@ class TradeSimulator:
             return False
         if tick.spread > self._config.max_spread:
             return False
-        # Margin check: at least one min lot must fit
         if self._config.gamma is not None:
             price = tick.ask  # conservative (higher price = higher margin)
-            margin_one_lot = price * self._config.margin_pct
-            available = self._capital - self._margin_used
-            if margin_one_lot * self._config.min_lot_size > available:
+            min_margin = price * self._config.margin_pct * self._config.min_lot_size
+            if min_margin > self._capital - self.margin_used:
                 return False
         return True
 
@@ -312,6 +287,47 @@ class TradeSimulator:
 
         return size if size >= min_lot_size else None
 
+    def _close_position(
+        self,
+        pos: MidasPosition,
+        exit_price: float,
+        exit_time: datetime,
+    ) -> MidasTrade:
+        """Build a MidasTrade, update capital, and record it.
+
+        Args:
+            pos: The position being closed.
+            exit_price: Price at which the position exits.
+            exit_time: Timestamp of exit.
+
+        Returns:
+            The completed trade.
+        """
+        pnl_points = (
+            (exit_price - pos.entry_price)
+            if pos.direction == "BUY"
+            else (pos.entry_price - exit_price)
+        )
+        pnl = pnl_points * pos.size * self._config.value_per_point
+
+        trade = MidasTrade(
+            trade_id=pos.trade_id,
+            direction=pos.direction,
+            entry_price=pos.entry_price,
+            exit_price=exit_price,
+            entry_time=pos.entry_time,
+            exit_time=exit_time,
+            sl_price=pos.sl_price,
+            tp_price=pos.tp_price,
+            size=pos.size,
+            pnl=pnl,
+            pnl_points=pnl_points,
+            is_win=pnl > 0,
+        )
+        self._trades.append(trade)
+        self._capital += pnl
+        return trade
+
     def _open_position(
         self,
         tick: Tick,
@@ -344,16 +360,10 @@ class TradeSimulator:
         if cfg.gamma is not None:
             price = tick.ask if direction == "BUY" else tick.bid
             margin_per_lot = price * cfg.margin_pct
-            available = self._capital - self._margin_used
-            # threshold = 1/3 (random 3-class baseline) when not provided
-            # The actual threshold is the entry_threshold from TrainerConfig,
-            # but proba already passed that check if we got a signal.
-            # Use the config's entry threshold via the proba floor:
-            # proba is always >= entry_threshold when signal != PASS.
-            # We use min_lot_size as the floor for confidence=0.
+            available = self._capital - self.margin_used
             size = self.compute_dynamic_size(
                 proba=proba,
-                threshold=1 / 3,  # 3-class random baseline
+                threshold=cfg.sizing_threshold,
                 gamma=cfg.gamma,
                 max_margin_proba=cfg.max_margin_proba,
                 available_margin=available,
@@ -361,11 +371,11 @@ class TradeSimulator:
                 min_lot_size=cfg.min_lot_size,
             )
             if size is None:
-                return  # skip: insufficient margin
+                return
             margin = size * margin_per_lot
         else:
             size = cfg.size
-            margin = 0.0  # fixed mode: no margin tracking
+            margin = 0.0
 
         pos = MidasPosition(
             trade_id=str(uuid.uuid4())[:8],
@@ -378,7 +388,6 @@ class TradeSimulator:
             margin=margin,
         )
         self._positions.append(pos)
-        self._margin_used += margin
 
     def _check_exits(self, tick: Tick) -> list[MidasTrade]:
         """Check all open positions for SL/TP hit.
@@ -386,56 +395,32 @@ class TradeSimulator:
         SL is checked before TP (pessimistic assumption).
         Closes all eligible positions on the same tick.
         """
-        closed: list[MidasTrade] = []
-        remaining: list[MidasPosition] = []
+        if not self._positions:
+            return []
 
-        for pos in self._positions:
+        closed: list[MidasTrade] = []
+        i = 0
+        while i < len(self._positions):
+            pos = self._positions[i]
             exit_price: float | None = None
-            is_win = False
 
             if pos.direction == "BUY":
                 if tick.bid <= pos.sl_price:
                     exit_price = pos.sl_price
                 elif tick.bid >= pos.tp_price:
                     exit_price = pos.tp_price
-                    is_win = True
             else:
                 if tick.ask >= pos.sl_price:
                     exit_price = pos.sl_price
                 elif tick.ask <= pos.tp_price:
                     exit_price = pos.tp_price
-                    is_win = True
 
             if exit_price is not None:
-                pnl_points = (
-                    (exit_price - pos.entry_price)
-                    if pos.direction == "BUY"
-                    else (pos.entry_price - exit_price)
-                )
-                pnl = pnl_points * pos.size * self._config.value_per_point
-
-                trade = MidasTrade(
-                    trade_id=pos.trade_id,
-                    direction=pos.direction,
-                    entry_price=pos.entry_price,
-                    exit_price=exit_price,
-                    entry_time=pos.entry_time,
-                    exit_time=tick.time,
-                    sl_price=pos.sl_price,
-                    tp_price=pos.tp_price,
-                    size=pos.size,
-                    pnl=pnl,
-                    pnl_points=pnl_points,
-                    is_win=is_win,
-                )
-                self._trades.append(trade)
-                self._capital += pnl
-                self._margin_used -= pos.margin
-                closed.append(trade)
+                self._positions.pop(i)
+                closed.append(self._close_position(pos, exit_price, tick.time))
             else:
-                remaining.append(pos)
+                i += 1
 
-        self._positions = remaining
         return closed
 
     def close_all(self, tick: Tick) -> list[MidasTrade]:
@@ -450,32 +435,7 @@ class TradeSimulator:
         closed: list[MidasTrade] = []
         for pos in self._positions:
             exit_price = tick.bid if pos.direction == "BUY" else tick.ask
-
-            pnl_points = (
-                (exit_price - pos.entry_price)
-                if pos.direction == "BUY"
-                else (pos.entry_price - exit_price)
-            )
-            pnl = pnl_points * pos.size * self._config.value_per_point
-
-            trade = MidasTrade(
-                trade_id=pos.trade_id,
-                direction=pos.direction,
-                entry_price=pos.entry_price,
-                exit_price=exit_price,
-                entry_time=pos.entry_time,
-                exit_time=tick.time,
-                sl_price=pos.sl_price,
-                tp_price=pos.tp_price,
-                size=pos.size,
-                pnl=pnl,
-                pnl_points=pnl_points,
-                is_win=pnl > 0,
-            )
-            self._trades.append(trade)
-            self._capital += pnl
-            self._margin_used -= pos.margin
-            closed.append(trade)
+            closed.append(self._close_position(pos, exit_price, tick.time))
 
         self._positions.clear()
         return closed
@@ -485,4 +445,3 @@ class TradeSimulator:
         self._positions.clear()
         self._trades.clear()
         self._capital = self._config.initial_capital
-        self._margin_used = 0.0

@@ -341,7 +341,7 @@ class TestDynamicSizing:
         # Compute expected size with same formula
         margin_per_lot = 1000.0 * 0.05
         size_max = math.floor(5000.0 / margin_per_lot / 0.1) * 0.1
-        conf = (0.59 - 1 / 3) / (0.85 - 1 / 3)
+        conf = (0.59 - 1.0 / 3.0) / (0.85 - 1.0 / 3.0)
         expected = math.floor(conf * size_max / 0.1) * 0.1
         assert pos.size == pytest.approx(expected)
         assert pos.margin == pytest.approx(expected * margin_per_lot)
@@ -454,7 +454,7 @@ class TestDynamicSizing:
         expected_size_max = (
             math.floor(5000.0 / expected_margin_per_lot / 0.1) * 0.1
         )
-        conf = (0.59 - 1 / 3) / (0.85 - 1 / 3)
+        conf = (0.59 - 1.0 / 3.0) / (0.85 - 1.0 / 3.0)
         expected_size = math.floor(
             conf * expected_size_max / 0.1,
         ) * 0.1
