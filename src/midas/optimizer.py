@@ -8,6 +8,7 @@ Score = walk-forward OOS metric (composite, pnl, win_rate, pnl_per_trade).
 
 from __future__ import annotations
 
+import contextlib
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -19,7 +20,7 @@ import numpy as np
 import optuna
 import polars as pl
 
-from src.midas.labeler import relabel_dataframe
+from src.midas.labeler import build_exit_dataset, relabel_dataframe
 from src.midas.replay_engine import (
     ReplayConfig,
     ReplayEngine,
@@ -111,7 +112,7 @@ def _suggest_inner_params(
     trial: optuna.Trial,
     config: OptimizerConfig,
 ) -> dict[str, Any]:
-    """Suggest k_sl/k_tp + sizing + LightGBM hyperparams + entry threshold."""
+    """Suggest k_sl/k_tp + sizing + LightGBM + entry/exit thresholds."""
     return {
         # ATR-based SL/TP multipliers (relabeled per inner trial)
         "k_sl": trial.suggest_float(
@@ -138,7 +139,7 @@ def _suggest_inner_params(
             config.max_margin_proba_range[0],
             config.max_margin_proba_range[1],
         ),
-        # LightGBM hyperparams
+        # LightGBM hyperparams (shared entry + exit)
         "n_estimators": trial.suggest_int("n_estimators", 50, 1000),
         "learning_rate": trial.suggest_float(
             "learning_rate", 0.01, 0.3, log=True,
@@ -152,6 +153,10 @@ def _suggest_inner_params(
         ),
         "entry_threshold": trial.suggest_float(
             "entry_threshold", 0.25, 0.60,
+        ),
+        # Exit model threshold
+        "exit_threshold": trial.suggest_float(
+            "exit_threshold", 0.30, 0.80,
         ),
     }
 
@@ -169,6 +174,7 @@ async def _evaluate_oos_async(
     _trainer = trainer
     _simulator = simulator
     _atr_col = config.atr_column
+    latest_features: dict[str, float] = {}
 
     def callback(
         tick: Tick,
@@ -177,7 +183,9 @@ async def _evaluate_oos_async(
         tr: MidasTrainer = _trainer,
         sim: TradeSimulator = _simulator,
         atr_col: str = _atr_col,
+        feat: dict[str, float] = latest_features,
     ) -> None:
+        feat.update(features)
         signal, confidence = tr.predict(features)
         sim.on_signal(
             tick, signal,
@@ -190,11 +198,25 @@ async def _evaluate_oos_async(
     def exit_hook(
         tick: Tick,
         *,
+        tr: MidasTrainer = _trainer,
         sim: TradeSimulator = _simulator,
         holder: list[Tick | None] = last_tick_holder,
+        feat: dict[str, float] = latest_features,
     ) -> None:
         sim.on_tick(tick)
         holder[0] = tick
+        # Exit model: check if we should close early
+        if tr.has_exit_model and sim.open_count > 0 and feat:
+            ctx = sim.get_position_context(tick)
+            if ctx is not None:
+                should_close, _ = tr.predict_exit(
+                    feat,
+                    pos_unrealized_pnl=ctx["pos_unrealized_pnl"],
+                    pos_duration_sec=ctx["pos_duration_sec"],
+                    pos_direction=ctx["pos_direction"],
+                )
+                if should_close:
+                    sim.early_close(tick)
 
     registry = registry_factory()
     registry.configure_all(extractor_params)
@@ -261,7 +283,7 @@ async def run_nested_optuna(
           f"{config.inner_trials} inner trials")
     print(f"  Outer: {len(registry_params)} extractor params")
     print("  Inner: 5 SL/TP + 2 sizing + 7 LightGBM"
-          " + entry_threshold = 15 params")
+          " + entry/exit_threshold = 16 params")
     print(f"  ATR column: {config.atr_column}")
     print(f"  Train: {config.train_start.date()} → {config.train_end.date()}")
     print(f"  Test:  {config.test_start.date()} → {config.test_end.date()}")
@@ -380,7 +402,7 @@ async def run_nested_optuna(
                 buy_pnls, sell_pnls, target_filtered,
             )
 
-            # Train
+            # Train entry model
             trainer_config = TrainerConfig(
                 n_estimators=inner_params["n_estimators"],
                 learning_rate=inner_params["learning_rate"],
@@ -390,6 +412,7 @@ async def run_nested_optuna(
                 subsample=inner_params["subsample"],
                 colsample_bytree=inner_params["colsample_bytree"],
                 entry_threshold=inner_params["entry_threshold"],
+                exit_threshold=inner_params["exit_threshold"],
                 early_stopping_rounds=30,
             )
 
@@ -399,6 +422,27 @@ async def run_nested_optuna(
             except (ValueError, lgb.basic.LightGBMError):
                 inner_study.tell(inner_trial, -1000.0)
                 continue
+
+            # Train exit model (optimal-close labeling)
+            exit_ds = build_exit_dataset(
+                df_filtered,
+                target_filtered,
+                sl_points=sl_fallback,
+                tp_points=tp_fallback,
+                timeout_seconds=timeout,
+                k_sl=k_sl,
+                k_tp=k_tp,
+                atr_column=config.atr_column,
+            )
+
+            if exit_ds.n_rows >= 50:
+                exit_df = df_filtered[exit_ds.row_indices].with_columns(
+                    pl.Series("pos_unrealized_pnl", exit_ds.unrealized_pnls),
+                    pl.Series("pos_duration_sec", exit_ds.durations),
+                    pl.Series("pos_direction", exit_ds.directions),
+                )
+                with contextlib.suppress(ValueError, lgb.basic.LightGBMError):
+                    trainer.train_exit(exit_df, exit_ds.exit_labels)
 
             # Evaluate on OOS with ATR-based SL/TP + dynamic sizing
             sim_config = SimConfig(
