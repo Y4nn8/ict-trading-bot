@@ -119,8 +119,7 @@ class ReplayEngine:
         """Run the full replay and return results.
 
         Streams ticks in chunks via asyncpg cursor for memory efficiency.
-        When labeler is set, extends query range by timeout_seconds for
-        lookahead data.
+        Replays exactly the [start, end) range — no lookahead extension.
         """
         import polars as pl
 
