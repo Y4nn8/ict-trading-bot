@@ -26,6 +26,7 @@ dependencies = [
     "anthropic>=0.40",
     # ML/Optimization
     "optuna>=4.0",
+    "lightgbm>=4.0",
     # Monitoring
     "python-telegram-bot>=21.0",
     "prometheus-client>=0.21",

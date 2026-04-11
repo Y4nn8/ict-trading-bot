@@ -242,3 +242,78 @@ Convergence: 33% (7/21 params). All methods negative total PnL.
 - Investigate EUR/USD scaling issue on IG FR platform
 - Fix random seed in simulator for reproducible results
 - Update avg_spread config for DOW30 (2.4→3.6) and GBP/USD (1.2→1.5)
+
+## Session 8 — 2026-04-09
+
+### Progress
+- Merged PR #14: walk-forward v2 (reduced search space, no-news flag, seed params)
+- Built entire Midas ML scalping engine (PR #15, feat/midas-core):
+  - Feature extraction: 42 features (tick, scalping 10s+M1, ICT M5+H1)
+  - Labeling: SL/TP lookahead with real bid/ask, PnL tracking
+  - LightGBM: entry model (3-class BUY/SELL/PASS, PnL-weighted) + exit model (binary HOLD/CLOSE)
+  - Trade simulator: tick-level, entry@ask/exit@bid, spread accounted
+  - Walk-forward + nested Optuna optimizer
+- First smoke test: 2 windows, 90 trades, PnL -98.78, WR 33.6% (default params)
+- First Optuna run launched (30x30, score=pnl, train Jan, test Feb 1-3)
+
+### Decisions Made
+- **ICT on M5/H1 only**: 10s candles too noisy for SMC concepts (FVG, OB, BOS/CHoCH)
+- **Scalping features on 10s+M1**: M5/H1 momentum covered by ICT trend/FVG distances
+- **Sample on candle close**: features extracted per 10s candle close, not every N ticks. Tick rate varies by session, candle close is deterministic
+- **No pre-aggregation needed**: M1/M5/H1 built on the fly during replay from 10s candles
+- **Exit model**: LightGBM binary HOLD/CLOSE, trained on losing entries. Can close before SL/TP
+- **PnL-weighted training**: trades with larger PnL (win or loss) weighted more
+- **Composite score** (not yet used): PnL * sqrt(WR) * log(trades) — balances profit, consistency, volume
+- **Spread accounted naturally**: BUY enters at ask, exits against bid. Dukascopy median ~0.89 USD
+- **No slippage simulation yet**: SL/TP exit at exact price level, to be added later
+
+### First Optuna Results (partial, trials 1-7 of 30)
+- SL 5-6pts + TP 3-5pts works best (wide SL, medium TP)
+- SL < 3pts always loses (spread eats too much)
+- Low threshold (~0.37) = more trades, better PnL
+- Best: trial 4, SL=6.2, TP=3.5, PnL=+10.98
+
+### Issues Encountered
+- asyncpg `conn.cursor()` returns CursorFactory, not cursor — need `conn.prepare()` + `stmt.cursor()`
+- Coverage dropped to 69.47% with new modules — added utility tests to reach 71%+
+
+### TODO / Next Session
+- Check Optuna v4 results (midas_optuna_v4.log)
+- Fix walk-forward look-ahead bias (use relabel_dataframe instead of streaming labeler)
+- Run 2-year walk-forward validation with optimized params
+- Add slippage simulation
+- Dynamic position sizing with margin check
+- Merge PR #15
+
+## Session 9 — 2026-04-10
+
+### Progress
+- Ran 3 Optuna optimizations, progressively improving scoring and architecture
+- Refactored: SL/TP moved from outer to inner loop (relabel in-memory, 10x faster)
+- Composite score v2: PnL × sqrt(WR) × sqrt(trades), min 10 trades
+- Fixed XAUUSD instrument: CS.D.CFEGOLD.CFE.IP (Contrat 1€, 0.10€/pt)
+- Default capital set to 5000€
+- Added model .bin saving alongside params YAML
+- Added per-trial logging (trades, WR, PnL, SL, TP)
+- Run v4 launched: 50×50, train Mar 2026, test Apr 1-6
+
+### Decisions Made
+- **SL/TP in inner loop**: SL/TP change requires relabeling, not re-replay. Moving to inner makes each outer trial explore 50 SL/TP combos instead of 1. Uses relabel_dataframe() on in-memory features
+- **Composite score sqrt(trades)**: log(trades) too weak — 4 trades vs 50 not penalized enough. sqrt + min 10 trades forces volume
+- **Correct instrument**: CS.D.CFEGOLD.CFE.IP not CFM. value_per_point=1.0€ not 10.0$. Margin ~23€ not ~1400$
+- **Threshold range 0.25-0.60**: Was 0.35-0.75, too restrictive. Random 3-class = 33%, so 0.35 barely above random
+- **Bayesian startup 5**: Default 10 wastes too many trials on random with only 30-50 outer trials
+- **Look-ahead in walk-forward**: ~250s leak at train/test boundary via streaming labeler. Negligible but must be fixed (user: zero tolerance)
+
+### Optuna Results Summary
+| Run | Score | Trades | WR | PnL | SL | TP | Data |
+|-----|-------|--------|------|------|-----|-----|------|
+| v1 (pnl) | +10.98 | 4 | 100% | +10.98 | 6.2 | 3.5 | Jan→Feb 1-3 |
+| v2 (composite) | +264.75 | 58 | 62% | +44.12 | 6.7 | 5.2 | Jan→Feb 1-6 |
+| v4 (refactored) | in progress | — | 71-82% | — | 6.6-7.8 | 4.3-4.9 | Mar→Apr 1-6 |
+
+Consistent sweet spot: **SL 6-8, TP 4-5, timeout 100-250s**
+
+### Issues Encountered
+- outer_trial UnboundLocalError when using fixed_outer_params — always call ask() first
+- Run v4 uses old value_per_point=10.0 (launched before fix) — PnL in log is 10x, ratios valid

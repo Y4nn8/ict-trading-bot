@@ -57,3 +57,7 @@ class BacktestError(TradingBotError):
 
 class ImprovementError(TradingBotError):
     """Raised when the improvement loop fails."""
+
+
+class MidasError(TradingBotError):
+    """Raised when the Midas tick-level engine encounters an error."""
