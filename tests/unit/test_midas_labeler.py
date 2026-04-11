@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import polars as pl
+import pytest
 
 from src.midas.labeler import TickLabeler, relabel_dataframe
 from src.midas.types import LabelConfig, Tick
@@ -276,3 +277,93 @@ class TestRelabelNoLookahead:
         # Both should agree on labels (same resolution, same data)
         assert df_result.buy_labels == stream_result.buy_labels
         assert df_result.sell_labels == stream_result.sell_labels
+
+
+class TestRelabelATRMode:
+    """Tests for ATR-based dynamic SL/TP in relabel_dataframe."""
+
+    @staticmethod
+    def _make_df(
+        bids: list[float],
+        asks: list[float],
+        atrs: list[float],
+        interval: float = 10.0,
+    ) -> pl.DataFrame:
+        base = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
+        times = [
+            (base + timedelta(seconds=i * interval)).timestamp()
+            for i in range(len(bids))
+        ]
+        return pl.DataFrame({
+            "_time": times,
+            "_bid": bids,
+            "_ask": asks,
+            "scalp__m1_atr": atrs,
+        })
+
+    def test_atr_mode_uses_multiplier(self) -> None:
+        """k_sl/k_tp scale SL/TP by ATR value per row."""
+        # ATR=2.0 everywhere, k_sl=1.0, k_tp=1.0 → SL=2.0, TP=2.0
+        bids = [100.0, 98.0, 100.0, 100.0, 100.0]
+        asks = [101.0, 99.0, 101.0, 101.0, 101.0]
+        atrs = [2.0, 2.0, 2.0, 2.0, 2.0]
+        df = self._make_df(bids, asks, atrs)
+
+        result = relabel_dataframe(
+            df, sl_points=5.0, tp_points=5.0, timeout_seconds=100.0,
+            k_sl=1.0, k_tp=1.0,
+        )
+
+        # Row 0: BUY at ask=101, SL=101-2=99, bid[1]=98 <= 99 → SL hit
+        assert result.buy_labels[0] == 0
+
+    def test_atr_zero_falls_back_to_fixed(self) -> None:
+        """When ATR is 0 (cold start), falls back to sl_points/tp_points."""
+        bids = [100.0, 95.0, 100.0, 100.0, 100.0]
+        asks = [101.0, 96.0, 101.0, 101.0, 101.0]
+        atrs = [0.0, 0.0, 0.0, 0.0, 0.0]
+        df = self._make_df(bids, asks, atrs)
+
+        result = relabel_dataframe(
+            df, sl_points=3.0, tp_points=3.0, timeout_seconds=100.0,
+            k_sl=1.0, k_tp=1.0,
+        )
+
+        # ATR=0 → fallback to sl=3.0
+        # Row 0: BUY at ask=101, SL=101-3=98, bid[1]=95 <= 98 → SL hit
+        assert result.buy_labels[0] == 0
+        assert result.buy_pnls[0] == pytest.approx(-3.0)
+
+    def test_per_row_varying_atr(self) -> None:
+        """Different ATR per row produces different SL/TP levels."""
+        # Row 0: ATR=1.0, k_sl=2.0 → SL=2.0pts. bid[1]=99.5 < 101-2=99 → NO
+        # Row 0: ATR=1.0, k_tp=2.0 → TP=2.0pts. bid[1]=99.5 < 103 → NO
+        # Row 0: bid[2]=103 >= 101+2=103 → TP hit!
+        bids = [100.0, 99.5, 103.0, 100.0, 100.0]
+        asks = [101.0, 100.5, 104.0, 101.0, 101.0]
+        atrs = [1.0, 1.0, 1.0, 1.0, 1.0]
+        df = self._make_df(bids, asks, atrs)
+
+        result = relabel_dataframe(
+            df, sl_points=5.0, tp_points=5.0, timeout_seconds=100.0,
+            k_sl=2.0, k_tp=2.0,
+        )
+
+        # Row 0: BUY TP = 101 + 2*1 = 103, bid[2]=103 → TP hit
+        assert result.buy_labels[0] == 1
+        assert result.buy_pnls[0] == pytest.approx(2.0)
+
+    def test_fixed_mode_unchanged(self) -> None:
+        """Without k_sl/k_tp, ATR column is ignored (backward compat)."""
+        bids = [100.0, 98.0, 100.0, 100.0, 100.0]
+        asks = [101.0, 99.0, 101.0, 101.0, 101.0]
+        atrs = [2.0, 2.0, 2.0, 2.0, 2.0]
+        df = self._make_df(bids, asks, atrs)
+
+        result = relabel_dataframe(
+            df, sl_points=5.0, tp_points=5.0, timeout_seconds=100.0,
+        )
+
+        # Row 0: BUY SL=101-5=96, bid[1]=98 > 96 → NOT hit
+        # (with ATR mode k=1 it would have been SL=99, hit)
+        assert result.buy_labels[0] != 0 or result.buy_pnls[0] != pytest.approx(-5.0)

@@ -3,7 +3,7 @@
 Two modes:
   - Streaming: during replay, evaluates SL/TP lookahead tick-by-tick.
   - DataFrame: relabel a features DataFrame with new SL/TP params
-    (fast, no DB access needed).
+    (fast, no DB access needed). JIT-compiled with numba.
 
 Labels:
     buy_label/sell_label: 1=win, 0=loss, -1=timeout
@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from math import nan
 from typing import TYPE_CHECKING
 
+import numba as nb
 import numpy as np
 
 if TYPE_CHECKING:
@@ -227,34 +228,31 @@ class TickLabeler:
         self._next_index = 0
 
 
-def relabel_dataframe(
-    df: pl.DataFrame,
-    sl_points: float,
-    tp_points: float,
+@nb.njit(cache=True)  # type: ignore[untyped-decorator]
+def _relabel_core(
+    times: np.ndarray,
+    bids: np.ndarray,
+    asks: np.ndarray,
+    sl_arr: np.ndarray,
+    tp_arr: np.ndarray,
     timeout_seconds: float,
-) -> LabelResult:
-    """Relabel a features DataFrame with new SL/TP params.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """JIT-compiled labeling core.
 
-    Fast alternative to streaming labeling — works on already-extracted
-    features without DB access. Scans forward in the DataFrame for each
-    row to check SL/TP hit.
-
-    Requires columns: _time, _bid, _ask.
+    Per-row SL/TP arrays allow both fixed and ATR-based modes.
 
     Args:
-        df: Features DataFrame with _time, _bid, _ask columns.
-        sl_points: Stop loss distance in price points.
-        tp_points: Take profit distance in price points.
+        times: Timestamps as float64 (epoch seconds).
+        bids: Bid prices.
+        asks: Ask prices.
+        sl_arr: SL distance per row (in price points).
+        tp_arr: TP distance per row (in price points).
         timeout_seconds: Max lookahead in seconds.
 
     Returns:
-        LabelResult with buy/sell labels and PnL arrays.
+        Tuple of (buy_labels, sell_labels, buy_pnls, sell_pnls).
     """
-    times = df["_time"].to_numpy()  # timestamps as float
-    bids = df["_bid"].to_numpy()
-    asks = df["_ask"].to_numpy()
     n = len(times)
-
     buy_labels = np.zeros(n, dtype=np.int32)
     sell_labels = np.zeros(n, dtype=np.int32)
     buy_pnls = np.zeros(n, dtype=np.float64)
@@ -264,26 +262,38 @@ def relabel_dataframe(
         entry_ask = asks[i]
         entry_bid = bids[i]
         entry_time = times[i]
+        sl = sl_arr[i]
+        tp = tp_arr[i]
 
-        buy_sl = entry_ask - sl_points
-        buy_tp = entry_ask + tp_points
-        sell_sl = entry_bid + sl_points
-        sell_tp = entry_bid - tp_points
+        buy_sl = entry_ask - sl
+        buy_tp = entry_ask + tp
+        sell_sl = entry_bid + sl
+        sell_tp = entry_bid - tp
 
         buy_resolved = False
         sell_resolved = False
 
-        # Scan forward
         for j in range(i + 1, n):
             if times[j] - entry_time > timeout_seconds:
-                # Timeout: close at market
                 if not buy_resolved:
-                    buy_pnls[i] = bids[j] - entry_ask
-                    buy_labels[i] = 1 if buy_pnls[i] > 0 else (0 if buy_pnls[i] < 0 else -1)
+                    pnl = bids[j] - entry_ask
+                    buy_pnls[i] = pnl
+                    if pnl > 0.0:
+                        buy_labels[i] = 1
+                    elif pnl < 0.0:
+                        buy_labels[i] = 0
+                    else:
+                        buy_labels[i] = -1
                     buy_resolved = True
                 if not sell_resolved:
-                    sell_pnls[i] = entry_bid - asks[j]
-                    sell_labels[i] = 1 if sell_pnls[i] > 0 else (0 if sell_pnls[i] < 0 else -1)
+                    pnl = entry_bid - asks[j]
+                    sell_pnls[i] = pnl
+                    if pnl > 0.0:
+                        sell_labels[i] = 1
+                    elif pnl < 0.0:
+                        sell_labels[i] = 0
+                    else:
+                        sell_labels[i] = -1
                     sell_resolved = True
                 break
 
@@ -310,13 +320,69 @@ def relabel_dataframe(
             if buy_resolved and sell_resolved:
                 break
 
-        # End of data: unresolved → timeout
         if not buy_resolved:
             buy_labels[i] = -1
         if not sell_resolved:
             sell_labels[i] = -1
 
-    # Build result
+    return buy_labels, sell_labels, buy_pnls, sell_pnls
+
+
+def relabel_dataframe(
+    df: pl.DataFrame,
+    sl_points: float,
+    tp_points: float,
+    timeout_seconds: float,
+    *,
+    k_sl: float | None = None,
+    k_tp: float | None = None,
+    atr_column: str = "scalp__m1_atr",
+) -> LabelResult:
+    """Relabel a features DataFrame with SL/TP params.
+
+    JIT-compiled alternative to streaming labeling — works on
+    already-extracted features without DB access.
+
+    Supports two modes:
+      - **Fixed**: uses ``sl_points``/``tp_points`` directly.
+      - **ATR-based**: when ``k_sl``/``k_tp`` are provided, computes
+        per-row SL = k_sl * ATR, TP = k_tp * ATR from ``atr_column``.
+        Falls back to ``sl_points``/``tp_points`` when ATR is zero
+        (cold-start rows).
+
+    Requires columns: _time, _bid, _ask (and ``atr_column`` for ATR mode).
+
+    Args:
+        df: Features DataFrame with _time, _bid, _ask columns.
+        sl_points: Stop loss distance in price points (fixed mode,
+            or fallback when ATR is zero).
+        tp_points: Take profit distance in price points (fixed mode,
+            or fallback when ATR is zero).
+        timeout_seconds: Max lookahead in seconds.
+        k_sl: SL multiplier for ATR-based mode (optional).
+        k_tp: TP multiplier for ATR-based mode (optional).
+        atr_column: Column name containing ATR values.
+
+    Returns:
+        LabelResult with buy/sell labels and PnL arrays.
+    """
+    times = df["_time"].to_numpy().astype(np.float64)
+    bids = df["_bid"].to_numpy().astype(np.float64)
+    asks = df["_ask"].to_numpy().astype(np.float64)
+    n = len(times)
+
+    if k_sl is not None and k_tp is not None:
+        atrs = df[atr_column].to_numpy().astype(np.float64)
+        sl_arr = np.where(atrs > 0.0, k_sl * atrs, sl_points)
+        tp_arr = np.where(atrs > 0.0, k_tp * atrs, tp_points)
+    else:
+        sl_arr = np.full(n, sl_points, dtype=np.float64)
+        tp_arr = np.full(n, tp_points, dtype=np.float64)
+
+    buy_labels, sell_labels, buy_pnls, sell_pnls = _relabel_core(
+        times, bids, asks, sl_arr, tp_arr, timeout_seconds,
+    )
+
     result = LabelResult(total_labeled=n)
     result.buy_labels = buy_labels.tolist()
     result.sell_labels = sell_labels.tolist()

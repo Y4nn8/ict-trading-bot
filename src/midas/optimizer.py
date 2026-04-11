@@ -48,8 +48,11 @@ class OptimizerConfig:
         sample_on_candle: Extract features on candle close (default).
         sample_rate: Legacy tick-based sampling.
         score_metric: Metric to optimize.
-        sl_range: SL search range in points.
-        tp_range: TP search range in points.
+        sl_range: SL search range in points (fixed mode fallback).
+        tp_range: TP search range in points (fixed mode fallback).
+        k_sl_range: k_sl multiplier search range (ATR mode).
+        k_tp_range: k_tp multiplier search range (ATR mode).
+        atr_column: Column name for ATR values.
         fixed_outer_params: Fixed extractor params (skip outer search).
     """
 
@@ -65,6 +68,9 @@ class OptimizerConfig:
     score_metric: str = "composite"
     sl_range: tuple[float, float] = (1.5, 8.0)
     tp_range: tuple[float, float] = (1.5, 8.0)
+    k_sl_range: tuple[float, float] = (0.5, 3.0)
+    k_tp_range: tuple[float, float] = (0.5, 3.0)
+    atr_column: str = "scalp__m1_atr"
     fixed_outer_params: dict[str, Any] | None = None
 
 
@@ -101,14 +107,17 @@ def _suggest_inner_params(
     trial: optuna.Trial,
     config: OptimizerConfig,
 ) -> dict[str, Any]:
-    """Suggest SL/TP + LightGBM hyperparams + entry threshold."""
+    """Suggest k_sl/k_tp + LightGBM hyperparams + entry threshold."""
     return {
-        # Trading params (relabeled per inner trial)
-        "sl_points": trial.suggest_float(
-            "sl_points", config.sl_range[0], config.sl_range[1],
+        # ATR-based SL/TP multipliers (relabeled per inner trial)
+        "k_sl": trial.suggest_float(
+            "k_sl", config.k_sl_range[0], config.k_sl_range[1],
         ),
-        "tp_points": trial.suggest_float(
-            "tp_points", config.tp_range[0], config.tp_range[1],
+        "k_tp": trial.suggest_float(
+            "k_tp", config.k_tp_range[0], config.k_tp_range[1],
+        ),
+        "sl_fallback": trial.suggest_float(
+            "sl_fallback", config.sl_range[0], config.sl_range[1],
         ),
         "label_timeout": trial.suggest_float(
             "label_timeout", 60.0, 600.0,
@@ -143,6 +152,7 @@ async def _evaluate_oos_async(
     simulator = TradeSimulator(sim_config)
     _trainer = trainer
     _simulator = simulator
+    _atr_col = config.atr_column
 
     def callback(
         tick: Tick,
@@ -150,9 +160,10 @@ async def _evaluate_oos_async(
         *,
         tr: MidasTrainer = _trainer,
         sim: TradeSimulator = _simulator,
+        atr_col: str = _atr_col,
     ) -> None:
         signal, _ = tr.predict(features)
-        sim.on_signal(tick, signal)
+        sim.on_signal(tick, signal, atr=features.get(atr_col, 0.0))
 
     last_tick_holder: list[Tick | None] = [None]
 
@@ -229,7 +240,8 @@ async def run_nested_optuna(
     print(f"\nNested Optuna: {config.outer_trials} outer x "
           f"{config.inner_trials} inner trials")
     print(f"  Outer: {len(registry_params)} extractor params")
-    print("  Inner: SL/TP/timeout + 8 LightGBM params = 11 params")
+    print("  Inner: k_sl/k_tp/sl_fallback/timeout + 8 LightGBM params = 12 params")
+    print(f"  ATR column: {config.atr_column}")
     print(f"  Train: {config.train_start.date()} → {config.train_end.date()}")
     print(f"  Test:  {config.test_start.date()} → {config.test_end.date()}")
 
@@ -301,19 +313,29 @@ async def run_nested_optuna(
         best_inner_wr = 0.0
         best_inner_pnl = 0.0
         best_inner_params_local: dict[str, Any] = {}
-        best_inner_sl = 0.0
-        best_inner_tp = 0.0
+        best_inner_k_sl = 0.0
+        best_inner_k_tp = 0.0
+        best_inner_sl_fb = 0.0
 
         for _inner_i in range(config.inner_trials):
             inner_trial = inner_study.ask()
             inner_params = _suggest_inner_params(inner_trial, config)
 
-            sl = inner_params["sl_points"]
-            tp = inner_params["tp_points"]
+            k_sl = inner_params["k_sl"]
+            k_tp = inner_params["k_tp"]
+            sl_fallback = inner_params["sl_fallback"]
             timeout = inner_params["label_timeout"]
 
-            # Relabel in-memory (fast, no DB)
-            label_result = relabel_dataframe(df, sl, tp, timeout)
+            # Relabel in-memory with ATR-based SL/TP (fast, no DB)
+            label_result = relabel_dataframe(
+                df,
+                sl_points=sl_fallback,
+                tp_points=sl_fallback,  # symmetric fallback
+                timeout_seconds=timeout,
+                k_sl=k_sl,
+                k_tp=k_tp,
+                atr_column=config.atr_column,
+            )
 
             # Build target + filter
             target = MidasTrainer.build_target(
@@ -358,10 +380,12 @@ async def run_nested_optuna(
                 inner_study.tell(inner_trial, -1000.0)
                 continue
 
-            # Evaluate on OOS
+            # Evaluate on OOS with ATR-based SL/TP
             sim_config = SimConfig(
-                sl_points=sl,
-                tp_points=tp,
+                sl_points=sl_fallback,
+                tp_points=sl_fallback,
+                k_sl=k_sl,
+                k_tp=k_tp,
                 max_spread=2.0,
             )
             score, n_tr, wr, pnl = await _evaluate_oos_async(
@@ -378,15 +402,16 @@ async def run_nested_optuna(
                 best_inner_trades = n_tr
                 best_inner_wr = wr
                 best_inner_pnl = pnl
-                best_inner_sl = sl
-                best_inner_tp = tp
+                best_inner_k_sl = k_sl
+                best_inner_k_tp = k_tp
+                best_inner_sl_fb = sl_fallback
 
         # Report to outer
         outer_study.tell(outer_trial, best_inner_score)
         result.total_inner_trials += config.inner_trials
 
         print(f"  Best inner: score={best_inner_score:+.2f}, "
-              f"SL={best_inner_sl:.1f}, TP={best_inner_tp:.1f}, "
+              f"k_sl={best_inner_k_sl:.2f}, k_tp={best_inner_k_tp:.2f}, "
               f"trades={best_inner_trades}, "
               f"WR={best_inner_wr*100:.0f}%, "
               f"PnL={best_inner_pnl:+.1f}, "
@@ -402,8 +427,10 @@ async def run_nested_optuna(
                 _, best_trades, best_wr, best_pnl = await _evaluate_oos_async(
                     best_inner_trainer,
                     SimConfig(
-                        sl_points=best_inner_sl,
-                        tp_points=best_inner_tp,
+                        sl_points=best_inner_sl_fb,
+                        tp_points=best_inner_sl_fb,
+                        k_sl=best_inner_k_sl,
+                        k_tp=best_inner_k_tp,
                         max_spread=2.0,
                     ),
                     db, config, registry_factory, extractor_params,
