@@ -86,8 +86,9 @@ async def main(args: argparse.Namespace) -> None:
 
         result = await run_nested_optuna(opt_config, db)
 
-        # Save best params to YAML + model to .bin
+        # Save best params to YAML + model to .bin + trades to CSV
         if args.output:
+            import csv
             from pathlib import Path
 
             import yaml
@@ -107,6 +108,23 @@ async def main(args: argparse.Namespace) -> None:
                 model_path = Path(args.output).with_suffix(".bin")
                 result.best_trainer.save(model_path)
                 print(f"Best model saved to {model_path}")
+
+            if result.best_trades:
+                trades_path = Path(args.output).with_suffix(".csv")
+                fields = [
+                    "trade_id", "direction", "entry_time", "exit_time",
+                    "entry_price", "exit_price", "sl_price", "tp_price",
+                    "size", "proba", "pnl", "pnl_points", "is_win",
+                ]
+                with open(trades_path, "w", newline="") as f:
+                    writer = csv.DictWriter(f, fieldnames=fields)
+                    writer.writeheader()
+                    for t in result.best_trades:
+                        writer.writerow({
+                            k: getattr(t, k) for k in fields
+                        })
+                print(f"Best trades saved to {trades_path} "
+                      f"({len(result.best_trades)} trades)")
 
     finally:
         await db.disconnect()
