@@ -334,3 +334,24 @@ Consistent sweet spot: **SL 6-8, TP 4-5, timeout 100-250s**
 
 ### TODO / Next Session
 - PR #17: ATR-based dynamic SL/TP (k_sl/k_tp multipliers) + vectorize relabel_dataframe with numba
+
+## Session 11 — 2026-04-11
+
+### Progress
+- PR #17 implemented: ATR-based dynamic SL/TP + numba JIT relabeling
+- Branch: feat/midas-atr-dynamic-sl-tp
+- 301 tests pass, ruff clean, mypy clean, coverage 70.3%
+
+### Decisions Made
+- **numba for relabel_dataframe**: JIT-compiled `_relabel_core` with `@nb.njit(cache=True)`. Keeps same O(n²) algorithm but native speed. numba chosen over pure numpy because the forward-scan has early-exit and per-row varying SL/TP, which are hard to vectorize with array ops
+- **k_sl/k_tp multipliers**: inner Optuna now searches `k_sl ∈ [0.5, 3.0]` and `k_tp ∈ [0.5, 3.0]` instead of fixed `sl_points`/`tp_points`. SL/TP = k * ATR per candle, with fixed-point fallback when ATR=0 (cold start)
+- **ATR column**: uses `scalp__m1_atr` (M1 ATR from ScalpingFeatureExtractor). M1 chosen over 10s because M1 is more stable and meaningful for SL/TP sizing
+- **Fallback design**: when ATR is zero (first ~14 M1 candles), falls back to `sl_fallback`/`tp_fallback` (searched as Optuna param from sl_range). This avoids skipping entries during cold-start
+- **SimConfig unified**: `k_sl`/`k_tp` on SimConfig + `atr` kwarg on `on_signal()`. Simulator computes SL/TP internally, no external computation needed
+
+### Issues Encountered
+- mypy `untyped-decorator` for numba `@njit` — suppressed with `type: ignore[untyped-decorator]`
+
+### TODO / Next Session
+- Push branch and create PR #17
+- PR #18: Dynamic sizing + margin cap
