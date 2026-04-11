@@ -133,8 +133,6 @@ class ReplayEngine:
         candle_just_closed = False
         is_callback_mode = self._tick_callback is not None
 
-        query_end = cfg.end
-
         await logger.ainfo(
             "replay_start",
             instrument=cfg.instrument,
@@ -152,7 +150,7 @@ class ReplayEngine:
                 "ORDER BY time ASC",
             )
             cursor = await stmt.cursor(
-                cfg.instrument, cfg.start, query_end,
+                cfg.instrument, cfg.start, cfg.end,
             )
 
             while True:
