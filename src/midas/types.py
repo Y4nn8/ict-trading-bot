@@ -58,6 +58,10 @@ class PartialCandle:
         return (self.close - self.low) / r if r > 0 else 0.5
 
 
+ATR_COLUMN_DEFAULT: str = "scalp__m1_atr"
+"""Default column name for ATR values used in ATR-based SL/TP."""
+
+
 class MidasSignal(StrEnum):
     """LightGBM prediction outputs."""
 
@@ -92,4 +96,4 @@ class LabelConfig:
     timeout_seconds: float = 300.0
     k_sl: float | None = None
     k_tp: float | None = None
-    atr_column: str = "scalp__m1_atr"
+    atr_column: str = ATR_COLUMN_DEFAULT

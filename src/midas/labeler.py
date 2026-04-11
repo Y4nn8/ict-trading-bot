@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 
     from src.midas.types import LabelConfig, Tick
 
+from src.midas.types import ATR_COLUMN_DEFAULT
+
 
 @dataclass
 class _PendingEntry:
@@ -336,7 +338,7 @@ def relabel_dataframe(
     *,
     k_sl: float | None = None,
     k_tp: float | None = None,
-    atr_column: str = "scalp__m1_atr",
+    atr_column: str = ATR_COLUMN_DEFAULT,
 ) -> LabelResult:
     """Relabel a features DataFrame with SL/TP params.
 

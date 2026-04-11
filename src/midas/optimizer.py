@@ -27,6 +27,7 @@ from src.midas.replay_engine import (
 )
 from src.midas.trade_simulator import SimConfig, TradeSimulator
 from src.midas.trainer import MidasTrainer, TrainerConfig
+from src.midas.types import ATR_COLUMN_DEFAULT
 
 if TYPE_CHECKING:
     from src.common.db import Database
@@ -70,7 +71,7 @@ class OptimizerConfig:
     tp_range: tuple[float, float] = (1.5, 8.0)
     k_sl_range: tuple[float, float] = (0.5, 3.0)
     k_tp_range: tuple[float, float] = (0.5, 3.0)
-    atr_column: str = "scalp__m1_atr"
+    atr_column: str = ATR_COLUMN_DEFAULT
     fixed_outer_params: dict[str, Any] | None = None
 
 
@@ -313,9 +314,6 @@ async def run_nested_optuna(
         best_inner_wr = 0.0
         best_inner_pnl = 0.0
         best_inner_params_local: dict[str, Any] = {}
-        best_inner_k_sl = 0.0
-        best_inner_k_tp = 0.0
-        best_inner_sl_fb = 0.0
 
         for _inner_i in range(config.inner_trials):
             inner_trial = inner_study.ask()
@@ -402,16 +400,14 @@ async def run_nested_optuna(
                 best_inner_trades = n_tr
                 best_inner_wr = wr
                 best_inner_pnl = pnl
-                best_inner_k_sl = k_sl
-                best_inner_k_tp = k_tp
-                best_inner_sl_fb = sl_fallback
 
         # Report to outer
         outer_study.tell(outer_trial, best_inner_score)
         result.total_inner_trials += config.inner_trials
 
         print(f"  Best inner: score={best_inner_score:+.2f}, "
-              f"k_sl={best_inner_k_sl:.2f}, k_tp={best_inner_k_tp:.2f}, "
+              f"k_sl={best_inner_params_local.get('k_sl', 0):.2f}, "
+              f"k_tp={best_inner_params_local.get('k_tp', 0):.2f}, "
               f"trades={best_inner_trades}, "
               f"WR={best_inner_wr*100:.0f}%, "
               f"PnL={best_inner_pnl:+.1f}, "
@@ -422,19 +418,9 @@ async def run_nested_optuna(
             best_outer = dict(extractor_params)
             best_inner = best_inner_params_local
             result.best_trainer = best_inner_trainer
-
-            if best_inner_trainer is not None:
-                _, best_trades, best_wr, best_pnl = await _evaluate_oos_async(
-                    best_inner_trainer,
-                    SimConfig(
-                        sl_points=best_inner_sl_fb,
-                        tp_points=best_inner_sl_fb,
-                        k_sl=best_inner_k_sl,
-                        k_tp=best_inner_k_tp,
-                        max_spread=2.0,
-                    ),
-                    db, config, registry_factory, extractor_params,
-                )
+            best_trades = best_inner_trades
+            best_wr = best_inner_wr
+            best_pnl = best_inner_pnl
 
     result.best_outer_params = best_outer
     result.best_inner_params = best_inner
