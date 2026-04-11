@@ -92,11 +92,6 @@ class TickLabeler:
         self._resolved: list[_PendingEntry] = []
         self._next_index: int = 0
 
-    @property
-    def timeout_seconds(self) -> float:
-        """Label timeout in seconds (for lookahead query extension)."""
-        return self._config.timeout_seconds
-
     def add_entry(self, tick: Tick) -> int:
         """Register a tick as a candidate entry point.
 

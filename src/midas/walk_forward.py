@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 
 from src.common.models import Direction, Trade
-from src.midas.labeler import TickLabeler
+from src.midas.labeler import relabel_dataframe
 from src.midas.replay_engine import (
     ReplayConfig,
     ReplayEngine,
@@ -175,12 +175,11 @@ async def run_midas_walk_forward(
             test_end=test_end,
         )
 
-        # --- Phase 1: Training replay (features + labels) + train ---
+        # --- Phase 1: Training replay (features) + relabel + train ---
         print("  [1/2] Training replay + labeling + LightGBM...")
 
         registry = build_default_registry(instrument=config.instrument)
         registry.configure_all({})
-        labeler = TickLabeler(config.label_config)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             train_parquet = Path(tmpdir) / "train.parquet"
@@ -195,29 +194,33 @@ async def run_midas_walk_forward(
                     sample_rate=config.sample_rate,
                     output_path=train_parquet,
                 ),
-                labeler=labeler,
             )
             train_result = await train_engine.run()
-            label_result = train_result.label_result
 
-            if (
-                label_result is None
-                or not train_parquet.exists()
-            ):
-                print("  SKIP: training data generation failed")
+            if not train_parquet.exists() or train_result.feature_rows < 100:
+                print(f"  SKIP: insufficient features "
+                      f"({train_result.feature_rows})")
                 results.append(wr)
                 continue
 
-            print(f"    Ticks: {train_result.total_ticks:,}, "
-                  f"Features: {train_result.feature_rows:,}, "
-                  f"Labels: {label_result.total_labeled:,}")
-            print(f"    BUY wins: {label_result.buy_wins}, "
-                  f"losses: {label_result.buy_losses}, "
-                  f"SELL wins: {label_result.sell_wins}, "
-                  f"losses: {label_result.sell_losses}, "
-                  f"timeouts: {label_result.timeouts}")
-
             df = pl.read_parquet(train_parquet)
+
+        # Label within the DataFrame only (no look-ahead beyond train_end)
+        label_result = relabel_dataframe(
+            df,
+            sl_points=config.label_config.sl_points,
+            tp_points=config.label_config.tp_points,
+            timeout_seconds=config.label_config.timeout_seconds,
+        )
+
+        print(f"    Ticks: {train_result.total_ticks:,}, "
+              f"Features: {train_result.feature_rows:,}, "
+              f"Labels: {label_result.total_labeled:,}")
+        print(f"    BUY wins: {label_result.buy_wins}, "
+              f"losses: {label_result.buy_losses}, "
+              f"SELL wins: {label_result.sell_wins}, "
+              f"losses: {label_result.sell_losses}, "
+              f"timeouts: {label_result.timeouts}")
 
         # Build target from labels (vectorized mask)
         target = MidasTrainer.build_target(
