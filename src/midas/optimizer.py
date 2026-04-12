@@ -192,6 +192,18 @@ async def _evaluate_oos_async(
         feat: dict[str, float] = latest_features,
     ) -> None:
         feat.update(features)
+        # Exit model at sample time (candle close when sample_on_candle=True)
+        if tr.has_exit_model and sim.open_count > 0:
+            ctx = sim.get_position_context(tick)
+            if ctx is not None:
+                should_close, _ = tr.predict_exit(
+                    feat,
+                    pos_unrealized_pnl=ctx["pos_unrealized_pnl"],
+                    pos_duration_sec=ctx["pos_duration_sec"],
+                    pos_direction=ctx["pos_direction"],
+                )
+                if should_close:
+                    sim.early_close(tick)
         signal, confidence = tr.predict(features)
         sim.on_signal(
             tick, signal,
@@ -204,25 +216,12 @@ async def _evaluate_oos_async(
     def exit_hook(
         tick: Tick,
         *,
-        tr: MidasTrainer = _trainer,
         sim: TradeSimulator = _simulator,
         holder: list[Tick | None] = last_tick_holder,
-        feat: dict[str, float] = latest_features,
     ) -> None:
+        # SL/TP mechanical exits (must stay per-tick)
         sim.on_tick(tick)
         holder[0] = tick
-        # Exit model: check if we should close early
-        if tr.has_exit_model and sim.open_count > 0 and feat:
-            ctx = sim.get_position_context(tick)
-            if ctx is not None:
-                should_close, _ = tr.predict_exit(
-                    feat,
-                    pos_unrealized_pnl=ctx["pos_unrealized_pnl"],
-                    pos_duration_sec=ctx["pos_duration_sec"],
-                    pos_direction=ctx["pos_direction"],
-                )
-                if should_close:
-                    sim.early_close(tick)
 
     registry = registry_factory()
     registry.configure_all(extractor_params)
