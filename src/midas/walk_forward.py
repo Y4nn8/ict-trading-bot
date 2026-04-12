@@ -662,14 +662,19 @@ def _print_param_stability(results: list[OptimizationResult]) -> None:
             total += 1
             mean = np.mean(values)
             std = np.std(values)
-            cv = (std / abs(mean) * 100) if abs(mean) > 1e-9 else 0.0
-            stable = cv < 15.0
+            if abs(mean) > 1e-9:
+                cv = float(std / abs(mean) * 100)
+                stable = cv < 15.0
+                cv_display = f"{cv:>7.1f}%"
+            else:
+                stable = False
+                cv_display = f"{'N/A':>8}"
             if stable:
                 converged += 1
             marker = "YES" if stable else ""
             name = f"{label}__{key}"
             print(f"{name:<30} {mean:>10.4f} {std:>10.4f} "
-                  f"{cv:>7.1f}% {marker:<8}")
+                  f"{cv_display} {marker:<8}")
 
     if total > 0:
         print(f"\nConverged: {converged}/{total} params "

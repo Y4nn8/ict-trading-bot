@@ -64,6 +64,9 @@ def load_fixed_outer_params(path: str) -> dict[str, Any]:
 
     with open(path) as f:
         raw = yaml.safe_load(f)
+    if not isinstance(raw, dict):
+        msg = f"Expected a YAML mapping in {path}, got {type(raw).__name__}"
+        raise ValueError(msg)
     return {
         k: v for k, v in raw.items()
         if not k.startswith("_") and k not in INNER_PARAM_KEYS

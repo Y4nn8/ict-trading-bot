@@ -82,7 +82,12 @@ async def main(args: argparse.Namespace) -> None:
         result = await run_nested_optuna(opt_config, db)
 
         # Save best params to YAML + model to .bin
-        prefix = args.output or default_output_prefix()
+        from pathlib import Path
+
+        prefix = (
+            str(Path(args.output).with_suffix(""))
+            if args.output else default_output_prefix()
+        )
         if args.output:
             import yaml
 
@@ -98,8 +103,6 @@ async def main(args: argparse.Namespace) -> None:
             print(f"\nBest params saved to {args.output}")
 
             if result.best_trainer is not None:
-                from pathlib import Path
-
                 model_path = Path(args.output).with_suffix(".bin")
                 result.best_trainer.save(model_path)
                 print(f"Best model saved to {model_path}")
