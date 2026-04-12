@@ -2,6 +2,9 @@
 
 Slices time windows, runs labeling replays, trains LightGBM,
 runs simulation replays, and reports metrics per window.
+
+Also provides ``run_midas_wf_optuna`` which runs nested Optuna per window
+and produces a param stability analysis across windows.
 """
 
 from __future__ import annotations
@@ -16,6 +19,13 @@ import numpy as np
 
 from src.common.models import Direction, Trade
 from src.midas.labeler import build_exit_dataset, relabel_dataframe
+from src.midas.optimizer import (
+    OptimizationResult,
+    OptimizerConfig,
+    TrialRecord,
+    run_nested_optuna,
+    write_trial_logs,
+)
 from src.midas.replay_engine import (
     ReplayConfig,
     ReplayEngine,
@@ -434,3 +444,240 @@ def _print_summary(
     print(f"  Avg win rate: {avg_wr*100:.1f}%")
     print(f"  Worst MDD: {worst_mdd*100:.1f}%")
     print(f"  Profitable windows: {profitable}/{len(active)}")
+
+
+# ---------------------------------------------------------------------------
+# Walk-Forward + Optuna (multi-fenêtre)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class WalkForwardOptunaConfig:
+    """Walk-forward configuration with per-window Optuna optimization.
+
+    Args:
+        instrument: Instrument to trade.
+        train_days: Training window in days.
+        test_days: Test window in days.
+        step_days: Step between windows in days.
+        outer_trials: Number of outer Optuna trials per window.
+        inner_trials: Number of inner Optuna trials per window.
+        sample_on_candle: Extract features on candle close.
+        score_metric: Metric to optimize.
+        sl_range: SL search range in points.
+        tp_range: TP search range in points.
+        k_sl_range: k_sl multiplier search range.
+        k_tp_range: k_tp multiplier search range.
+        gamma_range: Gamma ramp search range.
+        max_margin_proba_range: Max margin proba search range.
+        fixed_outer_params: Fixed extractor params (skip outer search).
+        slippage_min_pts: Min adverse slippage per market order.
+        slippage_max_pts: Max adverse slippage per market order.
+        slippage_seed: RNG seed for reproducible slippage.
+    """
+
+    instrument: str = "XAUUSD"
+    train_days: int = 30
+    test_days: int = 7
+    step_days: int = 7
+    outer_trials: int = 10
+    inner_trials: int = 20
+    sample_on_candle: bool = True
+    score_metric: str = "composite"
+    sl_range: tuple[float, float] = (1.5, 8.0)
+    tp_range: tuple[float, float] = (1.5, 8.0)
+    k_sl_range: tuple[float, float] = (0.5, 3.0)
+    k_tp_range: tuple[float, float] = (0.5, 3.0)
+    gamma_range: tuple[float, float] = (0.5, 3.0)
+    max_margin_proba_range: tuple[float, float] = (0.70, 0.95)
+    fixed_outer_params: dict[str, Any] | None = None
+    outer_param_ranges: dict[str, tuple[float, float]] | None = None
+    slippage_min_pts: float = 0.0
+    slippage_max_pts: float = 0.0
+    slippage_seed: int | None = None
+
+
+async def run_midas_wf_optuna(
+    config: WalkForwardOptunaConfig,
+    data_start: datetime,
+    data_end: datetime,
+    db: Any,
+    output_prefix: str,
+) -> list[OptimizationResult]:
+    """Run walk-forward with nested Optuna per window.
+
+    For each window: runs ``run_nested_optuna`` to find optimal params
+    on train data, evaluates on OOS. Writes trial + trade logs and
+    prints param stability analysis across windows.
+
+    Args:
+        config: Walk-forward Optuna configuration.
+        data_start: Start of available tick data.
+        data_end: End of available tick data.
+        db: Database connection.
+        output_prefix: Timestamped prefix for output files.
+
+    Returns:
+        List of OptimizationResult, one per window.
+    """
+    windows = generate_windows(
+        data_start, data_end,
+        config.train_days, config.test_days, config.step_days,
+    )
+
+    if not windows:
+        print("No windows generated. Check date range and window sizes.")
+        return []
+
+    print(f"\nWalk-Forward Optuna: {len(windows)} windows")
+    print(f"  Train: {config.train_days}d, Test: {config.test_days}d, "
+          f"Step: {config.step_days}d")
+    print(f"  Per window: {config.outer_trials} outer x "
+          f"{config.inner_trials} inner trials")
+
+    results: list[OptimizationResult] = []
+    all_records: list[TrialRecord] = []
+
+    for i, (train_start, train_end, test_start, test_end) in enumerate(windows):
+        print(f"\n{'#'*60}")
+        print(f"WINDOW {i+1}/{len(windows)}: "
+              f"train {train_start.date()}→{train_end.date()}, "
+              f"test {test_start.date()}→{test_end.date()}")
+        print(f"{'#'*60}")
+
+        opt_config = OptimizerConfig(
+            instrument=config.instrument,
+            train_start=train_start,
+            train_end=train_end,
+            test_start=test_start,
+            test_end=test_end,
+            outer_trials=config.outer_trials,
+            inner_trials=config.inner_trials,
+            sample_on_candle=config.sample_on_candle,
+            score_metric=config.score_metric,
+            sl_range=config.sl_range,
+            tp_range=config.tp_range,
+            k_sl_range=config.k_sl_range,
+            k_tp_range=config.k_tp_range,
+            gamma_range=config.gamma_range,
+            max_margin_proba_range=config.max_margin_proba_range,
+            fixed_outer_params=config.fixed_outer_params,
+            outer_param_ranges=config.outer_param_ranges,
+            slippage_min_pts=config.slippage_min_pts,
+            slippage_max_pts=config.slippage_max_pts,
+            slippage_seed=config.slippage_seed,
+        )
+
+        result = await run_nested_optuna(opt_config, db, window_idx=i)
+        results.append(result)
+        all_records.extend(result.trial_records)
+
+    # Write all trial + trade logs
+    if all_records:
+        write_trial_logs(all_records, output_prefix)
+
+    # Print per-window OOS summary + param stability
+    _print_wf_optuna_summary(results, windows)
+
+    if len(results) >= 2:
+        _print_param_stability(results)
+
+    return results
+
+
+def _print_wf_optuna_summary(
+    results: list[OptimizationResult],
+    windows: list[tuple[datetime, datetime, datetime, datetime]],
+) -> None:
+    """Print per-window OOS summary table."""
+    print(f"\n{'='*70}")
+    print("WALK-FORWARD OPTUNA SUMMARY")
+    print(f"{'='*70}")
+    print(f"{'Window':<8} {'Test dates':<25} {'Score':>8} "
+          f"{'Trades':>7} {'WR':>6} {'PnL':>10}")
+    print("-" * 70)
+
+    total_trades = 0
+    total_pnl = 0.0
+    profitable = 0
+
+    for i, (result, win) in enumerate(zip(results, windows, strict=True)):
+        test_str = f"{win[2].date()} → {win[3].date()}"
+        print(f"W{i+1:<6} {test_str:<25} {result.best_score:>+8.1f} "
+              f"{result.best_n_trades:>7} "
+              f"{result.best_win_rate*100:>5.1f}% "
+              f"{result.best_pnl:>+10.2f}")
+        total_trades += result.best_n_trades
+        total_pnl += result.best_pnl
+        if result.best_pnl > 0:
+            profitable += 1
+
+    print("-" * 70)
+    print(f"{'Total':<34} {'':<8} {total_trades:>7} "
+          f"{'':<6} {total_pnl:>+10.2f}")
+    print(f"  Profitable windows: {profitable}/{len(results)}")
+
+
+def _print_param_stability(results: list[OptimizationResult]) -> None:
+    """Print param stability analysis across windows.
+
+    For each inner param, shows mean, std, and coefficient of variation (CV).
+    Low CV = stable param, high CV = unstable / window-dependent.
+    """
+    # Collect best inner params per window
+    all_inner: list[dict[str, Any]] = [
+        r.best_inner_params for r in results if r.best_inner_params
+    ]
+    if len(all_inner) < 2:
+        return
+
+    # Also collect outer params
+    all_outer: list[dict[str, Any]] = [
+        r.best_outer_params for r in results if r.best_outer_params
+    ]
+
+    print(f"\n{'='*70}")
+    print("PARAM STABILITY ACROSS WINDOWS")
+    print(f"{'='*70}")
+    print(f"{'Param':<30} {'Mean':>10} {'Std':>10} {'CV%':>8} {'Stable?':<8}")
+    print("-" * 70)
+
+    converged = 0
+    total = 0
+
+    for label, param_dicts in [("inner", all_inner), ("outer", all_outer)]:
+        if not param_dicts:
+            continue
+
+        all_keys = sorted(
+            {k for d in param_dicts for k in d if isinstance(d[k], (int, float))},
+        )
+
+        for key in all_keys:
+            values = [
+                float(d[key]) for d in param_dicts
+                if key in d and isinstance(d[key], (int, float))
+            ]
+            if len(values) < 2:
+                continue
+
+            total += 1
+            mean = np.mean(values)
+            std = np.std(values)
+            if abs(mean) > 1e-9:
+                cv = float(std / abs(mean) * 100)
+                stable = cv < 15.0
+                cv_display = f"{cv:>7.1f}%"
+            else:
+                stable = False
+                cv_display = f"{'N/A':>8}"
+            if stable:
+                converged += 1
+            marker = "YES" if stable else ""
+            name = f"{label}__{key}"
+            print(f"{name:<30} {mean:>10.4f} {std:>10.4f} "
+                  f"{cv_display} {marker:<8}")
+
+    if total > 0:
+        print(f"\nConverged: {converged}/{total} params "
+              f"({converged/total*100:.0f}%) with CV < 15%")

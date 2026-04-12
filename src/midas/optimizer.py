@@ -9,6 +9,7 @@ Score = walk-forward OOS metric (composite, pnl, win_rate, pnl_per_trade).
 from __future__ import annotations
 
 import contextlib
+import csv
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -33,6 +34,71 @@ from src.midas.types import ATR_COLUMN_DEFAULT
 if TYPE_CHECKING:
     from src.common.db import Database
     from src.midas.types import Tick
+
+
+INNER_PARAM_KEYS: frozenset[str] = frozenset({
+    "n_estimators", "learning_rate", "max_depth", "num_leaves",
+    "min_child_samples", "subsample", "colsample_bytree",
+    "entry_threshold", "exit_threshold",
+    "k_sl", "k_tp", "sl_fallback", "tp_fallback",
+    "sl_points", "tp_points", "label_timeout",
+    "gamma", "max_margin_proba",
+})
+"""Parameter names that belong to the inner Optuna loop.
+
+Used by CLI scripts to separate inner vs outer params when loading
+a YAML file with ``--fix-outer-params``.
+"""
+
+
+def load_fixed_outer_params(path: str) -> dict[str, Any]:
+    """Load outer params from a YAML file, filtering out inner params.
+
+    Args:
+        path: Path to YAML file with all params.
+
+    Returns:
+        Dict of outer-only params (extractor params).
+    """
+    import yaml
+
+    with open(path) as f:
+        raw = yaml.safe_load(f)
+    if not isinstance(raw, dict):
+        msg = f"Expected a YAML mapping in {path}, got {type(raw).__name__}"
+        raise ValueError(msg)
+    return {
+        k: v for k, v in raw.items()
+        if not k.startswith("_") and k not in INNER_PARAM_KEYS
+    }
+
+
+def load_outer_param_ranges(path: str) -> dict[str, tuple[float, float]]:
+    """Load restricted outer param ranges from a YAML file.
+
+    Expected format::
+
+        atr_period: [10, 16]
+        liq_lookback: [100, 200]
+
+    Args:
+        path: Path to YAML file with ``{name: [low, high]}`` entries.
+
+    Returns:
+        Dict of ``{name: (low, high)}`` range overrides.
+    """
+    import yaml
+
+    with open(path) as f:
+        raw = yaml.safe_load(f)
+    if not isinstance(raw, dict):
+        msg = f"Expected a YAML mapping in {path}, got {type(raw).__name__}"
+        raise ValueError(msg)
+    ranges: dict[str, tuple[float, float]] = {}
+    for k, v in raw.items():
+        if isinstance(v, (list, tuple)) and len(v) == 2:
+            ranges[k] = (float(v[0]), float(v[1]))
+    return ranges
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,9 +145,29 @@ class OptimizerConfig:
     max_margin_proba_range: tuple[float, float] = (0.70, 0.95)
     atr_column: str = ATR_COLUMN_DEFAULT
     fixed_outer_params: dict[str, Any] | None = None
+    outer_param_ranges: dict[str, tuple[float, float]] | None = None
     slippage_min_pts: float = 0.0
     slippage_max_pts: float = 0.0
     slippage_seed: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TrialRecord:
+    """Best-inner result for a single outer trial.
+
+    One record per outer trial, capturing the best inner params and
+    all OOS trades for that configuration.
+    """
+
+    window_idx: int
+    outer_idx: int
+    score: float
+    n_trades: int
+    win_rate: float
+    pnl: float
+    outer_params: dict[str, Any]
+    inner_params: dict[str, Any]
+    trades: list[MidasTrade]
 
 
 @dataclass
@@ -98,19 +184,31 @@ class OptimizationResult:
     best_win_rate: float = 0.0
     best_pnl: float = 0.0
     best_trades: list[MidasTrade] = field(default_factory=list)
+    trial_records: list[TrialRecord] = field(default_factory=list)
 
 
 def _suggest_outer_params(
     trial: optuna.Trial,
     registry_params: list[Any],
+    range_overrides: dict[str, tuple[float, float]] | None = None,
 ) -> dict[str, Any]:
-    """Suggest extractor params only for the outer loop."""
+    """Suggest extractor params only for the outer loop.
+
+    Args:
+        trial: Optuna trial.
+        registry_params: Default param descriptors from the registry.
+        range_overrides: Optional ``{name: (low, high)}`` to restrict
+            search ranges (from ``--outer-ranges-from``).
+    """
     params: dict[str, Any] = {}
     for p in registry_params:
+        low, high = p.low, p.high
+        if range_overrides and p.name in range_overrides:
+            low, high = range_overrides[p.name]
         if p.param_type == "int":
-            params[p.name] = trial.suggest_int(p.name, int(p.low), int(p.high))
+            params[p.name] = trial.suggest_int(p.name, int(low), int(high))
         else:
-            params[p.name] = trial.suggest_float(p.name, p.low, p.high)
+            params[p.name] = trial.suggest_float(p.name, low, high)
     return params
 
 
@@ -270,11 +368,18 @@ async def _evaluate_oos_async(
 async def run_nested_optuna(
     config: OptimizerConfig,
     db: Database,
+    *,
+    window_idx: int = 0,
 ) -> OptimizationResult:
     """Run the nested Optuna optimization.
 
     Outer loop: extractor params → replay ticks → features DataFrame.
     Inner loop: SL/TP → relabel DataFrame → train LightGBM → evaluate OOS.
+
+    Args:
+        config: Optimizer configuration.
+        db: Database connection.
+        window_idx: Walk-forward window index (0 for standalone runs).
     """
     result = OptimizationResult()
 
@@ -290,6 +395,8 @@ async def run_nested_optuna(
     print("  Inner: 5 SL/TP + 2 sizing + 7 LightGBM"
           " + entry/exit_threshold = 16 params")
     print(f"  ATR column: {config.atr_column}")
+    if config.outer_param_ranges:
+        print(f"  Outer ranges restricted: {config.outer_param_ranges}")
     print(f"  Train: {config.train_start.date()} → {config.train_end.date()}")
     print(f"  Test:  {config.test_start.date()} → {config.test_end.date()}")
 
@@ -313,6 +420,7 @@ async def run_nested_optuna(
         else:
             extractor_params = _suggest_outer_params(
                 outer_trial, registry_params,
+                range_overrides=config.outer_param_ranges,
             )
 
         print(f"\n--- Outer trial {outer_i + 1}/{config.outer_trials}"
@@ -483,6 +591,19 @@ async def run_nested_optuna(
         outer_study.tell(outer_trial, best_inner_score)
         result.total_inner_trials += config.inner_trials
 
+        # Record best-inner result for this outer trial
+        result.trial_records.append(TrialRecord(
+            window_idx=window_idx,
+            outer_idx=outer_i,
+            score=best_inner_score,
+            n_trades=best_inner_trades,
+            win_rate=best_inner_wr,
+            pnl=best_inner_pnl,
+            outer_params=dict(extractor_params),
+            inner_params=dict(best_inner_params_local),
+            trades=list(best_inner_trades_list),
+        ))
+
         print(f"  Best inner: score={best_inner_score:+.2f}, "
               f"k_sl={best_inner_params_local.get('k_sl', 0):.2f}, "
               f"k_tp={best_inner_params_local.get('k_tp', 0):.2f}, "
@@ -512,6 +633,104 @@ async def run_nested_optuna(
 
     _print_result(result)
     return result
+
+
+def default_output_prefix() -> str:
+    """Generate a timestamped output prefix for trial log files.
+
+    Returns:
+        Prefix like ``config/midas_optuna_20260412_143022``.
+    """
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"config/midas_optuna_{stamp}"
+
+
+def write_trial_logs(
+    records: list[TrialRecord],
+    prefix: str,
+) -> tuple[Path, Path]:
+    """Write trial CSV and trades CSV from collected TrialRecords.
+
+    Args:
+        records: List of trial records (one per outer trial per window).
+        prefix: Path prefix (e.g. ``config/midas_optuna_20260412_143022``).
+            Files created: ``{prefix}_trials.csv``, ``{prefix}_trades.csv``.
+
+    Returns:
+        (trials_path, trades_path) — the two files written.
+    """
+    trials_path = Path(f"{prefix}_trials.csv")
+    trades_path = Path(f"{prefix}_trades.csv")
+    trials_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Collect all param keys across records (outer + inner may vary)
+    outer_keys: set[str] = set()
+    inner_keys: set[str] = set()
+    for r in records:
+        outer_keys.update(r.outer_params.keys())
+        inner_keys.update(r.inner_params.keys())
+    outer_sorted = sorted(outer_keys)
+    inner_sorted = sorted(inner_keys)
+
+    # --- Trials CSV ---
+    trial_fields = (
+        ["window_idx", "outer_idx", "score", "n_trades", "win_rate", "pnl"]
+        + [f"outer__{k}" for k in outer_sorted]
+        + [f"inner__{k}" for k in inner_sorted]
+    )
+    with open(trials_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=trial_fields)
+        writer.writeheader()
+        for r in records:
+            row: dict[str, Any] = {
+                "window_idx": r.window_idx,
+                "outer_idx": r.outer_idx,
+                "score": r.score,
+                "n_trades": r.n_trades,
+                "win_rate": round(r.win_rate, 4),
+                "pnl": round(r.pnl, 2),
+            }
+            for k in outer_sorted:
+                row[f"outer__{k}"] = r.outer_params.get(k, "")
+            for k in inner_sorted:
+                row[f"inner__{k}"] = r.inner_params.get(k, "")
+            writer.writerow(row)
+
+    # --- Trades CSV ---
+    trade_fields = [
+        "window_idx", "outer_idx", "trade_id", "direction",
+        "entry_time", "exit_time", "entry_price", "exit_price",
+        "sl_price", "tp_price", "size", "proba",
+        "pnl", "pnl_points", "is_win",
+    ]
+    n_trades = 0
+    with open(trades_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=trade_fields)
+        writer.writeheader()
+        for r in records:
+            n_trades += len(r.trades)
+            for t in r.trades:
+                writer.writerow({
+                    "window_idx": r.window_idx,
+                    "outer_idx": r.outer_idx,
+                    "trade_id": t.trade_id,
+                    "direction": t.direction,
+                    "entry_time": t.entry_time,
+                    "exit_time": t.exit_time,
+                    "entry_price": t.entry_price,
+                    "exit_price": t.exit_price,
+                    "sl_price": t.sl_price,
+                    "tp_price": t.tp_price,
+                    "size": t.size,
+                    "proba": t.proba,
+                    "pnl": round(t.pnl, 4),
+                    "pnl_points": round(t.pnl_points, 4),
+                    "is_win": t.is_win,
+                })
+
+    print(f"\nTrial logs: {trials_path} ({len(records)} trials)")
+    print(f"Trade logs: {trades_path} ({n_trades} trades)")
+    return trials_path, trades_path
 
 
 def _print_result(result: OptimizationResult) -> None:

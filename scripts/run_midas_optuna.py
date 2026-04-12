@@ -22,7 +22,14 @@ from dotenv import load_dotenv
 from src.common.config import load_config
 from src.common.db import Database
 from src.common.logging import setup_logging
-from src.midas.optimizer import OptimizerConfig, run_nested_optuna
+from src.midas.optimizer import (
+    OptimizerConfig,
+    default_output_prefix,
+    load_fixed_outer_params,
+    load_outer_param_ranges,
+    run_nested_optuna,
+    write_trial_logs,
+)
 
 
 async def main(args: argparse.Namespace) -> None:
@@ -49,23 +56,16 @@ async def main(args: argparse.Namespace) -> None:
         # Load fixed outer params if provided
         fixed_outer = None
         if args.fix_outer_params:
-            import yaml
-
-            with open(args.fix_outer_params) as f:
-                raw = yaml.safe_load(f)
-            # Extract outer params (extractor only, not inner params)
-            inner_keys = {
-                "n_estimators", "learning_rate", "max_depth", "num_leaves",
-                "min_child_samples", "subsample", "colsample_bytree",
-                "entry_threshold", "k_sl", "k_tp", "sl_fallback", "tp_fallback",
-                "sl_points", "tp_points", "label_timeout",
-            }
-            fixed_outer = {
-                k: v for k, v in raw.items()
-                if not k.startswith("_") and k not in inner_keys
-            }
+            fixed_outer = load_fixed_outer_params(args.fix_outer_params)
             print(f"Fixed outer params from {args.fix_outer_params}: "
                   f"{len(fixed_outer)} params")
+
+        # Load outer param range overrides if provided
+        outer_ranges = None
+        if args.outer_ranges_from:
+            outer_ranges = load_outer_param_ranges(args.outer_ranges_from)
+            print(f"Outer ranges from {args.outer_ranges_from}: "
+                  f"{outer_ranges}")
 
         opt_config = OptimizerConfig(
             instrument=args.instrument,
@@ -82,6 +82,7 @@ async def main(args: argparse.Namespace) -> None:
             k_tp_range=tuple(args.k_tp_range),
             score_metric=args.score,
             fixed_outer_params=fixed_outer,
+            outer_param_ranges=outer_ranges,
             slippage_min_pts=args.slippage_min,
             slippage_max_pts=args.slippage_max,
             slippage_seed=args.slippage_seed,
@@ -89,11 +90,14 @@ async def main(args: argparse.Namespace) -> None:
 
         result = await run_nested_optuna(opt_config, db)
 
-        # Save best params to YAML + model to .bin + trades to CSV
-        if args.output:
-            import csv
-            from pathlib import Path
+        # Save best params to YAML + model to .bin
+        from pathlib import Path
 
+        prefix = (
+            str(Path(args.output).with_suffix(""))
+            if args.output else default_output_prefix()
+        )
+        if args.output:
             import yaml
 
             all_params = {
@@ -112,22 +116,9 @@ async def main(args: argparse.Namespace) -> None:
                 result.best_trainer.save(model_path)
                 print(f"Best model saved to {model_path}")
 
-            if result.best_trades:
-                trades_path = Path(args.output).with_suffix(".csv")
-                fields = [
-                    "trade_id", "direction", "entry_time", "exit_time",
-                    "entry_price", "exit_price", "sl_price", "tp_price",
-                    "size", "proba", "pnl", "pnl_points", "is_win",
-                ]
-                with open(trades_path, "w", newline="") as f:
-                    writer = csv.DictWriter(f, fieldnames=fields)
-                    writer.writeheader()
-                    for t in result.best_trades:
-                        writer.writerow({
-                            k: getattr(t, k) for k in fields
-                        })
-                print(f"Best trades saved to {trades_path} "
-                      f"({len(result.best_trades)} trades)")
+        # Always write trial + trade logs with timestamped prefix
+        if result.trial_records:
+            write_trial_logs(result.trial_records, prefix)
 
     finally:
         await db.disconnect()
@@ -166,6 +157,8 @@ def cli() -> None:
                         help="RNG seed for reproducible slippage")
     parser.add_argument("--fix-outer-params", type=str, default=None,
                         help="YAML file with fixed outer params (skip outer search)")
+    parser.add_argument("--outer-ranges-from", type=str, default=None,
+                        help="YAML file with restricted outer ranges {name: [lo, hi]}")
     parser.add_argument("--output", type=str, default=None,
                         help="Save best params to YAML file")
     args = parser.parse_args()
