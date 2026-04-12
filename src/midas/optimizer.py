@@ -42,7 +42,7 @@ INNER_PARAM_KEYS: frozenset[str] = frozenset({
     "entry_threshold", "exit_threshold",
     "k_sl", "k_tp", "sl_fallback", "tp_fallback",
     "sl_points", "tp_points", "label_timeout",
-    "gamma", "max_margin_proba",
+    "gamma", "max_margin_proba", "min_risk_pct",
 })
 """Parameter names that belong to the inner Optuna loop.
 
@@ -143,6 +143,7 @@ class OptimizerConfig:
     k_tp_range: tuple[float, float] = (0.5, 3.0)
     gamma_range: tuple[float, float] = (0.5, 3.0)
     max_margin_proba_range: tuple[float, float] = (0.70, 0.95)
+    min_risk_pct_range: tuple[float, float] = (0.001, 0.02)
     atr_column: str = ATR_COLUMN_DEFAULT
     fixed_outer_params: dict[str, Any] | None = None
     outer_param_ranges: dict[str, tuple[float, float]] | None = None
@@ -242,6 +243,11 @@ def _suggest_inner_params(
             "max_margin_proba",
             config.max_margin_proba_range[0],
             config.max_margin_proba_range[1],
+        ),
+        "min_risk_pct": trial.suggest_float(
+            "min_risk_pct",
+            config.min_risk_pct_range[0],
+            config.min_risk_pct_range[1],
         ),
         # LightGBM hyperparams (shared entry + exit)
         "n_estimators": trial.suggest_int("n_estimators", 50, 1000),
@@ -392,8 +398,8 @@ async def run_nested_optuna(
     print(f"\nNested Optuna: {config.outer_trials} outer x "
           f"{config.inner_trials} inner trials")
     print(f"  Outer: {len(registry_params)} extractor params")
-    print("  Inner: 5 SL/TP + 2 sizing + 7 LightGBM"
-          " + entry/exit_threshold = 16 params")
+    print("  Inner: 5 SL/TP + 3 sizing + 7 LightGBM"
+          " + entry/exit_threshold = 17 params")
     print(f"  ATR column: {config.atr_column}")
     if config.outer_param_ranges:
         print(f"  Outer ranges restricted: {config.outer_param_ranges}")
@@ -567,6 +573,7 @@ async def run_nested_optuna(
                 gamma=inner_params["gamma"],
                 max_margin_proba=inner_params["max_margin_proba"],
                 sizing_threshold=inner_params["entry_threshold"],
+                min_risk_pct=inner_params["min_risk_pct"],
                 slippage_min_pts=config.slippage_min_pts,
                 slippage_max_pts=config.slippage_max_pts,
                 slippage_seed=config.slippage_seed,

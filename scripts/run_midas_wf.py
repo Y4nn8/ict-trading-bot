@@ -68,6 +68,12 @@ async def main(args: argparse.Namespace) -> None:
                 k_tp=args.k_tp,
                 initial_capital=args.capital,
                 max_spread=args.max_spread,
+                gamma=args.gamma,
+                max_margin_proba=args.max_margin_proba,
+                margin_pct=args.margin_pct,
+                min_lot_size=args.min_lot_size,
+                min_risk_pct=args.min_risk_pct,
+                sizing_threshold=args.threshold,
                 slippage_min_pts=args.slippage_min,
                 slippage_max_pts=args.slippage_max,
                 slippage_seed=args.slippage_seed,
@@ -120,6 +126,16 @@ def cli() -> None:
                         help="Max slippage in points (set both to 0 to disable)")
     parser.add_argument("--slippage-seed", type=int, default=None,
                         help="RNG seed for reproducible slippage")
+    parser.add_argument("--gamma", type=float, default=None,
+                        help="Gamma ramp curvature (enables dynamic sizing)")
+    parser.add_argument("--max-margin-proba", type=float, default=0.85,
+                        help="Proba for 100%% margin usage (dynamic sizing)")
+    parser.add_argument("--margin-pct", type=float, default=0.05,
+                        help="Margin requirement as fraction of price")
+    parser.add_argument("--min-lot-size", type=float, default=0.1,
+                        help="Minimum tradeable lot size")
+    parser.add_argument("--min-risk-pct", type=float, default=None,
+                        help="Min risk per trade as fraction of capital")
     parser.add_argument("--sample-on-tick", action="store_true",
                         help="Sample every tick instead of on candle close")
     parser.add_argument("--sample-rate", type=int, default=1,

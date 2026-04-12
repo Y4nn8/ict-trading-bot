@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -245,9 +246,9 @@ class TestATRBasedSLTP:
 class TestDynamicSizing:
     """Tests for dynamic position sizing with gamma ramp."""
 
-    def _dynamic_config(self, **overrides: float) -> SimConfig:
+    def _dynamic_config(self, **overrides: Any) -> SimConfig:
         """Build a SimConfig with dynamic sizing enabled."""
-        defaults: dict[str, float] = {
+        defaults: dict[str, Any] = {
             "sl_points": 5.0,
             "tp_points": 5.0,
             "initial_capital": 5_000.0,
@@ -418,6 +419,89 @@ class TestDynamicSizing:
         sim.on_signal(_tick(0, bid=999.0, ask=1000.0), signal=1, proba=0.70)
         sim.reset()
         assert sim.margin_used == pytest.approx(0.0)
+
+    def test_min_risk_floor_bumps_size(self) -> None:
+        """min_risk_pct bumps size when gamma ramp produces too little risk."""
+        cfg = self._dynamic_config(
+            min_risk_pct=0.01,  # risk at least 1% of 5000 = 50€
+        )
+        sim = TradeSimulator(cfg)
+        # price=1000, sl=5pts, vpp=1 → risk_per_lot = 5*1 = 5€/lot
+        # min_risk_size = ceil(50 / 5 / 0.1) * 0.1 = 10.0 lots
+        # gamma ramp with low proba would give less, floor should win
+        tick = _tick(0, bid=999.0, ask=1000.0)
+        sim.on_signal(tick, signal=1, proba=0.40)
+
+        assert sim.open_count == 1
+        pos = sim._positions[0]
+        # Without floor: confidence = (0.40 - 1/3) / (0.85 - 1/3) ≈ 0.129
+        # gamma=1 → raw = 0.129 * 100 / 0.1 = 129 → floor = 12.9 lots
+        # With floor: min_size = ceil(50 / 5 / 0.1) * 0.1 = 10.0
+        # gamma_size = 12.9 > floor 10.0 → no bump (gamma is bigger)
+        # Use a very low proba to trigger the floor
+        sim.reset()
+        sim.on_signal(tick, signal=1, proba=0.35)
+        assert sim.open_count == 1
+        pos = sim._positions[0]
+        # confidence = (0.35 - 1/3) / (0.85 - 1/3) ≈ 0.032
+        # gamma_size = floor(0.032 * 100 / 0.1) * 0.1 = 3.2 → 3.2 lots
+        # min_risk_size = 10.0 → floor kicks in
+        assert pos.size == pytest.approx(10.0)
+
+    def test_min_risk_floor_skips_when_margin_insufficient(self) -> None:
+        """Skip trade if min risk floor exceeds available margin."""
+        cfg = self._dynamic_config(
+            initial_capital=100.0,
+            min_risk_pct=0.10,  # risk at least 10% of 100 = 10€
+        )
+        sim = TradeSimulator(cfg)
+        # price=1000, margin_per_lot=50, available=100 → size_max=2.0
+        # sl=5, vpp=1 → risk_per_lot=5 → min_size = ceil(10/5/0.1)*0.1 = 2.0
+        # margin for 2.0 lots = 100 → exactly fits
+        tick = _tick(0, bid=999.0, ask=1000.0)
+        sim.on_signal(tick, signal=1, proba=0.35)
+        assert sim.open_count == 1
+
+        # Now with higher min_risk_pct that forces more margin than available
+        sim.reset()
+        cfg2 = self._dynamic_config(
+            initial_capital=100.0,
+            min_risk_pct=0.20,  # risk at least 20% of 100 = 20€
+        )
+        sim2 = TradeSimulator(cfg2)
+        # min_size = ceil(20/5/0.1)*0.1 = 4.0 → margin = 200 > 100
+        sim2.on_signal(tick, signal=1, proba=0.35)
+        assert sim2.open_count == 0  # skipped
+
+    def test_min_risk_floor_no_effect_when_gamma_larger(self) -> None:
+        """Floor has no effect when gamma ramp already exceeds it."""
+        cfg = self._dynamic_config(min_risk_pct=0.001)  # very small floor
+        sim = TradeSimulator(cfg)
+        tick = _tick(0, bid=999.0, ask=1000.0)
+        sim.on_signal(tick, signal=1, proba=0.70)
+
+        # Without floor, compute expected gamma size
+        margin_per_lot = 1000.0 * 0.05
+        size_max = math.floor(5000.0 / margin_per_lot / 0.1) * 0.1
+        conf = (0.70 - 1.0 / 3.0) / (0.85 - 1.0 / 3.0)
+        gamma_size = math.floor(conf * size_max / 0.1) * 0.1
+
+        pos = sim._positions[0]
+        assert pos.size == pytest.approx(gamma_size)
+
+    def test_min_risk_floor_disabled_by_default(self) -> None:
+        """min_risk_pct=None (default) → no floor applied."""
+        cfg = self._dynamic_config()
+        assert cfg.min_risk_pct is None
+        sim = TradeSimulator(cfg)
+        tick = _tick(0, bid=999.0, ask=1000.0)
+        sim.on_signal(tick, signal=1, proba=0.35)
+
+        # Low proba → small size, no floor
+        pos = sim._positions[0]
+        conf = (0.35 - 1.0 / 3.0) / (0.85 - 1.0 / 3.0)
+        gamma_size = math.floor((conf ** 1.0) * 100.0 / 0.1) * 0.1
+        assert pos.size == pytest.approx(gamma_size)
 
     def test_fixed_sizing_unchanged(self) -> None:
         """Without gamma, sizing is still fixed (backward compat)."""
