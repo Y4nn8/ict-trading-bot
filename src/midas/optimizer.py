@@ -9,6 +9,7 @@ Score = walk-forward OOS metric (composite, pnl, win_rate, pnl_per_trade).
 from __future__ import annotations
 
 import contextlib
+import csv
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -84,6 +85,25 @@ class OptimizerConfig:
     slippage_seed: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class TrialRecord:
+    """Best-inner result for a single outer trial.
+
+    One record per outer trial, capturing the best inner params and
+    all OOS trades for that configuration.
+    """
+
+    window_idx: int
+    outer_idx: int
+    score: float
+    n_trades: int
+    win_rate: float
+    pnl: float
+    outer_params: dict[str, Any]
+    inner_params: dict[str, Any]
+    trades: list[MidasTrade]
+
+
 @dataclass
 class OptimizationResult:
     """Result of a nested optimization run."""
@@ -98,6 +118,7 @@ class OptimizationResult:
     best_win_rate: float = 0.0
     best_pnl: float = 0.0
     best_trades: list[MidasTrade] = field(default_factory=list)
+    trial_records: list[TrialRecord] = field(default_factory=list)
 
 
 def _suggest_outer_params(
@@ -270,11 +291,18 @@ async def _evaluate_oos_async(
 async def run_nested_optuna(
     config: OptimizerConfig,
     db: Database,
+    *,
+    window_idx: int = 0,
 ) -> OptimizationResult:
     """Run the nested Optuna optimization.
 
     Outer loop: extractor params → replay ticks → features DataFrame.
     Inner loop: SL/TP → relabel DataFrame → train LightGBM → evaluate OOS.
+
+    Args:
+        config: Optimizer configuration.
+        db: Database connection.
+        window_idx: Walk-forward window index (0 for standalone runs).
     """
     result = OptimizationResult()
 
@@ -483,6 +511,19 @@ async def run_nested_optuna(
         outer_study.tell(outer_trial, best_inner_score)
         result.total_inner_trials += config.inner_trials
 
+        # Record best-inner result for this outer trial
+        result.trial_records.append(TrialRecord(
+            window_idx=window_idx,
+            outer_idx=outer_i,
+            score=best_inner_score,
+            n_trades=best_inner_trades,
+            win_rate=best_inner_wr,
+            pnl=best_inner_pnl,
+            outer_params=dict(extractor_params),
+            inner_params=dict(best_inner_params_local),
+            trades=list(best_inner_trades_list),
+        ))
+
         print(f"  Best inner: score={best_inner_score:+.2f}, "
               f"k_sl={best_inner_params_local.get('k_sl', 0):.2f}, "
               f"k_tp={best_inner_params_local.get('k_tp', 0):.2f}, "
@@ -512,6 +553,103 @@ async def run_nested_optuna(
 
     _print_result(result)
     return result
+
+
+def default_output_prefix() -> str:
+    """Generate a timestamped output prefix for trial log files.
+
+    Returns:
+        Prefix like ``config/midas_optuna_20260412_143022``.
+    """
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"config/midas_optuna_{stamp}"
+
+
+def write_trial_logs(
+    records: list[TrialRecord],
+    prefix: str,
+) -> tuple[Path, Path]:
+    """Write trial CSV and trades CSV from collected TrialRecords.
+
+    Args:
+        records: List of trial records (one per outer trial per window).
+        prefix: Path prefix (e.g. ``config/midas_optuna_20260412_143022``).
+            Files created: ``{prefix}_trials.csv``, ``{prefix}_trades.csv``.
+
+    Returns:
+        (trials_path, trades_path) — the two files written.
+    """
+    trials_path = Path(f"{prefix}_trials.csv")
+    trades_path = Path(f"{prefix}_trades.csv")
+    trials_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Collect all param keys across records (outer + inner may vary)
+    outer_keys: set[str] = set()
+    inner_keys: set[str] = set()
+    for r in records:
+        outer_keys.update(r.outer_params.keys())
+        inner_keys.update(r.inner_params.keys())
+    outer_sorted = sorted(outer_keys)
+    inner_sorted = sorted(inner_keys)
+
+    # --- Trials CSV ---
+    trial_fields = (
+        ["window_idx", "outer_idx", "score", "n_trades", "win_rate", "pnl"]
+        + [f"outer__{k}" for k in outer_sorted]
+        + [f"inner__{k}" for k in inner_sorted]
+    )
+    with open(trials_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=trial_fields)
+        writer.writeheader()
+        for r in records:
+            row: dict[str, Any] = {
+                "window_idx": r.window_idx,
+                "outer_idx": r.outer_idx,
+                "score": r.score,
+                "n_trades": r.n_trades,
+                "win_rate": round(r.win_rate, 4),
+                "pnl": round(r.pnl, 2),
+            }
+            for k in outer_sorted:
+                row[f"outer__{k}"] = r.outer_params.get(k, "")
+            for k in inner_sorted:
+                row[f"inner__{k}"] = r.inner_params.get(k, "")
+            writer.writerow(row)
+
+    # --- Trades CSV ---
+    trade_fields = [
+        "window_idx", "outer_idx", "trade_id", "direction",
+        "entry_time", "exit_time", "entry_price", "exit_price",
+        "sl_price", "tp_price", "size", "proba",
+        "pnl", "pnl_points", "is_win",
+    ]
+    with open(trades_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=trade_fields)
+        writer.writeheader()
+        for r in records:
+            for t in r.trades:
+                writer.writerow({
+                    "window_idx": r.window_idx,
+                    "outer_idx": r.outer_idx,
+                    "trade_id": t.trade_id,
+                    "direction": t.direction,
+                    "entry_time": t.entry_time,
+                    "exit_time": t.exit_time,
+                    "entry_price": t.entry_price,
+                    "exit_price": t.exit_price,
+                    "sl_price": t.sl_price,
+                    "tp_price": t.tp_price,
+                    "size": t.size,
+                    "proba": t.proba,
+                    "pnl": round(t.pnl, 4),
+                    "pnl_points": round(t.pnl_points, 4),
+                    "is_win": t.is_win,
+                })
+
+    n_trades = sum(len(r.trades) for r in records)
+    print(f"\nTrial logs: {trials_path} ({len(records)} trials)")
+    print(f"Trade logs: {trades_path} ({n_trades} trades)")
+    return trials_path, trades_path
 
 
 def _print_result(result: OptimizationResult) -> None:

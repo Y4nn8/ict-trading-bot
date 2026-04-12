@@ -22,7 +22,12 @@ from dotenv import load_dotenv
 from src.common.config import load_config
 from src.common.db import Database
 from src.common.logging import setup_logging
-from src.midas.optimizer import OptimizerConfig, run_nested_optuna
+from src.midas.optimizer import (
+    OptimizerConfig,
+    default_output_prefix,
+    run_nested_optuna,
+    write_trial_logs,
+)
 
 
 async def main(args: argparse.Namespace) -> None:
@@ -89,11 +94,9 @@ async def main(args: argparse.Namespace) -> None:
 
         result = await run_nested_optuna(opt_config, db)
 
-        # Save best params to YAML + model to .bin + trades to CSV
+        # Save best params to YAML + model to .bin
+        prefix = args.output or default_output_prefix()
         if args.output:
-            import csv
-            from pathlib import Path
-
             import yaml
 
             all_params = {
@@ -108,26 +111,15 @@ async def main(args: argparse.Namespace) -> None:
             print(f"\nBest params saved to {args.output}")
 
             if result.best_trainer is not None:
+                from pathlib import Path
+
                 model_path = Path(args.output).with_suffix(".bin")
                 result.best_trainer.save(model_path)
                 print(f"Best model saved to {model_path}")
 
-            if result.best_trades:
-                trades_path = Path(args.output).with_suffix(".csv")
-                fields = [
-                    "trade_id", "direction", "entry_time", "exit_time",
-                    "entry_price", "exit_price", "sl_price", "tp_price",
-                    "size", "proba", "pnl", "pnl_points", "is_win",
-                ]
-                with open(trades_path, "w", newline="") as f:
-                    writer = csv.DictWriter(f, fieldnames=fields)
-                    writer.writeheader()
-                    for t in result.best_trades:
-                        writer.writerow({
-                            k: getattr(t, k) for k in fields
-                        })
-                print(f"Best trades saved to {trades_path} "
-                      f"({len(result.best_trades)} trades)")
+        # Always write trial + trade logs with timestamped prefix
+        if result.trial_records:
+            write_trial_logs(result.trial_records, prefix)
 
     finally:
         await db.disconnect()

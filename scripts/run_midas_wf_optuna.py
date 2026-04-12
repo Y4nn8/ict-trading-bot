@@ -1,0 +1,146 @@
+"""Run Midas walk-forward with per-window Optuna optimization.
+
+For each window: nested Optuna finds optimal params on train,
+evaluates on OOS. Writes trial/trade CSVs and param stability.
+
+Usage:
+    uv run python -m scripts.run_midas_wf_optuna \
+        --instrument XAUUSD \
+        --start 2025-01-01 --end 2025-04-01 \
+        --train-days 30 --test-days 7 --step-days 7 \
+        --outer-trials 10 --inner-trials 20
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+from datetime import UTC, datetime
+
+from dotenv import load_dotenv
+
+from src.common.config import load_config
+from src.common.db import Database
+from src.common.logging import setup_logging
+from src.midas.optimizer import default_output_prefix
+from src.midas.walk_forward import (
+    WalkForwardOptunaConfig,
+    run_midas_wf_optuna,
+)
+
+
+async def main(args: argparse.Namespace) -> None:
+    """Run the walk-forward Optuna pipeline."""
+    config = load_config()
+    setup_logging(config.logging.level, json_format=False)
+
+    db = Database(config.database)
+    await db.connect()
+
+    try:
+        row = await db.fetchrow(
+            "SELECT MIN(time), MAX(time), COUNT(*) FROM ticks "
+            "WHERE instrument = $1 AND time >= $2 AND time < $3",
+            args.instrument, args.start, args.end,
+        )
+        if row is None or row[2] == 0:
+            print(f"No ticks for {args.instrument} in range.")
+            return
+
+        print(f"Ticks: {row[2]:,} ({row[0].date()} → {row[1].date()})")
+
+        # Load fixed outer params if provided
+        fixed_outer = None
+        if args.fix_outer_params:
+            import yaml
+
+            with open(args.fix_outer_params) as f:
+                raw = yaml.safe_load(f)
+            inner_keys = {
+                "n_estimators", "learning_rate", "max_depth", "num_leaves",
+                "min_child_samples", "subsample", "colsample_bytree",
+                "entry_threshold", "k_sl", "k_tp", "sl_fallback", "tp_fallback",
+                "sl_points", "tp_points", "label_timeout",
+            }
+            fixed_outer = {
+                k: v for k, v in raw.items()
+                if not k.startswith("_") and k not in inner_keys
+            }
+            print(f"Fixed outer params from {args.fix_outer_params}: "
+                  f"{len(fixed_outer)} params")
+
+        wf_config = WalkForwardOptunaConfig(
+            instrument=args.instrument,
+            train_days=args.train_days,
+            test_days=args.test_days,
+            step_days=args.step_days,
+            outer_trials=args.outer_trials,
+            inner_trials=args.inner_trials,
+            sample_on_candle=not args.sample_on_tick,
+            score_metric=args.score,
+            sl_range=tuple(args.sl_range),
+            tp_range=tuple(args.tp_range),
+            k_sl_range=tuple(args.k_sl_range),
+            k_tp_range=tuple(args.k_tp_range),
+            fixed_outer_params=fixed_outer,
+            slippage_min_pts=args.slippage_min,
+            slippage_max_pts=args.slippage_max,
+            slippage_seed=args.slippage_seed,
+        )
+
+        prefix = args.output or default_output_prefix()
+        await run_midas_wf_optuna(
+            wf_config,
+            data_start=args.start,
+            data_end=args.end,
+            db=db,
+            output_prefix=prefix,
+        )
+
+    finally:
+        await db.disconnect()
+
+
+def cli() -> None:
+    """CLI entry point."""
+    load_dotenv()
+    parser = argparse.ArgumentParser(
+        description="Midas walk-forward + Optuna: optimize per window",
+    )
+    parser.add_argument("--instrument", default="XAUUSD")
+    parser.add_argument("--start", required=True, help="YYYY-MM-DD")
+    parser.add_argument("--end", required=True, help="YYYY-MM-DD")
+    parser.add_argument("--train-days", type=int, default=30)
+    parser.add_argument("--test-days", type=int, default=7)
+    parser.add_argument("--step-days", type=int, default=7)
+    parser.add_argument("--outer-trials", type=int, default=10)
+    parser.add_argument("--inner-trials", type=int, default=20)
+    parser.add_argument("--sample-on-tick", action="store_true",
+                        help="Sample every tick instead of on candle close")
+    parser.add_argument("--score", default="composite",
+                        choices=["composite", "pnl", "win_rate", "pnl_per_trade"])
+    parser.add_argument("--sl-range", type=float, nargs=2, default=[1.5, 8.0],
+                        metavar=("MIN", "MAX"))
+    parser.add_argument("--tp-range", type=float, nargs=2, default=[1.5, 8.0],
+                        metavar=("MIN", "MAX"))
+    parser.add_argument("--k-sl-range", type=float, nargs=2, default=[0.5, 3.0],
+                        metavar=("MIN", "MAX"))
+    parser.add_argument("--k-tp-range", type=float, nargs=2, default=[0.5, 3.0],
+                        metavar=("MIN", "MAX"))
+    parser.add_argument("--slippage-min", type=float, default=0.1)
+    parser.add_argument("--slippage-max", type=float, default=0.5)
+    parser.add_argument("--slippage-seed", type=int, default=None)
+    parser.add_argument("--fix-outer-params", type=str, default=None,
+                        help="YAML file with fixed outer params")
+    parser.add_argument("--output", type=str, default=None,
+                        help="Output prefix (default: timestamped)")
+    args = parser.parse_args()
+
+    args.start = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=UTC)
+    args.end = datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=UTC)
+
+    asyncio.run(main(args))
+
+
+if __name__ == "__main__":
+    cli()
