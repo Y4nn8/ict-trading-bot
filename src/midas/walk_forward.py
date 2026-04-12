@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 
 from src.common.models import Direction, Trade
-from src.midas.labeler import relabel_dataframe
+from src.midas.labeler import build_exit_dataset, relabel_dataframe
 from src.midas.replay_engine import (
     ReplayConfig,
     ReplayEngine,
@@ -229,7 +229,6 @@ async def run_midas_walk_forward(
               f"losses: {label_result.sell_losses}, "
               f"timeouts: {label_result.timeouts}")
 
-        # Build target from labels (vectorized mask)
         target = MidasTrainer.build_target(
             label_result.buy_labels,
             label_result.sell_labels,
@@ -275,35 +274,33 @@ async def run_midas_walk_forward(
         print(f"    Class dist: {wr.class_dist}")
         print(f"    Top features: {[f[0] for f in sorted_imp]}")
 
-        # Train exit model: for BUY/SELL entries, label CLOSE=1 if PnL < 0
-        buy_pnl_arr = np.array(buy_pnls)
-        sell_pnl_arr = np.array(sell_pnls)
-        # Rows where entry model would enter (BUY or SELL)
-        entry_mask = target_filtered != 0
-        if entry_mask.sum() >= 50:
-            exit_df_rows = df_filtered.filter(pl.Series(entry_mask))
-            # Add position context columns (simulated averages for training)
-            directions = np.where(target_filtered[entry_mask] == 1, 1.0, -1.0)
-            # PnL for the chosen direction
-            chosen_pnl = np.where(
-                target_filtered[entry_mask] == 1,
-                buy_pnl_arr[entry_mask],
-                sell_pnl_arr[entry_mask],
-            )
-            # Exit label: CLOSE=1 if the trade ends in loss (holding was wrong)
-            exit_labels = (chosen_pnl < 0).astype(np.int32)
+        # Train exit model with optimal-close labeling
+        exit_ds = build_exit_dataset(
+            df_filtered,
+            target_filtered,
+            sl_points=config.label_config.sl_points,
+            tp_points=config.label_config.tp_points,
+            timeout_seconds=config.label_config.timeout_seconds,
+            k_sl=config.label_config.k_sl,
+            k_tp=config.label_config.k_tp,
+            atr_column=config.label_config.atr_column,
+        )
 
-            exit_df = exit_df_rows.with_columns(
-                pl.Series("pos_unrealized_pnl", chosen_pnl * 0.3),  # partial PnL
-                pl.Series("pos_duration_sec", np.full(len(exit_df_rows), 30.0)),
-                pl.Series("pos_direction", directions),
+        if exit_ds.n_rows >= 50:
+            exit_df = df_filtered[exit_ds.row_indices].with_columns(
+                pl.Series("pos_unrealized_pnl", exit_ds.unrealized_pnls),
+                pl.Series("pos_duration_sec", exit_ds.durations),
+                pl.Series("pos_direction", exit_ds.directions),
             )
 
-            exit_result = trainer.train_exit(exit_df, exit_labels)
-            print(f"    Exit model: {exit_result.n_train} rows, "
+            exit_result = trainer.train_exit(exit_df, exit_ds.exit_labels)
+            n_close = int((exit_ds.exit_labels == 1).sum())
+            n_hold = int((exit_ds.exit_labels == 0).sum())
+            print(f"    Exit model: {exit_result.n_train} rows "
+                  f"(HOLD={n_hold}, CLOSE={n_close}), "
                   f"val_loss={exit_result.val_log_loss:.4f}")
         else:
-            print("    Exit model: SKIP (< 50 entry rows)")
+            print(f"    Exit model: SKIP ({exit_ds.n_rows} rows < 50)")
 
         # --- Phase 2: Test replay with live prediction ---
         print("  [2/2] Test replay + simulation...")
