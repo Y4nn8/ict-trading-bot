@@ -320,6 +320,18 @@ async def run_midas_walk_forward(
             atr_col: str = _atr_col,
         ) -> None:
             _feat.update(features)
+            # Exit model at candle close (not every tick — 780k→16k calls)
+            if _tr.has_exit_model and _sim.open_count > 0:
+                ctx = _sim.get_position_context(tick)
+                if ctx is not None:
+                    should_close, _ = _tr.predict_exit(
+                        _feat,
+                        pos_unrealized_pnl=ctx["pos_unrealized_pnl"],
+                        pos_duration_sec=ctx["pos_duration_sec"],
+                        pos_direction=ctx["pos_direction"],
+                    )
+                    if should_close:
+                        _sim.early_close(tick)
             signal, confidence = _tr.predict(features)
             _sim.on_signal(
                 tick, signal,
@@ -332,26 +344,12 @@ async def run_midas_walk_forward(
         def exit_hook(
             tick: Tick,
             *,
-            _tr: MidasTrainer = trainer,
             _sim: TradeSimulator = simulator,
             _holder: list[Tick | None] = last_tick_holder,
-            _feat: dict[str, float] = latest_features,
         ) -> None:
-            # SL/TP mechanical exits
+            # SL/TP mechanical exits (must stay per-tick)
             _sim.on_tick(tick)
             _holder[0] = tick
-            # Exit model: check if we should close early
-            if _tr.has_exit_model and _sim.open_count > 0 and _feat:
-                ctx = _sim.get_position_context(tick)
-                if ctx is not None:
-                    should_close, _ = _tr.predict_exit(
-                        _feat,
-                        pos_unrealized_pnl=ctx["pos_unrealized_pnl"],
-                        pos_duration_sec=ctx["pos_duration_sec"],
-                        pos_direction=ctx["pos_direction"],
-                    )
-                    if should_close:
-                        _sim.early_close(tick)
 
         test_registry = build_default_registry(instrument=config.instrument)
         test_registry.configure_all({})

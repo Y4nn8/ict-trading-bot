@@ -428,6 +428,19 @@ Consistent sweet spot: **SL 6-8, TP 4-5, timeout 100-250s**
 - PR #24: Discovery spike IG Lightstreamer
 - PR #25: Live engine MVP
 
+## Session 15 — 2026-04-12
+
+### Progress
+- PR #22: exit model predict at candle close only (not every tick)
+- 341 tests pass, ruff clean, mypy clean
+
+### Decisions Made
+- **predict_exit at candle close only**: moved from `exit_hook` (every tick, ~780k calls/trial) to `test_callback`/`callback` (candle close only, ~16k calls/trial). SL/TP mechanical checks stay per-tick. Features don't change between candle closes — only context (unrealized PnL, duration) which rarely flips a decision in 10s. Expected speedup: ~162s → ~3.5s per trial
+- **Exit before entry on candle close**: exit model now runs before entry model in the callback. On candle close: (1) SL/TP already checked via per-tick hook, (2) exit model may close position, (3) entry model may open new position. Correct order for capital release
+
+### Issues Encountered
+- None — straightforward refactor
+
 ### Future Evolution — Tick-Level Features for Entry Model
 Currently all 42 features are computed at candle close (10s). Entry predict between candle closes gives identical results — the model can't react to intra-candle price movements. To add sub-10s reactivity:
 - Add tick-level features (current price, tick momentum, partial-candle VWAP, etc.)
