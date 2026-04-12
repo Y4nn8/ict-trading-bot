@@ -25,6 +25,7 @@ from src.common.logging import setup_logging
 from src.midas.optimizer import (
     OptimizerConfig,
     default_output_prefix,
+    load_fixed_outer_params,
     run_nested_optuna,
     write_trial_logs,
 )
@@ -54,21 +55,7 @@ async def main(args: argparse.Namespace) -> None:
         # Load fixed outer params if provided
         fixed_outer = None
         if args.fix_outer_params:
-            import yaml
-
-            with open(args.fix_outer_params) as f:
-                raw = yaml.safe_load(f)
-            # Extract outer params (extractor only, not inner params)
-            inner_keys = {
-                "n_estimators", "learning_rate", "max_depth", "num_leaves",
-                "min_child_samples", "subsample", "colsample_bytree",
-                "entry_threshold", "k_sl", "k_tp", "sl_fallback", "tp_fallback",
-                "sl_points", "tp_points", "label_timeout",
-            }
-            fixed_outer = {
-                k: v for k, v in raw.items()
-                if not k.startswith("_") and k not in inner_keys
-            }
+            fixed_outer = load_fixed_outer_params(args.fix_outer_params)
             print(f"Fixed outer params from {args.fix_outer_params}: "
                   f"{len(fixed_outer)} params")
 

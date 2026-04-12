@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 from src.common.config import load_config
 from src.common.db import Database
 from src.common.logging import setup_logging
-from src.midas.optimizer import default_output_prefix
+from src.midas.optimizer import default_output_prefix, load_fixed_outer_params
 from src.midas.walk_forward import (
     WalkForwardOptunaConfig,
     run_midas_wf_optuna,
@@ -52,20 +52,7 @@ async def main(args: argparse.Namespace) -> None:
         # Load fixed outer params if provided
         fixed_outer = None
         if args.fix_outer_params:
-            import yaml
-
-            with open(args.fix_outer_params) as f:
-                raw = yaml.safe_load(f)
-            inner_keys = {
-                "n_estimators", "learning_rate", "max_depth", "num_leaves",
-                "min_child_samples", "subsample", "colsample_bytree",
-                "entry_threshold", "k_sl", "k_tp", "sl_fallback", "tp_fallback",
-                "sl_points", "tp_points", "label_timeout",
-            }
-            fixed_outer = {
-                k: v for k, v in raw.items()
-                if not k.startswith("_") and k not in inner_keys
-            }
+            fixed_outer = load_fixed_outer_params(args.fix_outer_params)
             print(f"Fixed outer params from {args.fix_outer_params}: "
                   f"{len(fixed_outer)} params")
 

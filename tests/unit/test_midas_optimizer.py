@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import optuna
+import pytest
 
 from src.midas.optimizer import (
     OptimizationResult,
@@ -125,11 +126,8 @@ class TestTrialRecord:
             n_trades=0, win_rate=0.0, pnl=0.0,
             outer_params={}, inner_params={}, trades=[],
         )
-        try:
+        with pytest.raises(AttributeError):
             tr.score = 99.0  # type: ignore[misc]
-            raise AssertionError("Should be frozen")  # pragma: no cover
-        except AttributeError:
-            pass
 
 
 class TestDefaultOutputPrefix:

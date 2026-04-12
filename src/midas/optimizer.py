@@ -36,6 +36,40 @@ if TYPE_CHECKING:
     from src.midas.types import Tick
 
 
+INNER_PARAM_KEYS: frozenset[str] = frozenset({
+    "n_estimators", "learning_rate", "max_depth", "num_leaves",
+    "min_child_samples", "subsample", "colsample_bytree",
+    "entry_threshold", "exit_threshold",
+    "k_sl", "k_tp", "sl_fallback", "tp_fallback",
+    "sl_points", "tp_points", "label_timeout",
+    "gamma", "max_margin_proba",
+})
+"""Parameter names that belong to the inner Optuna loop.
+
+Used by CLI scripts to separate inner vs outer params when loading
+a YAML file with ``--fix-outer-params``.
+"""
+
+
+def load_fixed_outer_params(path: str) -> dict[str, Any]:
+    """Load outer params from a YAML file, filtering out inner params.
+
+    Args:
+        path: Path to YAML file with all params.
+
+    Returns:
+        Dict of outer-only params (extractor params).
+    """
+    import yaml
+
+    with open(path) as f:
+        raw = yaml.safe_load(f)
+    return {
+        k: v for k, v in raw.items()
+        if not k.startswith("_") and k not in INNER_PARAM_KEYS
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class OptimizerConfig:
     """Nested Optuna configuration.
@@ -623,10 +657,12 @@ def write_trial_logs(
         "sl_price", "tp_price", "size", "proba",
         "pnl", "pnl_points", "is_win",
     ]
+    n_trades = 0
     with open(trades_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=trade_fields)
         writer.writeheader()
         for r in records:
+            n_trades += len(r.trades)
             for t in r.trades:
                 writer.writerow({
                     "window_idx": r.window_idx,
@@ -646,7 +682,6 @@ def write_trial_logs(
                     "is_win": t.is_win,
                 })
 
-    n_trades = sum(len(r.trades) for r in records)
     print(f"\nTrial logs: {trials_path} ({len(records)} trials)")
     print(f"Trade logs: {trades_path} ({n_trades} trades)")
     return trials_path, trades_path
