@@ -6,11 +6,16 @@ Entry at ask (BUY) or bid (SELL), exit evaluated against bid/ask.
 Dynamic sizing maps LightGBM probability → contract size via a
 gamma-ramp curve, scaling up to the full available margin when
 confidence is high.
+
+Slippage simulation applies random adverse slippage to market orders
+(entry, early_close, close_all).  SL/TP exits are guaranteed
+stop/limit orders — no slippage.
 """
 
 from __future__ import annotations
 
 import math
+import random
 import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -55,6 +60,12 @@ class SimConfig:
         sizing_threshold: Probability floor for the gamma ramp. Should
             match the model's entry_threshold so confidence=0 at the
             decision boundary.
+        slippage_min_pts: Minimum slippage in price points per market
+            order. Set >0 for conservative simulation.
+        slippage_max_pts: Maximum random slippage in price points.
+            Each market order draws uniform(min, max). Both at 0
+            disables slippage.
+        slippage_seed: RNG seed for reproducible slippage sequences.
     """
 
     sl_points: float = 3.0
@@ -71,6 +82,9 @@ class SimConfig:
     margin_pct: float = 0.05
     min_lot_size: float = 0.1
     sizing_threshold: float = 1 / 3
+    slippage_min_pts: float = 0.0
+    slippage_max_pts: float = 0.0
+    slippage_seed: int | None = None
 
 
 @dataclass
@@ -119,6 +133,7 @@ class TradeSimulator:
         self._positions: list[MidasPosition] = []
         self._trades: list[MidasTrade] = []
         self._capital: float = self._config.initial_capital
+        self._rng = random.Random(self._config.slippage_seed)
 
     @property
     def closed_trades(self) -> list[MidasTrade]:
@@ -139,6 +154,17 @@ class TradeSimulator:
     def open_count(self) -> int:
         """Number of open positions."""
         return len(self._positions)
+
+    def _sample_slippage(self) -> float:
+        """Draw a random adverse slippage amount in price points.
+
+        Returns 0.0 when slippage simulation is disabled.
+        """
+        mn = self._config.slippage_min_pts
+        mx = self._config.slippage_max_pts
+        if mx <= 0.0 and mn <= 0.0:
+            return 0.0
+        return self._rng.uniform(mn, mx)
 
     def on_signal(
         self,
@@ -195,7 +221,8 @@ class TradeSimulator:
             return None
 
         pos = self._positions.pop(position_index)
-        exit_price = tick.bid if pos.direction == "BUY" else tick.ask
+        slip = self._sample_slippage()
+        exit_price = tick.bid - slip if pos.direction == "BUY" else tick.ask + slip
         return self._close_position(pos, exit_price, tick.time)
 
     def get_position_context(
@@ -353,12 +380,14 @@ class TradeSimulator:
             sl_dist = cfg.sl_points
             tp_dist = cfg.tp_points
 
+        slip = self._sample_slippage()
+
         if direction == "BUY":
-            entry = tick.ask
+            entry = tick.ask + slip  # adverse: higher fill
             sl = entry - sl_dist
             tp = entry + tp_dist
         else:
-            entry = tick.bid
+            entry = tick.bid - slip  # adverse: lower fill
             sl = entry + sl_dist
             tp = entry - tp_dist
 
@@ -441,7 +470,8 @@ class TradeSimulator:
         """
         closed: list[MidasTrade] = []
         for pos in self._positions:
-            exit_price = tick.bid if pos.direction == "BUY" else tick.ask
+            slip = self._sample_slippage()
+            exit_price = tick.bid - slip if pos.direction == "BUY" else tick.ask + slip
             closed.append(self._close_position(pos, exit_price, tick.time))
 
         self._positions.clear()
@@ -452,3 +482,4 @@ class TradeSimulator:
         self._positions.clear()
         self._trades.clear()
         self._capital = self._config.initial_capital
+        self._rng = random.Random(self._config.slippage_seed)

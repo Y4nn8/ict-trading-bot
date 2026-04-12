@@ -68,6 +68,9 @@ async def main(args: argparse.Namespace) -> None:
                 k_tp=args.k_tp,
                 initial_capital=args.capital,
                 max_spread=args.max_spread,
+                slippage_min_pts=args.slippage_min,
+                slippage_max_pts=args.slippage_max,
+                slippage_seed=args.slippage_seed,
             ),
             sample_on_candle=not args.sample_on_tick,
             sample_rate=args.sample_rate,
@@ -111,6 +114,12 @@ def cli() -> None:
                         help="Entry probability threshold")
     parser.add_argument("--capital", type=float, default=5000.0)
     parser.add_argument("--max-spread", type=float, default=2.0)
+    parser.add_argument("--slippage-min", type=float, default=0.1,
+                        help="Min slippage in points (floor per market order)")
+    parser.add_argument("--slippage-max", type=float, default=0.5,
+                        help="Max slippage in points (0=disabled)")
+    parser.add_argument("--slippage-seed", type=int, default=None,
+                        help="RNG seed for reproducible slippage")
     parser.add_argument("--sample-on-tick", action="store_true",
                         help="Sample every tick instead of on candle close")
     parser.add_argument("--sample-rate", type=int, default=1,

@@ -16,6 +16,7 @@ def _tick(seconds: float, bid: float, ask: float) -> Tick:
     return Tick(time=base + timedelta(seconds=seconds), bid=bid, ask=ask)
 
 
+
 class TestTradeSimulator:
     """Tests for TradeSimulator."""
 
@@ -482,3 +483,176 @@ class TestDynamicSizing:
 
         assert trade is not None
         assert trade.proba == pytest.approx(0.65)
+
+
+class TestSlippageSimulation:
+    """Tests for random slippage on market orders."""
+
+    def test_no_slippage_by_default(self) -> None:
+        """Default slippage_max_pts=0 → no slippage."""
+        sim = TradeSimulator(SimConfig(sl_points=5.0, tp_points=5.0))
+        sim.on_signal(_tick(0, bid=100.0, ask=101.0), signal=1)
+
+        pos = sim._positions[0]
+        assert pos.entry_price == 101.0  # exact ask
+
+    def test_buy_entry_slippage_adverse(self) -> None:
+        """BUY entry slippage moves price UP (worse fill)."""
+        sim = TradeSimulator(SimConfig(
+            sl_points=5.0, tp_points=5.0,
+            slippage_max_pts=1.0, slippage_seed=42,
+        ))
+        sim.on_signal(_tick(0, bid=100.0, ask=101.0), signal=1)
+
+        pos = sim._positions[0]
+        assert pos.entry_price > 101.0  # slipped higher
+        assert pos.entry_price <= 102.0  # at most ask + max
+
+    def test_slippage_min_floor(self) -> None:
+        """slippage_min_pts guarantees a minimum slippage per order."""
+        entries: list[float] = []
+        for seed in range(50):
+            sim = TradeSimulator(SimConfig(
+                sl_points=5.0, tp_points=5.0,
+                slippage_min_pts=0.2, slippage_max_pts=0.5,
+                slippage_seed=seed,
+            ))
+            sim.on_signal(_tick(0, bid=100.0, ask=101.0), signal=1)
+            entries.append(sim._positions[0].entry_price)
+
+        # Every entry must be >= ask + min slippage
+        assert all(e >= 101.0 + 0.2 - 1e-9 for e in entries)
+        # And <= ask + max slippage
+        assert all(e <= 101.0 + 0.5 + 1e-9 for e in entries)
+
+    def test_sell_entry_slippage_adverse(self) -> None:
+        """SELL entry slippage moves price DOWN (worse fill)."""
+        sim = TradeSimulator(SimConfig(
+            sl_points=5.0, tp_points=5.0,
+            slippage_max_pts=1.0, slippage_seed=42,
+        ))
+        sim.on_signal(_tick(0, bid=100.0, ask=101.0), signal=2)
+
+        pos = sim._positions[0]
+        assert pos.entry_price < 100.0  # slipped lower
+        assert pos.entry_price >= 99.0  # at most bid - max
+
+    def test_sl_tp_recalculated_from_slipped_entry(self) -> None:
+        """SL/TP are set relative to the slipped entry price."""
+        sim = TradeSimulator(SimConfig(
+            sl_points=2.0, tp_points=3.0,
+            slippage_max_pts=1.0, slippage_seed=42,
+        ))
+        sim.on_signal(_tick(0, bid=100.0, ask=101.0), signal=1)
+
+        pos = sim._positions[0]
+        assert pos.sl_price == pytest.approx(pos.entry_price - 2.0)
+        assert pos.tp_price == pytest.approx(pos.entry_price + 3.0)
+
+    def test_sl_tp_exit_no_slippage(self) -> None:
+        """SL/TP exits use exact stop/limit price — no slippage."""
+        sim = TradeSimulator(SimConfig(
+            sl_points=2.0, tp_points=2.0,
+            size=0.1, value_per_point=10.0,
+            slippage_max_pts=1.0, slippage_seed=42,
+        ))
+        sim.on_signal(_tick(0, bid=100.0, ask=101.0), signal=1)
+        sl = sim._positions[0].sl_price
+
+        # SL hit — exit at exact sl_price, not slipped
+        trades = sim.on_tick(_tick(1, bid=sl - 1.0, ask=sl))
+        assert len(trades) == 1
+        assert trades[0].exit_price == pytest.approx(sl)
+
+    def test_early_close_buy_slippage_adverse(self) -> None:
+        """BUY early_close slippage moves bid DOWN (worse exit)."""
+        sim = TradeSimulator(SimConfig(
+            sl_points=10.0, tp_points=10.0,
+            size=0.1, value_per_point=10.0,
+            slippage_max_pts=0.5, slippage_seed=99,
+        ))
+        sim.on_signal(_tick(0, bid=100.0, ask=101.0), signal=1)
+        trade = sim.early_close(_tick(5, bid=102.0, ask=103.0))
+
+        assert trade is not None
+        assert trade.exit_price < 102.0  # slipped below bid
+
+    def test_early_close_sell_slippage_adverse(self) -> None:
+        """SELL early_close slippage moves ask UP (worse exit)."""
+        sim = TradeSimulator(SimConfig(
+            sl_points=10.0, tp_points=10.0,
+            size=0.1, value_per_point=10.0,
+            slippage_max_pts=0.5, slippage_seed=99,
+        ))
+        sim.on_signal(_tick(0, bid=100.0, ask=101.0), signal=2)
+        trade = sim.early_close(_tick(5, bid=98.0, ask=99.0))
+
+        assert trade is not None
+        assert trade.exit_price > 99.0  # slipped above ask
+
+    def test_close_all_applies_slippage(self) -> None:
+        """close_all applies adverse slippage per position."""
+        sim = TradeSimulator(SimConfig(
+            sl_points=10.0, tp_points=10.0,
+            size=0.1, value_per_point=10.0,
+            slippage_max_pts=0.5, slippage_seed=7,
+        ))
+        sim.on_signal(_tick(0, bid=100.0, ask=101.0), signal=2)  # SELL
+
+        trades = sim.close_all(_tick(3, bid=99.0, ask=100.0))
+        assert len(trades) == 1
+        # SELL exit at ask + slip → worse than 100.0
+        assert trades[0].exit_price > 100.0
+
+    def test_slippage_seed_reproducible(self) -> None:
+        """Same seed → same slippage sequence."""
+        def run(seed: int) -> float:
+            sim = TradeSimulator(SimConfig(
+                sl_points=5.0, tp_points=5.0,
+                slippage_max_pts=1.0, slippage_seed=seed,
+            ))
+            sim.on_signal(_tick(0, bid=100.0, ask=101.0), signal=1)
+            return sim._positions[0].entry_price
+
+        assert run(42) == run(42)
+        # Different seeds should (almost certainly) differ
+        assert run(42) != run(99)
+
+    def test_reset_resets_rng(self) -> None:
+        """After reset, slippage sequence restarts from seed."""
+        sim = TradeSimulator(SimConfig(
+            sl_points=5.0, tp_points=5.0,
+            slippage_max_pts=1.0, slippage_seed=42,
+        ))
+        sim.on_signal(_tick(0, bid=100.0, ask=101.0), signal=1)
+        entry_1 = sim._positions[0].entry_price
+
+        sim.reset()
+        sim.on_signal(_tick(0, bid=100.0, ask=101.0), signal=1)
+        entry_2 = sim._positions[0].entry_price
+
+        assert entry_1 == entry_2
+
+    def test_slippage_pnl_impact(self) -> None:
+        """Slippage reduces PnL compared to no-slippage run."""
+        # No slippage
+        sim_clean = TradeSimulator(SimConfig(
+            sl_points=5.0, tp_points=5.0,
+            size=1.0, value_per_point=1.0,
+        ))
+        sim_clean.on_signal(_tick(0, bid=100.0, ask=101.0), signal=1)
+        trade_clean = sim_clean.early_close(_tick(5, bid=104.0, ask=105.0))
+
+        # With slippage
+        sim_slip = TradeSimulator(SimConfig(
+            sl_points=5.0, tp_points=5.0,
+            size=1.0, value_per_point=1.0,
+            slippage_max_pts=0.5, slippage_seed=42,
+        ))
+        sim_slip.on_signal(_tick(0, bid=100.0, ask=101.0), signal=1)
+        trade_slip = sim_slip.early_close(_tick(5, bid=104.0, ask=105.0))
+
+        assert trade_clean is not None
+        assert trade_slip is not None
+        # Slippage always hurts: entry higher + exit lower → less PnL
+        assert trade_slip.pnl < trade_clean.pnl

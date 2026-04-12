@@ -82,6 +82,9 @@ async def main(args: argparse.Namespace) -> None:
             k_tp_range=tuple(args.k_tp_range),
             score_metric=args.score,
             fixed_outer_params=fixed_outer,
+            slippage_min_pts=args.slippage_min,
+            slippage_max_pts=args.slippage_max,
+            slippage_seed=args.slippage_seed,
         )
 
         result = await run_nested_optuna(opt_config, db)
@@ -155,6 +158,12 @@ def cli() -> None:
                         metavar=("MIN", "MAX"), help="k_sl ATR multiplier range")
     parser.add_argument("--k-tp-range", type=float, nargs=2, default=[0.5, 3.0],
                         metavar=("MIN", "MAX"), help="k_tp ATR multiplier range")
+    parser.add_argument("--slippage-min", type=float, default=0.1,
+                        help="Min slippage in points (floor per market order)")
+    parser.add_argument("--slippage-max", type=float, default=0.5,
+                        help="Max slippage in points (0=disabled)")
+    parser.add_argument("--slippage-seed", type=int, default=None,
+                        help="RNG seed for reproducible slippage")
     parser.add_argument("--fix-outer-params", type=str, default=None,
                         help="YAML file with fixed outer params (skip outer search)")
     parser.add_argument("--output", type=str, default=None,
