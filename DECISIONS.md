@@ -378,3 +378,59 @@ Consistent sweet spot: **SL 6-8, TP 4-5, timeout 100-250s**
 - PR #19: Proper HOLD/CLOSE exit model
 - Run Optuna with dynamic sizing to validate gamma/max_margin_proba convergence
 - Compare OOS PnL: fixed 0.1 lot vs dynamic sizing
+
+## Session 13 — 2026-04-11
+
+### Progress
+- PR #19 merged (trade log + proba on trades + CSV export)
+- PR #20 merged: exit model HOLD/CLOSE with optimal-close labeling
+- 329 tests pass, ruff clean, mypy clean
+
+### Decisions Made
+- **Optimal-close labeling**: CLOSE=1 when unrealized PnL > final PnL (closing now beats holding to SL/TP/timeout). Replaces hacky "CLOSE if trade loses" with real post-entry features
+- **Two-pass numba JIT** (`_exit_dataset_core`): first pass finds trade exit + final PnL, second pass labels each intermediate candle. Single-pass would require buffering — two-pass is clearer and equally fast (L1-cache-hot from first pass)
+- **exit_threshold as Optuna inner param**: range 0.30–0.80, total inner params now 16. Shared LightGBM hyperparams between entry and exit models to avoid search space explosion
+- **n_entries counts resolved trades**: Copilot caught that unresolved entries (no future data) were included in count. Fixed by tracking resolved count inside JIT core
+- **df[np.int64_array] is valid Polars row selection**: Copilot flagged it as unsafe but Polars 1.39 correctly handles numpy int64 arrays as row indices (not column indices). No change needed
+- **Extracted `_build_price_arrays()`**: shared by relabel_dataframe and build_exit_dataset, eliminates 12-line verbatim duplication
+- **ExitDatasetResult frozen+slotted**: immutable after construction, prevents stale-state bugs
+
+### Issues Encountered
+- `relabel_dataframe` had variable `n` removed by helper extraction → `LabelResult(total_labeled=n)` broke. Fixed to `len(times)`
+- Polars has no `.take()` or `.gather()` on DataFrame in type stubs — `df[indices]` is the correct API for numpy arrays
+
+### TODO / Next Session
+- PR #21: Slippage simulation
+- Run Optuna with exit model to validate exit_threshold convergence
+- Compare OOS PnL: with vs without exit model
+
+## Session 14 — 2026-04-12
+
+### Progress
+- PR #21: slippage simulation implemented and smoke-tested (2x2 Optuna, 217 trades)
+- 341 tests pass, ruff clean, mypy clean
+
+### Decisions Made
+- **Slippage distribution**: `uniform(min, max)` per market order, always adverse. BUY entry → higher fill, SELL entry → lower fill. BUY exit → lower fill, SELL exit → higher fill
+- **SL/TP = no slippage**: stop/limit orders execute at exact price (guaranteed fills)
+- **SL/TP relative to slipped entry**: entry slippage shifts SL/TP levels accordingly (real behavior: stops placed after fill)
+- **SimConfig defaults = 0**: no slippage unless explicitly configured. CLI scripts default to realistic values (min=0.1, max=0.5 pts for XAUUSD)
+- **Seed for reproducibility**: `slippage_seed` resets on `reset()` for deterministic Optuna runs
+
+### Issues Encountered
+- **OOS replay 47x slower since PR #20**: `predict_exit()` called on every tick (~780k/trial) instead of candle close (~16k). LightGBM per-tick inference is the bottleneck. Not caused by slippage. Must fix before live demo pipeline
+
+### TODO / Next Session
+- **URGENT — PR #22: Fix exit model OOS perf** — `predict_exit` only at candle close in backtest `exit_hook` (not every tick). Features don't change between closes, only context (PnL/duration) which rarely flips a decision in 10s. SL/TP still checked per-tick. Profile: 775k calls × 0.18ms = 162s/trial → ~16k calls = ~3.5s. No train/live mismatch because exit model was trained on candle-close features
+- Run Optuna 50x50 after perf fix to validate slippage impact
+- Compare OOS PnL: slippage on vs off
+- PR #23: Trial logging + WF multi-fenêtre
+- PR #24: Discovery spike IG Lightstreamer
+- PR #25: Live engine MVP
+
+### Future Evolution — Tick-Level Features for Entry Model
+Currently all 42 features are computed at candle close (10s). Entry predict between candle closes gives identical results — the model can't react to intra-candle price movements. To add sub-10s reactivity:
+- Add tick-level features (current price, tick momentum, partial-candle VWAP, etc.)
+- Retrain entry model with these features (sampled at tick or sub-candle level)
+- In live: predict entry at every tick (5-10 calls/sec, ~1ms total — no perf issue)
+- In backtest: predict entry every N ticks + at candle close (configurable subsampling to keep Optuna fast). Same approach as exit model — LightGBM has no incremental predict mode, each call is ~0.18ms regardless of how many features changed

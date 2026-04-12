@@ -56,6 +56,9 @@ class OptimizerConfig:
         k_tp_range: k_tp multiplier search range (ATR mode).
         atr_column: Column name for ATR values.
         fixed_outer_params: Fixed extractor params (skip outer search).
+        slippage_min_pts: Min adverse slippage per market order (points).
+        slippage_max_pts: Max adverse slippage per market order (points).
+        slippage_seed: RNG seed for reproducible slippage sequences.
     """
 
     instrument: str = "XAUUSD"
@@ -76,6 +79,9 @@ class OptimizerConfig:
     max_margin_proba_range: tuple[float, float] = (0.70, 0.95)
     atr_column: str = ATR_COLUMN_DEFAULT
     fixed_outer_params: dict[str, Any] | None = None
+    slippage_min_pts: float = 0.0
+    slippage_max_pts: float = 0.0
+    slippage_seed: int | None = None
 
 
 @dataclass
@@ -454,6 +460,9 @@ async def run_nested_optuna(
                 gamma=inner_params["gamma"],
                 max_margin_proba=inner_params["max_margin_proba"],
                 sizing_threshold=inner_params["entry_threshold"],
+                slippage_min_pts=config.slippage_min_pts,
+                slippage_max_pts=config.slippage_max_pts,
+                slippage_seed=config.slippage_seed,
             )
             score, n_tr, wr, pnl, trades_list = await _evaluate_oos_async(
                 trainer, sim_config, db, config,
