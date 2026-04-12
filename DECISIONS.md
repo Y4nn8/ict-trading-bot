@@ -421,9 +421,16 @@ Consistent sweet spot: **SL 6-8, TP 4-5, timeout 100-250s**
 - **OOS replay 47x slower since PR #20**: `predict_exit()` called on every tick (~780k/trial) instead of candle close (~16k). LightGBM per-tick inference is the bottleneck. Not caused by slippage. Must fix before live demo pipeline
 
 ### TODO / Next Session
-- **URGENT — PR #22: Fix exit model OOS perf** — batch predict or skip between candle closes (features unchanged). Current: ~2.5 min/trial. Target: <10s/trial. Blocking for Optuna convergence + live demo
+- **URGENT — PR #22: Fix exit model OOS perf** — `predict_exit` only at candle close in backtest `exit_hook` (not every tick). Features don't change between closes, only context (PnL/duration) which rarely flips a decision in 10s. SL/TP still checked per-tick. Profile: 775k calls × 0.18ms = 162s/trial → ~16k calls = ~3.5s. No train/live mismatch because exit model was trained on candle-close features
 - Run Optuna 50x50 after perf fix to validate slippage impact
 - Compare OOS PnL: slippage on vs off
 - PR #23: Trial logging + WF multi-fenêtre
 - PR #24: Discovery spike IG Lightstreamer
 - PR #25: Live engine MVP
+
+### Future Evolution — Tick-Level Features for Entry Model
+Currently all 42 features are computed at candle close (10s). Entry predict between candle closes gives identical results — the model can't react to intra-candle price movements. To add sub-10s reactivity:
+- Add tick-level features (current price, tick momentum, partial-candle VWAP, etc.)
+- Retrain entry model with these features (sampled at tick or sub-candle level)
+- In live: predict entry at every tick (5-10 calls/sec, ~1ms total — no perf issue)
+- In backtest: predict entry every N ticks + at candle close (configurable subsampling to keep Optuna fast). Same approach as exit model — LightGBM has no incremental predict mode, each call is ~0.18ms regardless of how many features changed
