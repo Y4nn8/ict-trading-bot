@@ -320,7 +320,7 @@ async def run_midas_walk_forward(
             atr_col: str = _atr_col,
         ) -> None:
             _feat.update(features)
-            # Exit model at candle close (not every tick — 780k→16k calls)
+            # Exit model at sample time (candle close when sample_on_candle=True)
             if _tr.has_exit_model and _sim.open_count > 0:
                 ctx = _sim.get_position_context(tick)
                 if ctx is not None:

@@ -192,7 +192,7 @@ async def _evaluate_oos_async(
         feat: dict[str, float] = latest_features,
     ) -> None:
         feat.update(features)
-        # Exit model at candle close (not every tick — 780k→16k calls)
+        # Exit model at sample time (candle close when sample_on_candle=True)
         if tr.has_exit_model and sim.open_count > 0:
             ctx = sim.get_position_context(tick)
             if ctx is not None:
