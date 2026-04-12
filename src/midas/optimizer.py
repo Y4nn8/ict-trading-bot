@@ -56,6 +56,9 @@ class OptimizerConfig:
         k_tp_range: k_tp multiplier search range (ATR mode).
         atr_column: Column name for ATR values.
         fixed_outer_params: Fixed extractor params (skip outer search).
+        slippage_min_pts: Min adverse slippage per market order (points).
+        slippage_max_pts: Max adverse slippage per market order (points).
+        slippage_seed: RNG seed for reproducible slippage sequences.
     """
 
     instrument: str = "XAUUSD"

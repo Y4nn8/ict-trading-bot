@@ -161,7 +161,7 @@ def cli() -> None:
     parser.add_argument("--slippage-min", type=float, default=0.1,
                         help="Min slippage in points (floor per market order)")
     parser.add_argument("--slippage-max", type=float, default=0.5,
-                        help="Max slippage in points (0=disabled)")
+                        help="Max slippage in points (set both to 0 to disable)")
     parser.add_argument("--slippage-seed", type=int, default=None,
                         help="RNG seed for reproducible slippage")
     parser.add_argument("--fix-outer-params", type=str, default=None,

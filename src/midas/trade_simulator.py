@@ -158,12 +158,14 @@ class TradeSimulator:
     def _sample_slippage(self) -> float:
         """Draw a random adverse slippage amount in price points.
 
-        Returns 0.0 when slippage simulation is disabled.
+        Returns 0.0 when slippage simulation is disabled (both <= 0).
+        Clamps min to [0, max] to prevent invalid ranges.
         """
-        mn = self._config.slippage_min_pts
         mx = self._config.slippage_max_pts
-        if mx <= 0.0 and mn <= 0.0:
+        if mx <= 0.0:
             return 0.0
+        mn = min(self._config.slippage_min_pts, mx)
+        mn = max(mn, 0.0)
         return self._rng.uniform(mn, mx)
 
     def on_signal(
