@@ -428,24 +428,13 @@ class TestDynamicSizing:
         sim = TradeSimulator(cfg)
         # price=1000, sl=5pts, vpp=1 → risk_per_lot = 5*1 = 5€/lot
         # min_risk_size = ceil(50 / 5 / 0.1) * 0.1 = 10.0 lots
-        # gamma ramp with low proba would give less, floor should win
+        # Low proba → gamma ramp gives tiny size, floor kicks in
         tick = _tick(0, bid=999.0, ask=1000.0)
-        sim.on_signal(tick, signal=1, proba=0.40)
-
-        assert sim.open_count == 1
-        pos = sim._positions[0]
-        # Without floor: confidence = (0.40 - 1/3) / (0.85 - 1/3) ≈ 0.129
-        # gamma=1 → raw = 0.129 * 100 / 0.1 = 129 → floor = 12.9 lots
-        # With floor: min_size = ceil(50 / 5 / 0.1) * 0.1 = 10.0
-        # gamma_size = 12.9 > floor 10.0 → no bump (gamma is bigger)
-        # Use a very low proba to trigger the floor
-        sim.reset()
         sim.on_signal(tick, signal=1, proba=0.35)
         assert sim.open_count == 1
         pos = sim._positions[0]
         # confidence = (0.35 - 1/3) / (0.85 - 1/3) ≈ 0.032
-        # gamma_size = floor(0.032 * 100 / 0.1) * 0.1 = 3.2 → 3.2 lots
-        # min_risk_size = 10.0 → floor kicks in
+        # gamma_size = None (below min lot) → floor rescues to 10.0
         assert pos.size == pytest.approx(10.0)
 
     def test_min_risk_floor_skips_when_margin_insufficient(self) -> None:
