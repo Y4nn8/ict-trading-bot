@@ -451,7 +451,7 @@ def _exit_dataset_core(
     timeout_seconds: float,
     entry_indices: np.ndarray,
     entry_directions: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
     """JIT-compiled exit dataset builder.
 
     For each entry, walks forward through subsequent candles. At each
@@ -470,7 +470,8 @@ def _exit_dataset_core(
 
     Returns:
         Tuple of (row_indices, directions, unrealized_pnls,
-        durations, exit_labels) — variable-length parallel arrays.
+        durations, exit_labels, n_resolved) — variable-length
+        parallel arrays plus the count of resolved entries.
     """
     n = len(times)
     n_entries = len(entry_indices)
@@ -490,6 +491,7 @@ def _exit_dataset_core(
     out_lbl = np.empty(max_rows, dtype=np.int32)
 
     pos = 0  # write position
+    n_resolved = 0
 
     for e in range(n_entries):
         idx = entry_indices[e]
@@ -541,9 +543,9 @@ def _exit_dataset_core(
                     break
 
         if exit_j == -1:
-            # Trade never resolved within the DataFrame — skip
             continue
 
+        n_resolved += 1
         # Second pass: generate exit rows for candles between entry+1 and exit
         dir_f = 1.0 if direction == 1 else -1.0
         for j in range(idx + 1, exit_j + 1):
@@ -566,7 +568,7 @@ def _exit_dataset_core(
             out_lbl[pos] = label
             pos += 1
 
-    return out_row[:pos], out_dir[:pos], out_pnl[:pos], out_dur[:pos], out_lbl[:pos]
+    return out_row[:pos], out_dir[:pos], out_pnl[:pos], out_dur[:pos], out_lbl[:pos], n_resolved
 
 
 def build_exit_dataset(
@@ -631,7 +633,7 @@ def build_exit_dataset(
             exit_labels=np.array([], dtype=np.int32),
         )
 
-    row_indices, directions, unrealized_pnls, durations, exit_labels = (
+    row_indices, directions, unrealized_pnls, durations, exit_labels, n_resolved = (
         _exit_dataset_core(
             times, bids, asks, sl_arr, tp_arr,
             timeout_seconds, entry_indices, entry_directions,
@@ -644,6 +646,6 @@ def build_exit_dataset(
         unrealized_pnls=unrealized_pnls,
         durations=durations,
         exit_labels=exit_labels,
-        n_entries=len(entry_indices),
+        n_entries=int(n_resolved),
         n_rows=len(row_indices),
     )
