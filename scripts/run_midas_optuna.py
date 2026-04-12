@@ -26,6 +26,7 @@ from src.midas.optimizer import (
     OptimizerConfig,
     default_output_prefix,
     load_fixed_outer_params,
+    load_outer_param_ranges,
     run_nested_optuna,
     write_trial_logs,
 )
@@ -59,6 +60,13 @@ async def main(args: argparse.Namespace) -> None:
             print(f"Fixed outer params from {args.fix_outer_params}: "
                   f"{len(fixed_outer)} params")
 
+        # Load outer param range overrides if provided
+        outer_ranges = None
+        if args.outer_ranges_from:
+            outer_ranges = load_outer_param_ranges(args.outer_ranges_from)
+            print(f"Outer ranges from {args.outer_ranges_from}: "
+                  f"{outer_ranges}")
+
         opt_config = OptimizerConfig(
             instrument=args.instrument,
             train_start=args.train_start,
@@ -74,6 +82,7 @@ async def main(args: argparse.Namespace) -> None:
             k_tp_range=tuple(args.k_tp_range),
             score_metric=args.score,
             fixed_outer_params=fixed_outer,
+            outer_param_ranges=outer_ranges,
             slippage_min_pts=args.slippage_min,
             slippage_max_pts=args.slippage_max,
             slippage_seed=args.slippage_seed,
@@ -148,6 +157,8 @@ def cli() -> None:
                         help="RNG seed for reproducible slippage")
     parser.add_argument("--fix-outer-params", type=str, default=None,
                         help="YAML file with fixed outer params (skip outer search)")
+    parser.add_argument("--outer-ranges-from", type=str, default=None,
+                        help="YAML file with restricted outer ranges {name: [lo, hi]}")
     parser.add_argument("--output", type=str, default=None,
                         help="Save best params to YAML file")
     args = parser.parse_args()

@@ -491,6 +491,7 @@ class WalkForwardOptunaConfig:
     gamma_range: tuple[float, float] = (0.5, 3.0)
     max_margin_proba_range: tuple[float, float] = (0.70, 0.95)
     fixed_outer_params: dict[str, Any] | None = None
+    outer_param_ranges: dict[str, tuple[float, float]] | None = None
     slippage_min_pts: float = 0.0
     slippage_max_pts: float = 0.0
     slippage_seed: int | None = None
@@ -561,6 +562,7 @@ async def run_midas_wf_optuna(
             gamma_range=config.gamma_range,
             max_margin_proba_range=config.max_margin_proba_range,
             fixed_outer_params=config.fixed_outer_params,
+            outer_param_ranges=config.outer_param_ranges,
             slippage_min_pts=config.slippage_min_pts,
             slippage_max_pts=config.slippage_max_pts,
             slippage_seed=config.slippage_seed,

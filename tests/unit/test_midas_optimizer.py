@@ -14,6 +14,7 @@ from src.midas.optimizer import (
     _suggest_inner_params,
     _suggest_outer_params,
     default_output_prefix,
+    load_outer_param_ranges,
     write_trial_logs,
 )
 from src.midas.replay_engine import build_default_registry
@@ -249,3 +250,71 @@ class TestOptimizationResultTrialRecords:
             outer_params={}, inner_params={}, trades=[],
         ))
         assert len(result.trial_records) == 1
+
+
+class TestOuterParamRanges:
+    """Tests for outer param range restriction."""
+
+    def test_range_override_applied(self) -> None:
+        registry = build_default_registry()
+        registry_params = registry.all_tunable_params()
+
+        # Restrict first param to a narrow range
+        param = registry_params[0]
+        lo, hi = int(param.low) + 1, int(param.low) + 3
+        narrow_range = (float(lo), float(hi))
+
+        study = optuna.create_study()
+        trial = study.ask()
+        params = _suggest_outer_params(
+            trial, registry_params,
+            range_overrides={param.name: narrow_range},
+        )
+
+        assert lo <= params[param.name] <= hi
+
+    def test_no_override_uses_default(self) -> None:
+        registry = build_default_registry()
+        registry_params = registry.all_tunable_params()
+
+        study = optuna.create_study()
+        trial = study.ask()
+        params = _suggest_outer_params(trial, registry_params)
+
+        for p in registry_params:
+            assert p.low <= params[p.name] <= p.high
+
+
+class TestLoadOuterParamRanges:
+    """Tests for YAML range loading."""
+
+    def test_loads_ranges(self, tmp_path: object) -> None:
+        from pathlib import Path
+
+        path = Path(str(tmp_path)) / "ranges.yml"
+        path.write_text("atr_period: [10, 16]\nliq_lookback: [100, 200]\n")
+
+        ranges = load_outer_param_ranges(str(path))
+        assert ranges == {
+            "atr_period": (10.0, 16.0),
+            "liq_lookback": (100.0, 200.0),
+        }
+
+    def test_invalid_yaml_raises(self, tmp_path: object) -> None:
+        from pathlib import Path
+
+        path = Path(str(tmp_path)) / "bad.yml"
+        path.write_text("- just a list\n")
+
+        with pytest.raises(ValueError, match="Expected a YAML mapping"):
+            load_outer_param_ranges(str(path))
+
+    def test_skips_non_range_entries(self, tmp_path: object) -> None:
+        from pathlib import Path
+
+        path = Path(str(tmp_path)) / "mixed.yml"
+        path.write_text("atr_period: [10, 16]\nsome_string: hello\n")
+
+        ranges = load_outer_param_ranges(str(path))
+        assert "atr_period" in ranges
+        assert "some_string" not in ranges

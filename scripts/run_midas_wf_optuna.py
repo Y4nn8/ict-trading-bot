@@ -22,7 +22,11 @@ from dotenv import load_dotenv
 from src.common.config import load_config
 from src.common.db import Database
 from src.common.logging import setup_logging
-from src.midas.optimizer import default_output_prefix, load_fixed_outer_params
+from src.midas.optimizer import (
+    default_output_prefix,
+    load_fixed_outer_params,
+    load_outer_param_ranges,
+)
 from src.midas.walk_forward import (
     WalkForwardOptunaConfig,
     run_midas_wf_optuna,
@@ -56,6 +60,13 @@ async def main(args: argparse.Namespace) -> None:
             print(f"Fixed outer params from {args.fix_outer_params}: "
                   f"{len(fixed_outer)} params")
 
+        # Load outer param range overrides if provided
+        outer_ranges = None
+        if args.outer_ranges_from:
+            outer_ranges = load_outer_param_ranges(args.outer_ranges_from)
+            print(f"Outer ranges from {args.outer_ranges_from}: "
+                  f"{outer_ranges}")
+
         wf_config = WalkForwardOptunaConfig(
             instrument=args.instrument,
             train_days=args.train_days,
@@ -70,6 +81,7 @@ async def main(args: argparse.Namespace) -> None:
             k_sl_range=tuple(args.k_sl_range),
             k_tp_range=tuple(args.k_tp_range),
             fixed_outer_params=fixed_outer,
+            outer_param_ranges=outer_ranges,
             slippage_min_pts=args.slippage_min,
             slippage_max_pts=args.slippage_max,
             slippage_seed=args.slippage_seed,
@@ -119,6 +131,8 @@ def cli() -> None:
     parser.add_argument("--slippage-seed", type=int, default=None)
     parser.add_argument("--fix-outer-params", type=str, default=None,
                         help="YAML file with fixed outer params")
+    parser.add_argument("--outer-ranges-from", type=str, default=None,
+                        help="YAML file with restricted outer ranges {name: [lo, hi]}")
     parser.add_argument("--output", type=str, default=None,
                         help="Output prefix (default: timestamped)")
     args = parser.parse_args()

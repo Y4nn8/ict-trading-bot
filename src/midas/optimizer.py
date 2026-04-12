@@ -73,6 +73,34 @@ def load_fixed_outer_params(path: str) -> dict[str, Any]:
     }
 
 
+def load_outer_param_ranges(path: str) -> dict[str, tuple[float, float]]:
+    """Load restricted outer param ranges from a YAML file.
+
+    Expected format::
+
+        atr_period: [10, 16]
+        liq_lookback: [100, 200]
+
+    Args:
+        path: Path to YAML file with ``{name: [low, high]}`` entries.
+
+    Returns:
+        Dict of ``{name: (low, high)}`` range overrides.
+    """
+    import yaml
+
+    with open(path) as f:
+        raw = yaml.safe_load(f)
+    if not isinstance(raw, dict):
+        msg = f"Expected a YAML mapping in {path}, got {type(raw).__name__}"
+        raise ValueError(msg)
+    ranges: dict[str, tuple[float, float]] = {}
+    for k, v in raw.items():
+        if isinstance(v, (list, tuple)) and len(v) == 2:
+            ranges[k] = (float(v[0]), float(v[1]))
+    return ranges
+
+
 @dataclass(frozen=True, slots=True)
 class OptimizerConfig:
     """Nested Optuna configuration.
@@ -117,6 +145,7 @@ class OptimizerConfig:
     max_margin_proba_range: tuple[float, float] = (0.70, 0.95)
     atr_column: str = ATR_COLUMN_DEFAULT
     fixed_outer_params: dict[str, Any] | None = None
+    outer_param_ranges: dict[str, tuple[float, float]] | None = None
     slippage_min_pts: float = 0.0
     slippage_max_pts: float = 0.0
     slippage_seed: int | None = None
@@ -161,14 +190,25 @@ class OptimizationResult:
 def _suggest_outer_params(
     trial: optuna.Trial,
     registry_params: list[Any],
+    range_overrides: dict[str, tuple[float, float]] | None = None,
 ) -> dict[str, Any]:
-    """Suggest extractor params only for the outer loop."""
+    """Suggest extractor params only for the outer loop.
+
+    Args:
+        trial: Optuna trial.
+        registry_params: Default param descriptors from the registry.
+        range_overrides: Optional ``{name: (low, high)}`` to restrict
+            search ranges (from ``--outer-ranges-from``).
+    """
     params: dict[str, Any] = {}
     for p in registry_params:
+        low, high = p.low, p.high
+        if range_overrides and p.name in range_overrides:
+            low, high = range_overrides[p.name]
         if p.param_type == "int":
-            params[p.name] = trial.suggest_int(p.name, int(p.low), int(p.high))
+            params[p.name] = trial.suggest_int(p.name, int(low), int(high))
         else:
-            params[p.name] = trial.suggest_float(p.name, p.low, p.high)
+            params[p.name] = trial.suggest_float(p.name, low, high)
     return params
 
 
@@ -355,6 +395,8 @@ async def run_nested_optuna(
     print("  Inner: 5 SL/TP + 2 sizing + 7 LightGBM"
           " + entry/exit_threshold = 16 params")
     print(f"  ATR column: {config.atr_column}")
+    if config.outer_param_ranges:
+        print(f"  Outer ranges restricted: {config.outer_param_ranges}")
     print(f"  Train: {config.train_start.date()} → {config.train_end.date()}")
     print(f"  Test:  {config.test_start.date()} → {config.test_end.date()}")
 
@@ -378,6 +420,7 @@ async def run_nested_optuna(
         else:
             extractor_params = _suggest_outer_params(
                 outer_trial, registry_params,
+                range_overrides=config.outer_param_ranges,
             )
 
         print(f"\n--- Outer trial {outer_i + 1}/{config.outer_trials}"
