@@ -152,7 +152,18 @@ CREATE TABLE improvement_log (
     git_tag_after TEXT
 );
 
+-- Tick data (raw bid/ask from Dukascopy or IG)
+CREATE TABLE IF NOT EXISTS ticks (
+    time TIMESTAMPTZ NOT NULL,
+    instrument TEXT NOT NULL,
+    bid FLOAT8 NOT NULL,
+    ask FLOAT8 NOT NULL
+);
+
+SELECT create_hypertable('ticks', 'time', if_not_exists => TRUE);
+
 -- Indexes
+CREATE INDEX IF NOT EXISTS idx_ticks_instrument_time ON ticks (instrument, time DESC);
 CREATE INDEX idx_candles_instrument_tf ON candles (instrument, timeframe, time DESC);
 CREATE INDEX idx_trades_instrument ON trades (instrument, opened_at DESC);
 CREATE INDEX idx_trades_backtest ON trades (backtest_run_id) WHERE is_backtest = TRUE;
