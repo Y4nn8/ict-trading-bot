@@ -788,7 +788,6 @@ def _check_range_saturation(
 
     # Build outer ranges from registry defaults
     outer_ranges: dict[str, tuple[float, float]] = {}
-    from src.midas.replay_engine import build_default_registry
     registry = build_default_registry(instrument=config.instrument)
     for p in registry.all_tunable_params():
         outer_ranges[p.name] = (float(p.low), float(p.high))
