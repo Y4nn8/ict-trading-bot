@@ -11,9 +11,12 @@ from src.midas.optimizer import (
     OptimizationResult,
     OptimizerConfig,
     TrialRecord,
+    _count_trading_days,
+    _print_result,
     _suggest_inner_params,
     _suggest_outer_params,
     default_output_prefix,
+    load_fixed_inner_params,
     load_outer_param_ranges,
     write_trial_logs,
 )
@@ -318,3 +321,213 @@ class TestLoadOuterParamRanges:
         ranges = load_outer_param_ranges(str(path))
         assert "atr_period" in ranges
         assert "some_string" not in ranges
+
+
+class TestCountTradingDays:
+    """Tests for trading day counting."""
+
+    def test_full_week(self) -> None:
+        # Mon 2026-04-06 to Mon 2026-04-13 = 5 weekdays
+        start = datetime(2026, 4, 6, tzinfo=UTC)
+        end = datetime(2026, 4, 13, tzinfo=UTC)
+        assert _count_trading_days(start, end) == 5
+
+    def test_weekend_only(self) -> None:
+        # Sat to Mon = 0 weekdays, but min 1
+        start = datetime(2026, 4, 11, tzinfo=UTC)  # Saturday
+        end = datetime(2026, 4, 13, tzinfo=UTC)  # Monday
+        assert _count_trading_days(start, end) == 1
+
+    def test_single_weekday(self) -> None:
+        start = datetime(2026, 4, 6, tzinfo=UTC)  # Monday
+        end = datetime(2026, 4, 7, tzinfo=UTC)  # Tuesday
+        assert _count_trading_days(start, end) == 1
+
+    def test_two_weeks(self) -> None:
+        start = datetime(2026, 4, 6, tzinfo=UTC)  # Monday
+        end = datetime(2026, 4, 20, tzinfo=UTC)  # Monday 2 weeks later
+        assert _count_trading_days(start, end) == 10
+
+
+class TestCompositeScoring:
+    """Tests for composite scoring with trade deficit penalty."""
+
+    def test_config_defaults(self) -> None:
+        config = OptimizerConfig()
+        assert config.min_daily_trades == 10
+        assert config.trade_deficit_penalty == 10.0
+
+    def test_deficit_penalty_math(self) -> None:
+        """Verify the penalty formula produces correct gradient."""
+        # 5 trading days, min 10/day = 50 min trades, penalty 10/trade
+        min_daily = 10
+        penalty = 10.0
+        trading_days = 5
+        min_trades = min_daily * trading_days  # 50
+
+        # 0 trades: PnL 0 - 50 * 10 = -500
+        deficit_0 = max(0, min_trades - 0) * penalty
+        assert deficit_0 == 500.0
+
+        # 30 trades: PnL 100 - 20 * 10 = -100
+        deficit_30 = max(0, min_trades - 30) * penalty
+        assert 100.0 - deficit_30 == -100.0
+
+        # 50 trades: PnL 100 - 0 = 100 (no penalty)
+        deficit_50 = max(0, min_trades - 50) * penalty
+        assert deficit_50 == 0.0
+
+        # 80 trades: no penalty either
+        deficit_80 = max(0, min_trades - 80) * penalty
+        assert deficit_80 == 0.0
+
+
+class TestFixedInnerParams:
+    """Tests for inner param fixing (search space reduction)."""
+
+    def test_fixed_params_not_suggested(self) -> None:
+        """Fixed params should use the fixed value, not Optuna."""
+        config = OptimizerConfig(
+            fixed_inner_params={
+                "gamma": 1.0,
+                "max_margin_proba": 0.80,
+                "min_risk_pct": 0.005,
+                "subsample": 0.8,
+                "colsample_bytree": 0.8,
+                "min_child_samples": 50,
+            },
+        )
+        study = optuna.create_study()
+        trial = study.ask()
+        params = _suggest_inner_params(trial, config)
+
+        # Fixed values should be exact
+        assert params["gamma"] == 1.0
+        assert params["max_margin_proba"] == 0.80
+        assert params["min_risk_pct"] == 0.005
+        assert params["subsample"] == 0.8
+        assert params["colsample_bytree"] == 0.8
+        assert params["min_child_samples"] == 50
+
+        # Non-fixed params should still be suggested (within range)
+        assert 0.5 <= params["k_sl"] <= 3.0
+        assert 0.25 <= params["entry_threshold"] <= 0.60
+
+    def test_no_fixed_params_suggests_all(self) -> None:
+        config = OptimizerConfig(fixed_inner_params=None)
+        study = optuna.create_study()
+        trial = study.ask()
+        params = _suggest_inner_params(trial, config)
+
+        # All 17 params should be present
+        assert len(params) == 17
+
+    def test_load_fixed_inner_params_filters_keys(
+        self, tmp_path: object,
+    ) -> None:
+        from pathlib import Path
+
+        path = Path(str(tmp_path)) / "inner.yml"
+        path.write_text(
+            "gamma: 1.0\n"
+            "subsample: 0.8\n"
+            "some_outer_param: 42\n"  # not in INNER_PARAM_KEYS
+        )
+        loaded = load_fixed_inner_params(str(path))
+        assert "gamma" in loaded
+        assert "subsample" in loaded
+        assert "some_outer_param" not in loaded
+
+    def test_load_fixed_inner_params_invalid_raises(
+        self, tmp_path: object,
+    ) -> None:
+        from pathlib import Path
+
+        path = Path(str(tmp_path)) / "bad.yml"
+        path.write_text("- just a list\n")
+        with pytest.raises(ValueError, match="Expected a YAML mapping"):
+            load_fixed_inner_params(str(path))
+
+    def test_load_fixed_inner_params_all_sizing(
+        self, tmp_path: object,
+    ) -> None:
+        """Test the standard sizing+regularization reduction (17→11)."""
+        from pathlib import Path
+
+        path = Path(str(tmp_path)) / "sizing.yml"
+        path.write_text(
+            "gamma: 1.0\n"
+            "max_margin_proba: 0.80\n"
+            "min_risk_pct: 0.005\n"
+            "subsample: 0.8\n"
+            "colsample_bytree: 0.8\n"
+            "min_child_samples: 50\n"
+        )
+        loaded = load_fixed_inner_params(str(path))
+        assert len(loaded) == 6
+
+        # Verify these reduce inner params from 17 to 11
+        config = OptimizerConfig(fixed_inner_params=loaded)
+        study = optuna.create_study()
+        trial = study.ask()
+        params = _suggest_inner_params(trial, config)
+        assert len(params) == 17  # all 17 returned, 6 are fixed values
+        assert params["gamma"] == 1.0
+        assert params["min_child_samples"] == 50
+
+
+class TestValidation:
+    """Tests for validation window configuration."""
+
+    def test_config_defaults(self) -> None:
+        config = OptimizerConfig()
+        assert config.validation_start is None
+        assert config.validation_end is None
+
+    def test_val_fields_default(self) -> None:
+        result = OptimizationResult()
+        assert result.val_score is None
+        assert result.val_n_trades == 0
+        assert result.val_pnl == 0.0
+
+
+class TestPrintResult:
+    """Tests for result printing with and without validation."""
+
+    def test_print_without_validation(self, capsys: object) -> None:
+        result = OptimizationResult(
+            best_score=42.5,
+            best_n_trades=20,
+            best_win_rate=0.6,
+            best_pnl=150.0,
+            total_outer_trials=10,
+            total_inner_trials=300,
+            best_outer_params={"atr_period": 14},
+            best_inner_params={"k_sl": 1.5, "entry_threshold": 0.4},
+        )
+        _print_result(result)
+        captured = capsys.readouterr()  # type: ignore[union-attr]
+        assert "+42.50" in captured.out
+        assert "Validation" not in captured.out
+        assert "atr_period" in captured.out
+
+    def test_print_with_validation(self, capsys: object) -> None:
+        result = OptimizationResult(
+            best_score=42.5,
+            best_n_trades=20,
+            best_win_rate=0.6,
+            best_pnl=150.0,
+            total_outer_trials=10,
+            total_inner_trials=300,
+            best_outer_params={},
+            best_inner_params={"k_sl": 1.5},
+            val_score=35.0,
+            val_n_trades=18,
+            val_win_rate=0.55,
+            val_pnl=120.0,
+        )
+        _print_result(result)
+        captured = capsys.readouterr()  # type: ignore[union-attr]
+        assert "Validation" in captured.out
+        assert "+35.00" in captured.out
+        assert "+120.00" in captured.out

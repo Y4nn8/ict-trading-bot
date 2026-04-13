@@ -3,13 +3,14 @@
 Outer loop: tunes feature extractor params (expensive, re-replays ticks).
 Inner loop: tunes SL/TP + LightGBM hyperparams (cheap, relabels in-memory).
 
-Score = walk-forward OOS metric (composite, pnl, win_rate, pnl_per_trade).
+Score = walk-forward OOS metric (pnl with trade deficit penalty by default).
 """
 
 from __future__ import annotations
 
 import contextlib
 import csv
+import dataclasses
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -73,6 +74,27 @@ def load_fixed_outer_params(path: str) -> dict[str, Any]:
     }
 
 
+def load_fixed_inner_params(path: str) -> dict[str, Any]:
+    """Load fixed inner params from a YAML file.
+
+    Only keys that are in ``INNER_PARAM_KEYS`` are kept.
+
+    Args:
+        path: Path to YAML file with ``{name: value}`` entries.
+
+    Returns:
+        Dict of inner params to fix during optimization.
+    """
+    import yaml
+
+    with open(path) as f:
+        raw = yaml.safe_load(f)
+    if not isinstance(raw, dict):
+        msg = f"Expected a YAML mapping in {path}, got {type(raw).__name__}"
+        raise ValueError(msg)
+    return {k: v for k, v in raw.items() if k in INNER_PARAM_KEYS}
+
+
 def load_outer_param_ranges(path: str) -> dict[str, tuple[float, float]]:
     """Load restricted outer param ranges from a YAML file.
 
@@ -101,6 +123,30 @@ def load_outer_param_ranges(path: str) -> dict[str, tuple[float, float]]:
     return ranges
 
 
+def _count_trading_days(start: datetime, end: datetime) -> int:
+    """Count weekdays (Mon-Fri) between start (inclusive) and end (exclusive).
+
+    Uses O(1) formula instead of day-by-day iteration.
+
+    Args:
+        start: Window start datetime.
+        end: Window end datetime.
+
+    Returns:
+        Number of trading days (at least 1).
+    """
+    total_days = (end.date() - start.date()).days
+    if total_days <= 0:
+        return 1
+    full_weeks, remainder = divmod(total_days, 7)
+    days = full_weeks * 5
+    start_weekday = start.weekday()
+    for offset in range(remainder):
+        if (start_weekday + offset) % 7 < 5:
+            days += 1
+    return max(days, 1)
+
+
 @dataclass(frozen=True, slots=True)
 class OptimizerConfig:
     """Nested Optuna configuration.
@@ -115,7 +161,12 @@ class OptimizerConfig:
         inner_trials: Number of inner loop trials (SL/TP + LightGBM).
         sample_on_candle: Extract features on candle close (default).
         sample_rate: Legacy tick-based sampling.
-        score_metric: Metric to optimize.
+        score_metric: Metric to optimize (composite uses PnL + trade deficit).
+        min_daily_trades: Minimum expected trades per trading day.
+        trade_deficit_penalty: Penalty per missing trade below minimum.
+        validation_start: Validation window start (None = no validation).
+        validation_end: Validation window end (None = no validation).
+        fixed_inner_params: Fixed inner params (skip suggestion for these).
         sl_range: SL search range in points (fixed mode fallback).
         tp_range: TP search range in points (fixed mode fallback).
         k_sl_range: k_sl multiplier search range (ATR mode).
@@ -137,6 +188,11 @@ class OptimizerConfig:
     sample_on_candle: bool = True
     sample_rate: int = 1
     score_metric: str = "composite"
+    min_daily_trades: int = 10
+    trade_deficit_penalty: float = 10.0
+    validation_start: datetime | None = None
+    validation_end: datetime | None = None
+    fixed_inner_params: dict[str, Any] | None = None
     sl_range: tuple[float, float] = (1.5, 8.0)
     tp_range: tuple[float, float] = (1.5, 8.0)
     k_sl_range: tuple[float, float] = (0.5, 3.0)
@@ -169,6 +225,10 @@ class TrialRecord:
     outer_params: dict[str, Any]
     inner_params: dict[str, Any]
     trades: list[MidasTrade]
+    val_score: float | None = None
+    val_n_trades: int = 0
+    val_win_rate: float = 0.0
+    val_pnl: float = 0.0
 
 
 @dataclass
@@ -186,6 +246,10 @@ class OptimizationResult:
     best_pnl: float = 0.0
     best_trades: list[MidasTrade] = field(default_factory=list)
     trial_records: list[TrialRecord] = field(default_factory=list)
+    val_score: float | None = None
+    val_n_trades: int = 0
+    val_win_rate: float = 0.0
+    val_pnl: float = 0.0
 
 
 def _suggest_outer_params(
@@ -217,57 +281,59 @@ def _suggest_inner_params(
     trial: optuna.Trial,
     config: OptimizerConfig,
 ) -> dict[str, Any]:
-    """Suggest k_sl/k_tp + sizing + LightGBM + entry/exit thresholds."""
+    """Suggest k_sl/k_tp + sizing + LightGBM + entry/exit thresholds.
+
+    Params listed in ``config.fixed_inner_params`` are not suggested —
+    the fixed value is used instead, reducing the search space.
+    """
+    fixed = config.fixed_inner_params or {}
+
+    def _float(name: str, low: float, high: float, **kw: Any) -> float:
+        if name in fixed:
+            return float(fixed[name])
+        return trial.suggest_float(name, low, high, **kw)
+
+    def _int(name: str, low: int, high: int) -> int:
+        if name in fixed:
+            return int(fixed[name])
+        return trial.suggest_int(name, low, high)
+
     return {
         # ATR-based SL/TP multipliers (relabeled per inner trial)
-        "k_sl": trial.suggest_float(
-            "k_sl", config.k_sl_range[0], config.k_sl_range[1],
-        ),
-        "k_tp": trial.suggest_float(
-            "k_tp", config.k_tp_range[0], config.k_tp_range[1],
-        ),
-        "sl_fallback": trial.suggest_float(
+        "k_sl": _float("k_sl", config.k_sl_range[0], config.k_sl_range[1]),
+        "k_tp": _float("k_tp", config.k_tp_range[0], config.k_tp_range[1]),
+        "sl_fallback": _float(
             "sl_fallback", config.sl_range[0], config.sl_range[1],
         ),
-        "tp_fallback": trial.suggest_float(
+        "tp_fallback": _float(
             "tp_fallback", config.tp_range[0], config.tp_range[1],
         ),
-        "label_timeout": trial.suggest_float(
-            "label_timeout", 60.0, 600.0,
-        ),
+        "label_timeout": _float("label_timeout", 60.0, 600.0),
         # Dynamic sizing
-        "gamma": trial.suggest_float(
+        "gamma": _float(
             "gamma", config.gamma_range[0], config.gamma_range[1],
         ),
-        "max_margin_proba": trial.suggest_float(
+        "max_margin_proba": _float(
             "max_margin_proba",
             config.max_margin_proba_range[0],
             config.max_margin_proba_range[1],
         ),
-        "min_risk_pct": trial.suggest_float(
+        "min_risk_pct": _float(
             "min_risk_pct",
             config.min_risk_pct_range[0],
             config.min_risk_pct_range[1],
         ),
         # LightGBM hyperparams (shared entry + exit)
-        "n_estimators": trial.suggest_int("n_estimators", 50, 1000),
-        "learning_rate": trial.suggest_float(
-            "learning_rate", 0.01, 0.3, log=True,
-        ),
-        "max_depth": trial.suggest_int("max_depth", 3, 10),
-        "num_leaves": trial.suggest_int("num_leaves", 15, 127),
-        "min_child_samples": trial.suggest_int("min_child_samples", 10, 300),
-        "subsample": trial.suggest_float("subsample", 0.5, 1.0),
-        "colsample_bytree": trial.suggest_float(
-            "colsample_bytree", 0.5, 1.0,
-        ),
-        "entry_threshold": trial.suggest_float(
-            "entry_threshold", 0.25, 0.60,
-        ),
+        "n_estimators": _int("n_estimators", 50, 1000),
+        "learning_rate": _float("learning_rate", 0.01, 0.3, log=True),
+        "max_depth": _int("max_depth", 3, 10),
+        "num_leaves": _int("num_leaves", 15, 127),
+        "min_child_samples": _int("min_child_samples", 10, 300),
+        "subsample": _float("subsample", 0.5, 1.0),
+        "colsample_bytree": _float("colsample_bytree", 0.5, 1.0),
+        "entry_threshold": _float("entry_threshold", 0.25, 0.60),
         # Exit model threshold
-        "exit_threshold": trial.suggest_float(
-            "exit_threshold", 0.30, 0.80,
-        ),
+        "exit_threshold": _float("exit_threshold", 0.30, 0.80),
     }
 
 
@@ -350,23 +416,29 @@ async def _evaluate_oos_async(
 
     trades = simulator.closed_trades
     n_trades = len(trades)
+
     if n_trades == 0:
-        return -1000.0, 0, 0.0, 0.0, []
+        total_pnl = 0.0
+        win_rate = 0.0
+    else:
+        total_pnl = sum(t.pnl for t in trades)
+        wins = sum(1 for t in trades if t.is_win)
+        win_rate = wins / n_trades
 
-    total_pnl = sum(t.pnl for t in trades)
-    wins = sum(1 for t in trades if t.is_win)
-    win_rate = wins / n_trades
+    # Trade deficit penalty (applies to composite and pnl metrics)
+    trading_days = _count_trading_days(config.test_start, config.test_end)
+    min_trades = config.min_daily_trades * trading_days
+    deficit_penalty = (
+        max(0, min_trades - n_trades) * config.trade_deficit_penalty
+    )
 
-    if config.score_metric == "composite":
-        if n_trades < 10:
-            return -1000.0, n_trades, win_rate, total_pnl, trades
-        score = total_pnl * (win_rate**0.5) * (n_trades**0.5)
-    elif config.score_metric == "win_rate":
+    if config.score_metric == "win_rate":
         score = win_rate
     elif config.score_metric == "pnl_per_trade":
-        score = total_pnl / n_trades
+        score = total_pnl / n_trades if n_trades > 0 else -1000.0
     else:
-        score = total_pnl
+        # "composite" and "pnl" both use PnL - deficit penalty
+        score = total_pnl - deficit_penalty
 
     return score, n_trades, win_rate, total_pnl, trades
 
@@ -395,16 +467,30 @@ async def run_nested_optuna(
     sample_registry = registry_factory()
     registry_params = sample_registry.all_tunable_params()
 
+    has_validation = (
+        config.validation_start is not None and config.validation_end is not None
+    )
+
+    n_fixed_inner = len(config.fixed_inner_params) if config.fixed_inner_params else 0
+    n_inner_params = 17 - n_fixed_inner
+
     print(f"\nNested Optuna: {config.outer_trials} outer x "
           f"{config.inner_trials} inner trials")
     print(f"  Outer: {len(registry_params)} extractor params")
-    print("  Inner: 5 SL/TP + 3 sizing + 7 LightGBM"
-          " + entry/exit_threshold = 17 params")
+    print(f"  Inner: {n_inner_params} params"
+          f"{f' ({n_fixed_inner} fixed)' if n_fixed_inner else ''}")
     print(f"  ATR column: {config.atr_column}")
     if config.outer_param_ranges:
         print(f"  Outer ranges restricted: {config.outer_param_ranges}")
-    print(f"  Train: {config.train_start.date()} → {config.train_end.date()}")
-    print(f"  Test:  {config.test_start.date()} → {config.test_end.date()}")
+    if config.fixed_inner_params:
+        print(f"  Fixed inner: {config.fixed_inner_params}")
+    print(f"  Train:      {config.train_start.date()}"
+          f" → {config.train_end.date()}")
+    print(f"  Selection:  {config.test_start.date()}"
+          f" → {config.test_end.date()}")
+    if has_validation:
+        print(f"  Validation: {config.validation_start.date()}"  # type: ignore[union-attr]
+              f" → {config.validation_end.date()}")  # type: ignore[union-attr]
 
     best_score = -float("inf")
     best_outer: dict[str, Any] = {}
@@ -598,6 +684,48 @@ async def run_nested_optuna(
         outer_study.tell(outer_trial, best_inner_score)
         result.total_inner_trials += config.inner_trials
 
+        # Validation pass for this outer trial
+        v_sc: float | None = None
+        v_nt = 0
+        v_wr_val = 0.0
+        v_pnl_val = 0.0
+        if (has_validation
+                and best_inner_trainer is not None
+                and best_inner_params_local):
+            assert config.validation_start is not None
+            assert config.validation_end is not None
+            vt_config = dataclasses.replace(
+                config,
+                test_start=config.validation_start,
+                test_end=config.validation_end,
+                validation_start=None,
+                validation_end=None,
+            )
+            vt_sim = SimConfig(
+                sl_points=best_inner_params_local.get("sl_fallback", 3.0),
+                tp_points=best_inner_params_local.get("tp_fallback", 3.0),
+                k_sl=best_inner_params_local.get("k_sl", 1.0),
+                k_tp=best_inner_params_local.get("k_tp", 1.0),
+                max_spread=2.0,
+                gamma=best_inner_params_local.get("gamma", 1.0),
+                max_margin_proba=best_inner_params_local.get(
+                    "max_margin_proba", 0.80,
+                ),
+                sizing_threshold=best_inner_params_local.get(
+                    "entry_threshold", 0.5,
+                ),
+                min_risk_pct=best_inner_params_local.get(
+                    "min_risk_pct", 0.005,
+                ),
+                slippage_min_pts=config.slippage_min_pts,
+                slippage_max_pts=config.slippage_max_pts,
+                slippage_seed=config.slippage_seed,
+            )
+            v_sc, v_nt, v_wr_val, v_pnl_val, _ = await _evaluate_oos_async(
+                best_inner_trainer, vt_sim, db, vt_config,
+                registry_factory, extractor_params,
+            )
+
         # Record best-inner result for this outer trial
         result.trial_records.append(TrialRecord(
             window_idx=window_idx,
@@ -609,15 +737,22 @@ async def run_nested_optuna(
             outer_params=dict(extractor_params),
             inner_params=dict(best_inner_params_local),
             trades=list(best_inner_trades_list),
+            val_score=v_sc,
+            val_n_trades=v_nt,
+            val_win_rate=v_wr_val,
+            val_pnl=v_pnl_val,
         ))
 
+        val_str = ""
+        if v_sc is not None:
+            val_str = f", val_PnL={v_pnl_val:+.1f}"
         print(f"  Best inner: score={best_inner_score:+.2f}, "
               f"k_sl={best_inner_params_local.get('k_sl', 0):.2f}, "
               f"k_tp={best_inner_params_local.get('k_tp', 0):.2f}, "
               f"gamma={best_inner_params_local.get('gamma', 0):.2f}, "
               f"trades={best_inner_trades}, "
               f"WR={best_inner_wr*100:.0f}%, "
-              f"PnL={best_inner_pnl:+.1f}, "
+              f"PnL={best_inner_pnl:+.1f}{val_str}, "
               f"threshold={best_inner_params_local.get('entry_threshold', '?')}")
 
         if best_inner_score > best_score:
@@ -637,6 +772,14 @@ async def run_nested_optuna(
     result.best_n_trades = best_trades
     result.best_win_rate = best_wr
     result.best_pnl = best_pnl
+
+    # Pick validation results from the best trial record
+    if has_validation and result.trial_records:
+        best_rec = max(result.trial_records, key=lambda r: r.score)
+        result.val_score = best_rec.val_score
+        result.val_n_trades = best_rec.val_n_trades
+        result.val_win_rate = best_rec.val_win_rate
+        result.val_pnl = best_rec.val_pnl
 
     _print_result(result)
     return result
@@ -680,8 +823,11 @@ def write_trial_logs(
     inner_sorted = sorted(inner_keys)
 
     # --- Trials CSV ---
+    has_val = any(r.val_score is not None for r in records)
     trial_fields = (
         ["window_idx", "outer_idx", "score", "n_trades", "win_rate", "pnl"]
+        + (["val_score", "val_n_trades", "val_win_rate", "val_pnl"]
+           if has_val else [])
         + [f"outer__{k}" for k in outer_sorted]
         + [f"inner__{k}" for k in inner_sorted]
     )
@@ -697,6 +843,13 @@ def write_trial_logs(
                 "win_rate": round(r.win_rate, 4),
                 "pnl": round(r.pnl, 2),
             }
+            if has_val:
+                row["val_score"] = (
+                    round(r.val_score, 2) if r.val_score is not None else ""
+                )
+                row["val_n_trades"] = r.val_n_trades
+                row["val_win_rate"] = round(r.val_win_rate, 4)
+                row["val_pnl"] = round(r.val_pnl, 2)
             for k in outer_sorted:
                 row[f"outer__{k}"] = r.outer_params.get(k, "")
             for k in inner_sorted:
@@ -749,6 +902,11 @@ def _print_result(result: OptimizationResult) -> None:
     print(f"  Trades: {result.best_n_trades}, "
           f"WR: {result.best_win_rate*100:.1f}%, "
           f"PnL: {result.best_pnl:+.2f}")
+    if result.val_score is not None:
+        print(f"  Validation: score={result.val_score:+.2f}, "
+              f"trades={result.val_n_trades}, "
+              f"WR={result.val_win_rate*100:.1f}%, "
+              f"PnL={result.val_pnl:+.2f}")
     print(f"  Outer trials: {result.total_outer_trials}, "
           f"Inner trials: {result.total_inner_trials}")
     print("\n  Best outer params (extractor):")

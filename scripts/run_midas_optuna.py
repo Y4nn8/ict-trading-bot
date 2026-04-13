@@ -25,6 +25,7 @@ from src.common.logging import setup_logging
 from src.midas.optimizer import (
     OptimizerConfig,
     default_output_prefix,
+    load_fixed_inner_params,
     load_fixed_outer_params,
     load_outer_param_ranges,
     run_nested_optuna,
@@ -67,6 +68,13 @@ async def main(args: argparse.Namespace) -> None:
             print(f"Outer ranges from {args.outer_ranges_from}: "
                   f"{outer_ranges}")
 
+        # Load fixed inner params if provided
+        fixed_inner = None
+        if args.fix_inner_params:
+            fixed_inner = load_fixed_inner_params(args.fix_inner_params)
+            print(f"Fixed inner params from {args.fix_inner_params}: "
+                  f"{fixed_inner}")
+
         opt_config = OptimizerConfig(
             instrument=args.instrument,
             train_start=args.train_start,
@@ -81,6 +89,11 @@ async def main(args: argparse.Namespace) -> None:
             k_sl_range=tuple(args.k_sl_range),
             k_tp_range=tuple(args.k_tp_range),
             score_metric=args.score,
+            min_daily_trades=args.min_daily_trades,
+            trade_deficit_penalty=args.trade_deficit_penalty,
+            validation_start=args.validation_start,
+            validation_end=args.validation_end,
+            fixed_inner_params=fixed_inner,
             fixed_outer_params=fixed_outer,
             outer_param_ranges=outer_ranges,
             slippage_min_pts=args.slippage_min,
@@ -141,6 +154,16 @@ def cli() -> None:
                         help="Sample every tick instead of on candle close")
     parser.add_argument("--score", default="composite",
                         choices=["composite", "pnl", "win_rate", "pnl_per_trade"])
+    parser.add_argument("--min-daily-trades", type=int, default=10,
+                        help="Min trades/day for trade deficit penalty (default: 10)")
+    parser.add_argument("--trade-deficit-penalty", type=float, default=10.0,
+                        help="Penalty per missing trade below minimum (default: 10.0)")
+    parser.add_argument("--validation-start", type=str, default=None,
+                        help="Validation window start YYYY-MM-DD")
+    parser.add_argument("--validation-end", type=str, default=None,
+                        help="Validation window end YYYY-MM-DD")
+    parser.add_argument("--fix-inner-params", type=str, default=None,
+                        help="YAML file with fixed inner params to reduce search space")
     parser.add_argument("--sl-range", type=float, nargs=2, default=[1.5, 8.0],
                         metavar=("MIN", "MAX"), help="SL fallback search range (pts)")
     parser.add_argument("--tp-range", type=float, nargs=2, default=[1.5, 8.0],
@@ -169,6 +192,25 @@ def cli() -> None:
             datetime.strptime(getattr(args, attr), "%Y-%m-%d").replace(
                 tzinfo=UTC,
             ),
+        )
+
+    for attr in ("validation_start", "validation_end"):
+        val = getattr(args, attr)
+        if val is not None:
+            setattr(
+                args, attr,
+                datetime.strptime(val, "%Y-%m-%d").replace(tzinfo=UTC),
+            )
+
+    has_val_start = args.validation_start is not None
+    has_val_end = args.validation_end is not None
+    if has_val_start != has_val_end:
+        parser.error(
+            "--validation-start and --validation-end must be provided together",
+        )
+    if has_val_start and args.validation_start >= args.validation_end:
+        parser.error(
+            "--validation-start must be earlier than --validation-end",
         )
 
     asyncio.run(main(args))

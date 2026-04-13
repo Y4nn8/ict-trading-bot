@@ -109,24 +109,58 @@ def _midas_to_common_trade(
     )
 
 
+def _snap_to_monday(dt: datetime) -> datetime:
+    """Snap a datetime forward to the next Monday (or same day if Monday)."""
+    days_ahead = (7 - dt.weekday()) % 7  # 0 if already Monday
+    return dt + timedelta(days=days_ahead)
+
+
 def generate_windows(
     data_start: datetime,
     data_end: datetime,
     train_days: int,
     test_days: int,
     step_days: int,
-) -> list[tuple[datetime, datetime, datetime, datetime]]:
-    """Generate (train_start, train_end, test_start, test_end) windows."""
-    windows = []
+    *,
+    align_monday: bool = False,
+    validation_days: int = 0,
+) -> list[tuple[datetime, datetime, datetime, datetime, datetime | None, datetime | None]]:
+    """Generate walk-forward windows.
+
+    Returns:
+        List of (train_start, train_end, test_start, test_end,
+        val_start, val_end) tuples. val_start/val_end are None
+        when ``validation_days`` is 0.
+
+    Args:
+        data_start: Start of available data.
+        data_end: End of available data.
+        train_days: Training window in days.
+        test_days: Test (selection) window in days.
+        step_days: Step between windows in days.
+        align_monday: Snap the first window to start on Monday.
+        validation_days: Validation window in days (0 = no validation).
+    """
+    windows: list[
+        tuple[datetime, datetime, datetime, datetime, datetime | None, datetime | None]
+    ] = []
     train_delta = timedelta(days=train_days)
     test_delta = timedelta(days=test_days)
+    val_delta = timedelta(days=validation_days)
     step_delta = timedelta(days=step_days)
 
-    current = data_start
-    while current + train_delta + test_delta <= data_end:
+    current = _snap_to_monday(data_start) if align_monday else data_start
+    total_delta = train_delta + test_delta + val_delta
+    while current + total_delta <= data_end:
         train_end = current + train_delta
         test_end = train_end + test_delta
-        windows.append((current, train_end, train_end, test_end))
+        if validation_days > 0:
+            val_start = test_end
+            val_end = test_end + val_delta
+        else:
+            val_start = None
+            val_end = None
+        windows.append((current, train_end, train_end, test_end, val_start, val_end))
         current += step_delta
 
     return windows
@@ -174,7 +208,7 @@ async def run_midas_walk_forward(
 
     results: list[WindowResult] = []
 
-    for i, (train_start, train_end, test_start, test_end) in enumerate(windows):
+    for i, (train_start, train_end, test_start, test_end, _, _) in enumerate(windows):
         print(f"\n{'='*60}")
         print(f"Window {i+1}/{len(windows)}: "
               f"train {train_start.date()}→{train_end.date()}, "
@@ -463,7 +497,12 @@ class WalkForwardOptunaConfig:
         outer_trials: Number of outer Optuna trials per window.
         inner_trials: Number of inner Optuna trials per window.
         sample_on_candle: Extract features on candle close.
-        score_metric: Metric to optimize.
+        score_metric: Metric to optimize (composite uses PnL + trade deficit).
+        min_daily_trades: Minimum expected trades per trading day.
+        trade_deficit_penalty: Penalty per missing trade below minimum.
+        validation_days: Validation window in days (0 = no validation).
+        fixed_inner_params: Fixed inner params (skip suggestion for these).
+        align_monday: Snap window boundaries to Monday.
         sl_range: SL search range in points.
         tp_range: TP search range in points.
         k_sl_range: k_sl multiplier search range.
@@ -484,6 +523,11 @@ class WalkForwardOptunaConfig:
     inner_trials: int = 20
     sample_on_candle: bool = True
     score_metric: str = "composite"
+    min_daily_trades: int = 10
+    trade_deficit_penalty: float = 10.0
+    validation_days: int = 0
+    fixed_inner_params: dict[str, Any] | None = None
+    align_monday: bool = False
     sl_range: tuple[float, float] = (1.5, 8.0)
     tp_range: tuple[float, float] = (1.5, 8.0)
     k_sl_range: tuple[float, float] = (0.5, 3.0)
@@ -523,6 +567,8 @@ async def run_midas_wf_optuna(
     windows = generate_windows(
         data_start, data_end,
         config.train_days, config.test_days, config.step_days,
+        align_monday=config.align_monday,
+        validation_days=config.validation_days,
     )
 
     if not windows:
@@ -530,19 +576,25 @@ async def run_midas_wf_optuna(
         return []
 
     print(f"\nWalk-Forward Optuna: {len(windows)} windows")
-    print(f"  Train: {config.train_days}d, Test: {config.test_days}d, "
-          f"Step: {config.step_days}d")
+    desc = f"  Train: {config.train_days}d, Selection: {config.test_days}d"
+    if config.validation_days > 0:
+        desc += f", Validation: {config.validation_days}d"
+    desc += f", Step: {config.step_days}d"
+    print(desc)
     print(f"  Per window: {config.outer_trials} outer x "
           f"{config.inner_trials} inner trials")
 
     results: list[OptimizationResult] = []
     all_records: list[TrialRecord] = []
 
-    for i, (train_start, train_end, test_start, test_end) in enumerate(windows):
+    for i, (train_start, train_end, test_start, test_end, val_start, val_end) in enumerate(windows):
         print(f"\n{'#'*60}")
-        print(f"WINDOW {i+1}/{len(windows)}: "
-              f"train {train_start.date()}→{train_end.date()}, "
-              f"test {test_start.date()}→{test_end.date()}")
+        window_desc = (f"WINDOW {i+1}/{len(windows)}: "
+                       f"train {train_start.date()}→{train_end.date()}, "
+                       f"sel {test_start.date()}→{test_end.date()}")
+        if val_start is not None:
+            window_desc += f", val {val_start.date()}→{val_end.date()}"  # type: ignore[union-attr]
+        print(window_desc)
         print(f"{'#'*60}")
 
         opt_config = OptimizerConfig(
@@ -555,6 +607,11 @@ async def run_midas_wf_optuna(
             inner_trials=config.inner_trials,
             sample_on_candle=config.sample_on_candle,
             score_metric=config.score_metric,
+            min_daily_trades=config.min_daily_trades,
+            trade_deficit_penalty=config.trade_deficit_penalty,
+            validation_start=val_start,
+            validation_end=val_end,
+            fixed_inner_params=config.fixed_inner_params,
             sl_range=config.sl_range,
             tp_range=config.tp_range,
             k_sl_range=config.k_sl_range,
@@ -582,39 +639,55 @@ async def run_midas_wf_optuna(
     if len(results) >= 2:
         _print_param_stability(results)
 
+    _check_range_saturation(results, config)
+
     return results
 
 
 def _print_wf_optuna_summary(
     results: list[OptimizationResult],
-    windows: list[tuple[datetime, datetime, datetime, datetime]],
+    windows: list[tuple[datetime, datetime, datetime, datetime, datetime | None, datetime | None]],
 ) -> None:
     """Print per-window OOS summary table."""
+    has_val = any(r.val_score is not None for r in results)
+
     print(f"\n{'='*70}")
     print("WALK-FORWARD OPTUNA SUMMARY")
     print(f"{'='*70}")
-    print(f"{'Window':<8} {'Test dates':<25} {'Score':>8} "
-          f"{'Trades':>7} {'WR':>6} {'PnL':>10}")
-    print("-" * 70)
+    header = (f"{'Window':<8} {'Test dates':<25} {'Score':>8} "
+              f"{'Trades':>7} {'WR':>6} {'PnL':>10}")
+    if has_val:
+        header += f" {'ValPnL':>10}"
+    print(header)
+    print("-" * (80 if has_val else 70))
 
     total_trades = 0
     total_pnl = 0.0
+    total_val_pnl = 0.0
     profitable = 0
 
     for i, (result, win) in enumerate(zip(results, windows, strict=True)):
         test_str = f"{win[2].date()} → {win[3].date()}"
-        print(f"W{i+1:<6} {test_str:<25} {result.best_score:>+8.1f} "
-              f"{result.best_n_trades:>7} "
-              f"{result.best_win_rate*100:>5.1f}% "
-              f"{result.best_pnl:>+10.2f}")
+        line = (f"W{i+1:<6} {test_str:<25} {result.best_score:>+8.1f} "
+                f"{result.best_n_trades:>7} "
+                f"{result.best_win_rate*100:>5.1f}% "
+                f"{result.best_pnl:>+10.2f}")
+        if has_val:
+            val_pnl = result.val_pnl if result.val_score is not None else 0.0
+            line += f" {val_pnl:>+10.2f}"
+            total_val_pnl += val_pnl
+        print(line)
         total_trades += result.best_n_trades
         total_pnl += result.best_pnl
         if result.best_pnl > 0:
             profitable += 1
 
-    print("-" * 70)
-    print(f"{'Total':<34} {'':<8} {total_trades:>7} "
-          f"{'':<6} {total_pnl:>+10.2f}")
+    print("-" * (80 if has_val else 70))
+    totals = (f"{'Total':<34} {'':<8} {total_trades:>7} "
+              f"{'':<6} {total_pnl:>+10.2f}")
+    if has_val:
+        totals += f" {total_val_pnl:>+10.2f}"
+    print(totals)
     print(f"  Profitable windows: {profitable}/{len(results)}")
 
 
@@ -681,3 +754,86 @@ def _print_param_stability(results: list[OptimizationResult]) -> None:
     if total > 0:
         print(f"\nConverged: {converged}/{total} params "
               f"({converged/total*100:.0f}%) with CV < 15%")
+
+
+def _check_range_saturation(
+    results: list[OptimizationResult],
+    config: WalkForwardOptunaConfig,
+) -> None:
+    """Warn if any best param is within 5% of its search range boundary.
+
+    This indicates the range is too tight and Optuna wants to explore
+    further. The affected range should be widened before the next run.
+    """
+    # Build known ranges for inner params
+    inner_ranges: dict[str, tuple[float, float]] = {
+        "k_sl": config.k_sl_range,
+        "k_tp": config.k_tp_range,
+        "sl_fallback": config.sl_range,
+        "tp_fallback": config.tp_range,
+        "label_timeout": (60.0, 600.0),
+        "gamma": config.gamma_range,
+        "max_margin_proba": config.max_margin_proba_range,
+        "min_risk_pct": (0.001, 0.02),
+        "n_estimators": (50.0, 1000.0),
+        "learning_rate": (0.01, 0.3),
+        "max_depth": (3.0, 10.0),
+        "num_leaves": (15.0, 127.0),
+        "min_child_samples": (10.0, 300.0),
+        "subsample": (0.5, 1.0),
+        "colsample_bytree": (0.5, 1.0),
+        "entry_threshold": (0.25, 0.60),
+        "exit_threshold": (0.30, 0.80),
+    }
+
+    # Build outer ranges from registry defaults
+    outer_ranges: dict[str, tuple[float, float]] = {}
+    registry = build_default_registry(instrument=config.instrument)
+    for p in registry.all_tunable_params():
+        outer_ranges[p.name] = (float(p.low), float(p.high))
+    if config.outer_param_ranges:
+        outer_ranges.update(config.outer_param_ranges)
+
+    # Skip fixed params
+    fixed_inner = set(config.fixed_inner_params or {})
+    fixed_outer = set(config.fixed_outer_params or {})
+
+    warnings: list[str] = []
+    threshold = 0.05  # 5% of range width
+
+    for result in results:
+        for label, params, ranges, fixed_set in [
+            ("inner", result.best_inner_params, inner_ranges, fixed_inner),
+            ("outer", result.best_outer_params, outer_ranges, fixed_outer),
+        ]:
+            for key, value in params.items():
+                if key in fixed_set:
+                    continue
+                if key not in ranges or not isinstance(value, (int, float)):
+                    continue
+                lo, hi = ranges[key]
+                span = hi - lo
+                if span <= 0:
+                    continue
+                margin = span * threshold
+                side = None
+                if value <= lo + margin:
+                    side = "MIN"
+                elif value >= hi - margin:
+                    side = "MAX"
+                if side is not None:
+                    warnings.append(
+                        f"  {label}__{key} = {value:.4f} "
+                        f"at {side} of [{lo}, {hi}]"
+                    )
+
+    if warnings:
+        # Deduplicate
+        unique = sorted(set(warnings))
+        print(f"\n{'!'*70}")
+        print("RANGE SATURATION WARNING")
+        print(f"{'!'*70}")
+        print("Best params hitting range boundaries (within 5%):")
+        for w in unique:
+            print(w)
+        print("Consider widening these ranges for the next run.")
