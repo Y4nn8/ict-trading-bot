@@ -24,6 +24,7 @@ from src.common.db import Database
 from src.common.logging import setup_logging
 from src.midas.optimizer import (
     default_output_prefix,
+    load_fixed_inner_params,
     load_fixed_outer_params,
     load_outer_param_ranges,
 )
@@ -67,6 +68,13 @@ async def main(args: argparse.Namespace) -> None:
             print(f"Outer ranges from {args.outer_ranges_from}: "
                   f"{outer_ranges}")
 
+        # Load fixed inner params if provided
+        fixed_inner = None
+        if args.fix_inner_params:
+            fixed_inner = load_fixed_inner_params(args.fix_inner_params)
+            print(f"Fixed inner params from {args.fix_inner_params}: "
+                  f"{fixed_inner}")
+
         wf_config = WalkForwardOptunaConfig(
             instrument=args.instrument,
             train_days=args.train_days,
@@ -78,6 +86,9 @@ async def main(args: argparse.Namespace) -> None:
             score_metric=args.score,
             min_daily_trades=args.min_daily_trades,
             trade_deficit_penalty=args.trade_deficit_penalty,
+            split_oos=args.split_oos,
+            fixed_inner_params=fixed_inner,
+            align_monday=args.align_monday,
             sl_range=tuple(args.sl_range),
             tp_range=tuple(args.tp_range),
             k_sl_range=tuple(args.k_sl_range),
@@ -124,6 +135,12 @@ def cli() -> None:
                         help="Min trades/day for trade deficit penalty (default: 10)")
     parser.add_argument("--trade-deficit-penalty", type=float, default=10.0,
                         help="Penalty per missing trade below minimum (default: 10.0)")
+    parser.add_argument("--split-oos", action="store_true",
+                        help="Split OOS into selection + validation halves")
+    parser.add_argument("--align-monday", action="store_true",
+                        help="Snap window boundaries to Monday")
+    parser.add_argument("--fix-inner-params", type=str, default=None,
+                        help="YAML file with fixed inner params to reduce search space")
     parser.add_argument("--sl-range", type=float, nargs=2, default=[1.5, 8.0],
                         metavar=("MIN", "MAX"))
     parser.add_argument("--tp-range", type=float, nargs=2, default=[1.5, 8.0],

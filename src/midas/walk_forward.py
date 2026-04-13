@@ -109,20 +109,37 @@ def _midas_to_common_trade(
     )
 
 
+def _snap_to_monday(dt: datetime) -> datetime:
+    """Snap a datetime forward to the next Monday (or same day if Monday)."""
+    days_ahead = (7 - dt.weekday()) % 7  # 0 if already Monday
+    return dt + timedelta(days=days_ahead)
+
+
 def generate_windows(
     data_start: datetime,
     data_end: datetime,
     train_days: int,
     test_days: int,
     step_days: int,
+    *,
+    align_monday: bool = False,
 ) -> list[tuple[datetime, datetime, datetime, datetime]]:
-    """Generate (train_start, train_end, test_start, test_end) windows."""
+    """Generate (train_start, train_end, test_start, test_end) windows.
+
+    Args:
+        data_start: Start of available data.
+        data_end: End of available data.
+        train_days: Training window in days.
+        test_days: Test window in days.
+        step_days: Step between windows in days.
+        align_monday: Snap the first window to start on Monday.
+    """
     windows = []
     train_delta = timedelta(days=train_days)
     test_delta = timedelta(days=test_days)
     step_delta = timedelta(days=step_days)
 
-    current = data_start
+    current = _snap_to_monday(data_start) if align_monday else data_start
     while current + train_delta + test_delta <= data_end:
         train_end = current + train_delta
         test_end = train_end + test_delta
@@ -466,6 +483,9 @@ class WalkForwardOptunaConfig:
         score_metric: Metric to optimize (composite uses PnL + trade deficit).
         min_daily_trades: Minimum expected trades per trading day.
         trade_deficit_penalty: Penalty per missing trade below minimum.
+        split_oos: Split OOS into selection (Optuna) + validation halves.
+        fixed_inner_params: Fixed inner params (skip suggestion for these).
+        align_monday: Snap window boundaries to Monday.
         sl_range: SL search range in points.
         tp_range: TP search range in points.
         k_sl_range: k_sl multiplier search range.
@@ -488,6 +508,9 @@ class WalkForwardOptunaConfig:
     score_metric: str = "composite"
     min_daily_trades: int = 10
     trade_deficit_penalty: float = 10.0
+    split_oos: bool = False
+    fixed_inner_params: dict[str, Any] | None = None
+    align_monday: bool = False
     sl_range: tuple[float, float] = (1.5, 8.0)
     tp_range: tuple[float, float] = (1.5, 8.0)
     k_sl_range: tuple[float, float] = (0.5, 3.0)
@@ -527,6 +550,7 @@ async def run_midas_wf_optuna(
     windows = generate_windows(
         data_start, data_end,
         config.train_days, config.test_days, config.step_days,
+        align_monday=config.align_monday,
     )
 
     if not windows:
@@ -561,6 +585,8 @@ async def run_midas_wf_optuna(
             score_metric=config.score_metric,
             min_daily_trades=config.min_daily_trades,
             trade_deficit_penalty=config.trade_deficit_penalty,
+            split_oos=config.split_oos,
+            fixed_inner_params=config.fixed_inner_params,
             sl_range=config.sl_range,
             tp_range=config.tp_range,
             k_sl_range=config.k_sl_range,
@@ -596,31 +622,45 @@ def _print_wf_optuna_summary(
     windows: list[tuple[datetime, datetime, datetime, datetime]],
 ) -> None:
     """Print per-window OOS summary table."""
+    has_val = any(r.val_score is not None for r in results)
+
     print(f"\n{'='*70}")
     print("WALK-FORWARD OPTUNA SUMMARY")
     print(f"{'='*70}")
-    print(f"{'Window':<8} {'Test dates':<25} {'Score':>8} "
-          f"{'Trades':>7} {'WR':>6} {'PnL':>10}")
-    print("-" * 70)
+    header = (f"{'Window':<8} {'Test dates':<25} {'Score':>8} "
+              f"{'Trades':>7} {'WR':>6} {'PnL':>10}")
+    if has_val:
+        header += f" {'ValPnL':>10}"
+    print(header)
+    print("-" * (80 if has_val else 70))
 
     total_trades = 0
     total_pnl = 0.0
+    total_val_pnl = 0.0
     profitable = 0
 
     for i, (result, win) in enumerate(zip(results, windows, strict=True)):
         test_str = f"{win[2].date()} → {win[3].date()}"
-        print(f"W{i+1:<6} {test_str:<25} {result.best_score:>+8.1f} "
-              f"{result.best_n_trades:>7} "
-              f"{result.best_win_rate*100:>5.1f}% "
-              f"{result.best_pnl:>+10.2f}")
+        line = (f"W{i+1:<6} {test_str:<25} {result.best_score:>+8.1f} "
+                f"{result.best_n_trades:>7} "
+                f"{result.best_win_rate*100:>5.1f}% "
+                f"{result.best_pnl:>+10.2f}")
+        if has_val:
+            val_pnl = result.val_pnl if result.val_score is not None else 0.0
+            line += f" {val_pnl:>+10.2f}"
+            total_val_pnl += val_pnl
+        print(line)
         total_trades += result.best_n_trades
         total_pnl += result.best_pnl
         if result.best_pnl > 0:
             profitable += 1
 
-    print("-" * 70)
-    print(f"{'Total':<34} {'':<8} {total_trades:>7} "
-          f"{'':<6} {total_pnl:>+10.2f}")
+    print("-" * (80 if has_val else 70))
+    totals = (f"{'Total':<34} {'':<8} {total_trades:>7} "
+              f"{'':<6} {total_pnl:>+10.2f}")
+    if has_val:
+        totals += f" {total_val_pnl:>+10.2f}"
+    print(totals)
     print(f"  Profitable windows: {profitable}/{len(results)}")
 
 

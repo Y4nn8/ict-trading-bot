@@ -10,6 +10,7 @@ from src.midas.walk_forward import (
     WalkForwardOptunaConfig,
     _midas_to_common_trade,
     _print_param_stability,
+    _snap_to_monday,
     generate_windows,
 )
 
@@ -183,3 +184,67 @@ class TestParamStability:
         _print_param_stability(results)
         captured = capsys.readouterr()  # type: ignore[union-attr]
         assert "outer__atr_period" in captured.out
+
+
+class TestSnapToMonday:
+    """Tests for Monday alignment."""
+
+    def test_monday_stays(self) -> None:
+        # 2026-04-06 is a Monday
+        dt = datetime(2026, 4, 6, tzinfo=UTC)
+        assert _snap_to_monday(dt).weekday() == 0
+        assert _snap_to_monday(dt) == dt
+
+    def test_wednesday_snaps_forward(self) -> None:
+        # 2026-04-08 is Wednesday → next Monday is 2026-04-13
+        dt = datetime(2026, 4, 8, tzinfo=UTC)
+        snapped = _snap_to_monday(dt)
+        assert snapped.weekday() == 0
+        assert snapped == datetime(2026, 4, 13, tzinfo=UTC)
+
+    def test_sunday_snaps_forward(self) -> None:
+        # 2026-04-12 is Sunday → next Monday is 2026-04-13
+        dt = datetime(2026, 4, 12, tzinfo=UTC)
+        snapped = _snap_to_monday(dt)
+        assert snapped == datetime(2026, 4, 13, tzinfo=UTC)
+
+
+class TestAlignMonday:
+    """Tests for generate_windows with align_monday."""
+
+    def test_aligned_windows_start_monday(self) -> None:
+        # 2025-10-01 is a Wednesday
+        start = datetime(2025, 10, 1, tzinfo=UTC)
+        end = datetime(2026, 4, 1, tzinfo=UTC)
+
+        windows = generate_windows(
+            start, end, train_days=28, test_days=7, step_days=7,
+            align_monday=True,
+        )
+        assert len(windows) > 0
+        # First window should start on Monday (2025-10-06)
+        assert windows[0][0].weekday() == 0
+        assert windows[0][0] == datetime(2025, 10, 6, tzinfo=UTC)
+
+    def test_non_aligned_preserves_start(self) -> None:
+        # Without align_monday, start stays as-is
+        start = datetime(2025, 10, 1, tzinfo=UTC)  # Wednesday
+        end = datetime(2026, 4, 1, tzinfo=UTC)
+
+        windows = generate_windows(
+            start, end, train_days=28, test_days=7, step_days=7,
+            align_monday=False,
+        )
+        assert windows[0][0] == start
+
+
+class TestWFOptunaConfigNewFields:
+    """Tests for new WalkForwardOptunaConfig fields."""
+
+    def test_new_defaults(self) -> None:
+        cfg = WalkForwardOptunaConfig()
+        assert cfg.split_oos is False
+        assert cfg.fixed_inner_params is None
+        assert cfg.align_monday is False
+        assert cfg.min_daily_trades == 10
+        assert cfg.trade_deficit_penalty == 10.0

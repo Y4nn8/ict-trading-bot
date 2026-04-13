@@ -8,6 +8,7 @@ import optuna
 import pytest
 
 from src.midas.optimizer import (
+    INNER_PARAM_KEYS,
     OptimizationResult,
     OptimizerConfig,
     TrialRecord,
@@ -15,6 +16,7 @@ from src.midas.optimizer import (
     _suggest_inner_params,
     _suggest_outer_params,
     default_output_prefix,
+    load_fixed_inner_params,
     load_outer_param_ranges,
     write_trial_logs,
 )
@@ -378,3 +380,74 @@ class TestCompositeScoring:
         # 80 trades: no penalty either
         deficit_80 = max(0, min_trades - 80) * penalty
         assert deficit_80 == 0.0
+
+
+class TestFixedInnerParams:
+    """Tests for inner param fixing (search space reduction)."""
+
+    def test_fixed_params_not_suggested(self) -> None:
+        """Fixed params should use the fixed value, not Optuna."""
+        config = OptimizerConfig(
+            fixed_inner_params={
+                "gamma": 1.0,
+                "max_margin_proba": 0.80,
+                "min_risk_pct": 0.005,
+                "subsample": 0.8,
+                "colsample_bytree": 0.8,
+                "min_child_samples": 50,
+            },
+        )
+        study = optuna.create_study()
+        trial = study.ask()
+        params = _suggest_inner_params(trial, config)
+
+        # Fixed values should be exact
+        assert params["gamma"] == 1.0
+        assert params["max_margin_proba"] == 0.80
+        assert params["min_risk_pct"] == 0.005
+        assert params["subsample"] == 0.8
+        assert params["colsample_bytree"] == 0.8
+        assert params["min_child_samples"] == 50
+
+        # Non-fixed params should still be suggested (within range)
+        assert 0.5 <= params["k_sl"] <= 3.0
+        assert 0.25 <= params["entry_threshold"] <= 0.60
+
+    def test_no_fixed_params_suggests_all(self) -> None:
+        config = OptimizerConfig(fixed_inner_params=None)
+        study = optuna.create_study()
+        trial = study.ask()
+        params = _suggest_inner_params(trial, config)
+
+        # All 17 params should be present
+        assert len(params) == 17
+
+    def test_load_fixed_inner_params_filters_keys(
+        self, tmp_path: object,
+    ) -> None:
+        from pathlib import Path
+
+        path = Path(str(tmp_path)) / "inner.yml"
+        path.write_text(
+            "gamma: 1.0\n"
+            "subsample: 0.8\n"
+            "some_outer_param: 42\n"  # not in INNER_PARAM_KEYS
+        )
+        loaded = load_fixed_inner_params(str(path))
+        assert "gamma" in loaded
+        assert "subsample" in loaded
+        assert "some_outer_param" not in loaded
+
+
+class TestSplitOOS:
+    """Tests for split OOS configuration."""
+
+    def test_config_defaults(self) -> None:
+        config = OptimizerConfig()
+        assert config.split_oos is False
+
+    def test_val_fields_default(self) -> None:
+        result = OptimizationResult()
+        assert result.val_score is None
+        assert result.val_n_trades == 0
+        assert result.val_pnl == 0.0
