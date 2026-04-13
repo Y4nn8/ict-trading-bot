@@ -311,7 +311,7 @@ class TestICTFeatureExtractor:
     def test_ict_with_price_movement(self) -> None:
         """Feed enough candles with a trend to exercise detection paths."""
         ext = ICTFeatureExtractor()
-        ext.configure({"lookback": 5, "fvg_max_age": 50})
+        ext.configure({"lookback": 5, "level_max_age": 50})
 
         # Feed 90 candles (3 M5 candles) with uptrend
         for i in range(90):

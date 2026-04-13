@@ -38,8 +38,8 @@ _ICT_TFS: dict[str, int] = {
 class _ICTTFState:
     """Per-timeframe ICT detector state and tracked levels."""
 
-    def __init__(self, fvg_max_age: int, lookback: int) -> None:
-        self.fvg_max_age = fvg_max_age
+    def __init__(self, level_max_age: int, lookback: int) -> None:
+        self.level_max_age = level_max_age
         self.lookback = lookback
         self.active_fvgs: deque[FVG] = deque()
         self.active_obs: deque[OrderBlock] = deque()
@@ -77,7 +77,7 @@ class _ICTTFState:
         # FVGs
         for fvg in events.fvgs:
             self.active_fvgs.append(fvg)
-        age_cutoff = idx - self.fvg_max_age
+        age_cutoff = idx - self.level_max_age
         while self.active_fvgs and self.active_fvgs[0].index < age_cutoff:
             self.active_fvgs.popleft()
 
@@ -174,7 +174,7 @@ class ICTFeatureExtractor(FeatureExtractor):
     def __init__(self, instrument: str = "XAUUSD") -> None:
         self._instrument = instrument
         self._lookback: int = 20
-        self._fvg_max_age: int = 100
+        self._level_max_age: int = 100
         self._ms_state = MarketStructureState(
             instruments=[instrument],
             timeframes=list(_ICT_TFS.keys()),
@@ -184,7 +184,7 @@ class ICTFeatureExtractor(FeatureExtractor):
             for tf, ratio in _ICT_TFS.items()
         }
         self._tf_states: dict[str, _ICTTFState] = {
-            tf: _ICTTFState(self._fvg_max_age, self._lookback)
+            tf: _ICTTFState(self._level_max_age, self._lookback)
             for tf in _ICT_TFS
         }
 
@@ -195,15 +195,15 @@ class ICTFeatureExtractor(FeatureExtractor):
     def tunable_params(self) -> list[ExtractorParam]:
         return [
             ExtractorParam("lookback", 20, 5, 50, "int"),
-            ExtractorParam("fvg_max_age", 100, 20, 300, "int"),
+            ExtractorParam("level_max_age", 100, 20, 300, "int"),
         ]
 
     def configure(self, params: dict[str, float]) -> None:
         self._lookback = int(params.get("lookback", 20))
-        self._fvg_max_age = int(params.get("fvg_max_age", 100))
+        self._level_max_age = int(params.get("level_max_age", 100))
         for state in self._tf_states.values():
             state.lookback = self._lookback
-            state.fvg_max_age = self._fvg_max_age
+            state.level_max_age = self._level_max_age
 
     def on_candle_close(
         self,

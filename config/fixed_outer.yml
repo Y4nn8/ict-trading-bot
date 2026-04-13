@@ -1,0 +1,16 @@
+# Fixed outer params — derived from step 1 exploration (21 windows, 10x30)
+# Outer params showed no convergence (CV > 0.50 for most), so we fix them
+# to sensible values and focus all Optuna budget on inner params.
+
+# ICT features: lookback = level_max_age for coherent horizon (~3h30 M5)
+lookback: 40
+level_max_age: 40
+
+# Scalping: ATR at median of best trials, roc_fast/slow well-separated (4/40 = 10x ratio)
+atr_period: 28
+roc_fast: 4
+roc_slow: 40
+mean_rev_period: 50
+
+# Tick: spread lookback aligned with ICT horizon
+spread_avg_period: 40
