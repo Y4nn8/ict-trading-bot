@@ -745,12 +745,14 @@ async def run_nested_optuna(
 
         val_str = ""
         if v_sc is not None:
-            val_str = f", val_PnL={v_pnl_val:+.1f}"
+            val_str = (f", val_trades={v_nt}, "
+                       f"val_WR={v_wr_val*100:.0f}%, "
+                       f"val_PnL={v_pnl_val:+.1f}")
         print(f"  Best inner: score={best_inner_score:+.2f}, "
               f"k_sl={best_inner_params_local.get('k_sl', 0):.2f}, "
               f"k_tp={best_inner_params_local.get('k_tp', 0):.2f}, "
               f"gamma={best_inner_params_local.get('gamma', 0):.2f}, "
-              f"trades={best_inner_trades}, "
+              f"sel_trades={best_inner_trades}, "
               f"WR={best_inner_wr*100:.0f}%, "
               f"PnL={best_inner_pnl:+.1f}{val_str}, "
               f"threshold={best_inner_params_local.get('entry_threshold', '?')}")
