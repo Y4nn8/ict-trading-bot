@@ -572,9 +572,9 @@ async def run_midas_wf_optuna(
         results.append(result)
         all_records.extend(result.trial_records)
 
-    # Write all trial + trade logs
-    if all_records:
-        write_trial_logs(all_records, output_prefix)
+        # Write trial + trade logs incrementally after each window
+        if all_records:
+            write_trial_logs(all_records, output_prefix)
 
     # Print per-window OOS summary + param stability
     _print_wf_optuna_summary(results, windows)

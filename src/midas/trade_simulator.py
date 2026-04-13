@@ -60,6 +60,11 @@ class SimConfig:
         sizing_threshold: Probability floor for the gamma ramp. Should
             match the model's entry_threshold so confidence=0 at the
             decision boundary.
+        min_risk_pct: Minimum risk per trade as a fraction of capital.
+            When set, ensures each trade risks at least this fraction
+            (e.g. 0.005 = 0.5%).  If the gamma ramp produces a smaller
+            size, it is bumped up.  If the required size exceeds
+            available margin, the trade is skipped entirely.
         slippage_min_pts: Minimum slippage in price points per market
             order. Set >0 for conservative simulation.
         slippage_max_pts: Maximum random slippage in price points.
@@ -82,6 +87,7 @@ class SimConfig:
     margin_pct: float = 0.05
     min_lot_size: float = 0.1
     sizing_threshold: float = 1 / 3
+    min_risk_pct: float | None = None
     slippage_min_pts: float = 0.0
     slippage_max_pts: float = 0.0
     slippage_seed: int | None = None
@@ -407,8 +413,26 @@ class TradeSimulator:
                 margin_per_lot=margin_per_lot,
                 min_lot_size=cfg.min_lot_size,
             )
+
+            # Apply min risk floor: bump size so each trade risks
+            # at least min_risk_pct * capital.  This can rescue a
+            # trade where the gamma ramp returned None (below min lot).
+            if cfg.min_risk_pct is not None and sl_dist > 0:
+                min_risk = cfg.min_risk_pct * self._capital
+                risk_per_lot = sl_dist * cfg.value_per_point
+                eps = 1e-9
+                min_size = (
+                    math.ceil(min_risk / risk_per_lot / cfg.min_lot_size - eps)
+                    * cfg.min_lot_size
+                )
+                if size is None or size < min_size:
+                    if min_size * margin_per_lot > available:
+                        return  # can't meet min risk with available margin
+                    size = min_size
+
             if size is None:
                 return
+
             margin = size * margin_per_lot
         else:
             size = cfg.size
