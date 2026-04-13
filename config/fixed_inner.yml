@@ -1,0 +1,13 @@
+# Fixed inner params — derived from step 2 WF analysis (16 windows, 4 val-positive)
+# Reduces search space from 17 → 12 dimensions for better convergence with 100 trials.
+
+# Sizing: gamma=1.0 (neutral), min_risk=1% capital floor, margin proba 85%+ = full engage
+# Rationale: best val windows converge on min_risk~0.019, max_margin~0.94.
+# We fix slightly below observed values to leave room for Optuna to work on other dims.
+gamma: 1.0
+min_risk_pct: 0.01
+max_margin_proba: 0.85
+
+# LightGBM regularization: safe defaults, not worth burning Optuna budget on these
+subsample: 0.8
+colsample_bytree: 0.8
