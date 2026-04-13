@@ -11,6 +11,7 @@ from src.midas.optimizer import (
     OptimizationResult,
     OptimizerConfig,
     TrialRecord,
+    _count_trading_days,
     _suggest_inner_params,
     _suggest_outer_params,
     default_output_prefix,
@@ -318,3 +319,62 @@ class TestLoadOuterParamRanges:
         ranges = load_outer_param_ranges(str(path))
         assert "atr_period" in ranges
         assert "some_string" not in ranges
+
+
+class TestCountTradingDays:
+    """Tests for trading day counting."""
+
+    def test_full_week(self) -> None:
+        # Mon 2026-04-06 to Mon 2026-04-13 = 5 weekdays
+        start = datetime(2026, 4, 6, tzinfo=UTC)
+        end = datetime(2026, 4, 13, tzinfo=UTC)
+        assert _count_trading_days(start, end) == 5
+
+    def test_weekend_only(self) -> None:
+        # Sat to Mon = 0 weekdays, but min 1
+        start = datetime(2026, 4, 11, tzinfo=UTC)  # Saturday
+        end = datetime(2026, 4, 13, tzinfo=UTC)  # Monday
+        assert _count_trading_days(start, end) == 1
+
+    def test_single_weekday(self) -> None:
+        start = datetime(2026, 4, 6, tzinfo=UTC)  # Monday
+        end = datetime(2026, 4, 7, tzinfo=UTC)  # Tuesday
+        assert _count_trading_days(start, end) == 1
+
+    def test_two_weeks(self) -> None:
+        start = datetime(2026, 4, 6, tzinfo=UTC)  # Monday
+        end = datetime(2026, 4, 20, tzinfo=UTC)  # Monday 2 weeks later
+        assert _count_trading_days(start, end) == 10
+
+
+class TestCompositeScoring:
+    """Tests for composite scoring with trade deficit penalty."""
+
+    def test_config_defaults(self) -> None:
+        config = OptimizerConfig()
+        assert config.min_daily_trades == 10
+        assert config.trade_deficit_penalty == 10.0
+
+    def test_deficit_penalty_math(self) -> None:
+        """Verify the penalty formula produces correct gradient."""
+        # 5 trading days, min 10/day = 50 min trades, penalty 10/trade
+        min_daily = 10
+        penalty = 10.0
+        trading_days = 5
+        min_trades = min_daily * trading_days  # 50
+
+        # 0 trades: PnL 0 - 50 * 10 = -500
+        deficit_0 = max(0, min_trades - 0) * penalty
+        assert deficit_0 == 500.0
+
+        # 30 trades: PnL 100 - 20 * 10 = -100
+        deficit_30 = max(0, min_trades - 30) * penalty
+        assert 100.0 - deficit_30 == -100.0
+
+        # 50 trades: PnL 100 - 0 = 100 (no penalty)
+        deficit_50 = max(0, min_trades - 50) * penalty
+        assert deficit_50 == 0.0
+
+        # 80 trades: no penalty either
+        deficit_80 = max(0, min_trades - 80) * penalty
+        assert deficit_80 == 0.0

@@ -3,7 +3,7 @@
 Outer loop: tunes feature extractor params (expensive, re-replays ticks).
 Inner loop: tunes SL/TP + LightGBM hyperparams (cheap, relabels in-memory).
 
-Score = walk-forward OOS metric (composite, pnl, win_rate, pnl_per_trade).
+Score = walk-forward OOS metric (pnl with trade deficit penalty by default).
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import contextlib
 import csv
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -101,6 +101,26 @@ def load_outer_param_ranges(path: str) -> dict[str, tuple[float, float]]:
     return ranges
 
 
+def _count_trading_days(start: datetime, end: datetime) -> int:
+    """Count weekdays (Mon-Fri) between start (inclusive) and end (exclusive).
+
+    Args:
+        start: Window start datetime.
+        end: Window end datetime.
+
+    Returns:
+        Number of trading days (at least 1).
+    """
+    days = 0
+    current = start
+    one_day = timedelta(days=1)
+    while current < end:
+        if current.weekday() < 5:  # Mon=0 .. Fri=4
+            days += 1
+        current += one_day
+    return max(days, 1)
+
+
 @dataclass(frozen=True, slots=True)
 class OptimizerConfig:
     """Nested Optuna configuration.
@@ -115,7 +135,9 @@ class OptimizerConfig:
         inner_trials: Number of inner loop trials (SL/TP + LightGBM).
         sample_on_candle: Extract features on candle close (default).
         sample_rate: Legacy tick-based sampling.
-        score_metric: Metric to optimize.
+        score_metric: Metric to optimize (composite uses PnL + trade deficit).
+        min_daily_trades: Minimum expected trades per trading day.
+        trade_deficit_penalty: Penalty per missing trade below minimum.
         sl_range: SL search range in points (fixed mode fallback).
         tp_range: TP search range in points (fixed mode fallback).
         k_sl_range: k_sl multiplier search range (ATR mode).
@@ -137,6 +159,8 @@ class OptimizerConfig:
     sample_on_candle: bool = True
     sample_rate: int = 1
     score_metric: str = "composite"
+    min_daily_trades: int = 10
+    trade_deficit_penalty: float = 10.0
     sl_range: tuple[float, float] = (1.5, 8.0)
     tp_range: tuple[float, float] = (1.5, 8.0)
     k_sl_range: tuple[float, float] = (0.5, 3.0)
@@ -350,21 +374,28 @@ async def _evaluate_oos_async(
 
     trades = simulator.closed_trades
     n_trades = len(trades)
-    if n_trades == 0:
-        return -1000.0, 0, 0.0, 0.0, []
 
-    total_pnl = sum(t.pnl for t in trades)
-    wins = sum(1 for t in trades if t.is_win)
-    win_rate = wins / n_trades
+    if n_trades == 0:
+        total_pnl = 0.0
+        win_rate = 0.0
+    else:
+        total_pnl = sum(t.pnl for t in trades)
+        wins = sum(1 for t in trades if t.is_win)
+        win_rate = wins / n_trades
+
+    # Trade deficit penalty (applies to composite and pnl metrics)
+    trading_days = _count_trading_days(config.test_start, config.test_end)
+    min_trades = config.min_daily_trades * trading_days
+    deficit_penalty = (
+        max(0, min_trades - n_trades) * config.trade_deficit_penalty
+    )
 
     if config.score_metric == "composite":
-        if n_trades < 10:
-            return -1000.0, n_trades, win_rate, total_pnl, trades
-        score = total_pnl * (win_rate**0.5) * (n_trades**0.5)
+        score = total_pnl - deficit_penalty
     elif config.score_metric == "win_rate":
         score = win_rate
     elif config.score_metric == "pnl_per_trade":
-        score = total_pnl / n_trades
+        score = total_pnl / n_trades if n_trades > 0 else -1000.0
     else:
         score = total_pnl
 

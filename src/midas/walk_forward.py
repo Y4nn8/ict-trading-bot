@@ -463,7 +463,9 @@ class WalkForwardOptunaConfig:
         outer_trials: Number of outer Optuna trials per window.
         inner_trials: Number of inner Optuna trials per window.
         sample_on_candle: Extract features on candle close.
-        score_metric: Metric to optimize.
+        score_metric: Metric to optimize (composite uses PnL + trade deficit).
+        min_daily_trades: Minimum expected trades per trading day.
+        trade_deficit_penalty: Penalty per missing trade below minimum.
         sl_range: SL search range in points.
         tp_range: TP search range in points.
         k_sl_range: k_sl multiplier search range.
@@ -484,6 +486,8 @@ class WalkForwardOptunaConfig:
     inner_trials: int = 20
     sample_on_candle: bool = True
     score_metric: str = "composite"
+    min_daily_trades: int = 10
+    trade_deficit_penalty: float = 10.0
     sl_range: tuple[float, float] = (1.5, 8.0)
     tp_range: tuple[float, float] = (1.5, 8.0)
     k_sl_range: tuple[float, float] = (0.5, 3.0)
@@ -555,6 +559,8 @@ async def run_midas_wf_optuna(
             inner_trials=config.inner_trials,
             sample_on_candle=config.sample_on_candle,
             score_metric=config.score_metric,
+            min_daily_trades=config.min_daily_trades,
+            trade_deficit_penalty=config.trade_deficit_penalty,
             sl_range=config.sl_range,
             tp_range=config.tp_range,
             k_sl_range=config.k_sl_range,

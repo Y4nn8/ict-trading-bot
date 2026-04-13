@@ -76,6 +76,8 @@ async def main(args: argparse.Namespace) -> None:
             inner_trials=args.inner_trials,
             sample_on_candle=not args.sample_on_tick,
             score_metric=args.score,
+            min_daily_trades=args.min_daily_trades,
+            trade_deficit_penalty=args.trade_deficit_penalty,
             sl_range=tuple(args.sl_range),
             tp_range=tuple(args.tp_range),
             k_sl_range=tuple(args.k_sl_range),
@@ -118,6 +120,10 @@ def cli() -> None:
                         help="Sample every tick instead of on candle close")
     parser.add_argument("--score", default="composite",
                         choices=["composite", "pnl", "win_rate", "pnl_per_trade"])
+    parser.add_argument("--min-daily-trades", type=int, default=10,
+                        help="Min trades/day for trade deficit penalty (default: 10)")
+    parser.add_argument("--trade-deficit-penalty", type=float, default=10.0,
+                        help="Penalty per missing trade below minimum (default: 10.0)")
     parser.add_argument("--sl-range", type=float, nargs=2, default=[1.5, 8.0],
                         metavar=("MIN", "MAX"))
     parser.add_argument("--tp-range", type=float, nargs=2, default=[1.5, 8.0],
