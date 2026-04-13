@@ -8,6 +8,7 @@ from src.midas.optimizer import OptimizationResult
 from src.midas.trade_simulator import MidasTrade
 from src.midas.walk_forward import (
     WalkForwardOptunaConfig,
+    _check_range_saturation,
     _midas_to_common_trade,
     _print_param_stability,
     _print_wf_optuna_summary,
@@ -311,3 +312,62 @@ class TestWFOptunaSummary:
         assert "ValPnL" in captured.out
         assert "+80.00" in captured.out
         assert "Profitable windows: 1/1" in captured.out
+
+
+class TestRangeSaturation:
+    """Tests for range saturation warnings."""
+
+    def test_warns_on_min_boundary(self, capsys: object) -> None:
+        config = WalkForwardOptunaConfig(k_sl_range=(0.5, 3.0))
+        results = [
+            OptimizationResult(
+                best_inner_params={"k_sl": 0.51},  # within 5% of min
+                best_outer_params={},
+            ),
+        ]
+        _check_range_saturation(results, config)
+        captured = capsys.readouterr()  # type: ignore[union-attr]
+        assert "RANGE SATURATION WARNING" in captured.out
+        assert "k_sl" in captured.out
+        assert "MIN" in captured.out
+
+    def test_warns_on_max_boundary(self, capsys: object) -> None:
+        config = WalkForwardOptunaConfig(k_tp_range=(0.5, 3.0))
+        results = [
+            OptimizationResult(
+                best_inner_params={"k_tp": 2.95},  # within 5% of max
+                best_outer_params={},
+            ),
+        ]
+        _check_range_saturation(results, config)
+        captured = capsys.readouterr()  # type: ignore[union-attr]
+        assert "RANGE SATURATION WARNING" in captured.out
+        assert "k_tp" in captured.out
+        assert "MAX" in captured.out
+
+    def test_no_warning_when_safe(self, capsys: object) -> None:
+        config = WalkForwardOptunaConfig(k_sl_range=(0.5, 3.0))
+        results = [
+            OptimizationResult(
+                best_inner_params={"k_sl": 1.5},  # middle of range
+                best_outer_params={},
+            ),
+        ]
+        _check_range_saturation(results, config)
+        captured = capsys.readouterr()  # type: ignore[union-attr]
+        assert "RANGE SATURATION" not in captured.out
+
+    def test_skips_fixed_params(self, capsys: object) -> None:
+        config = WalkForwardOptunaConfig(
+            k_sl_range=(0.5, 3.0),
+            fixed_inner_params={"gamma": 1.0},
+        )
+        results = [
+            OptimizationResult(
+                best_inner_params={"gamma": 1.0},  # at boundary but fixed
+                best_outer_params={},
+            ),
+        ]
+        _check_range_saturation(results, config)
+        captured = capsys.readouterr()  # type: ignore[union-attr]
+        assert "gamma" not in captured.out

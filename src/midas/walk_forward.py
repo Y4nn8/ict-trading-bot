@@ -639,6 +639,8 @@ async def run_midas_wf_optuna(
     if len(results) >= 2:
         _print_param_stability(results)
 
+    _check_range_saturation(results, config)
+
     return results
 
 
@@ -752,3 +754,86 @@ def _print_param_stability(results: list[OptimizationResult]) -> None:
     if total > 0:
         print(f"\nConverged: {converged}/{total} params "
               f"({converged/total*100:.0f}%) with CV < 15%")
+
+
+def _check_range_saturation(
+    results: list[OptimizationResult],
+    config: WalkForwardOptunaConfig,
+) -> None:
+    """Warn if any best param is within 5% of its search range boundary.
+
+    This indicates the range is too tight and Optuna wants to explore
+    further. The affected range should be widened before the next run.
+    """
+    # Build known ranges for inner params
+    inner_ranges: dict[str, tuple[float, float]] = {
+        "k_sl": config.k_sl_range,
+        "k_tp": config.k_tp_range,
+        "sl_fallback": config.sl_range,
+        "tp_fallback": config.tp_range,
+        "label_timeout": (60.0, 600.0),
+        "gamma": config.gamma_range,
+        "max_margin_proba": config.max_margin_proba_range,
+        "min_risk_pct": (0.001, 0.02),
+        "n_estimators": (50.0, 1000.0),
+        "learning_rate": (0.01, 0.3),
+        "max_depth": (3.0, 10.0),
+        "num_leaves": (15.0, 127.0),
+        "min_child_samples": (10.0, 300.0),
+        "subsample": (0.5, 1.0),
+        "colsample_bytree": (0.5, 1.0),
+        "entry_threshold": (0.25, 0.60),
+        "exit_threshold": (0.30, 0.80),
+    }
+
+    # Build outer ranges from registry defaults
+    outer_ranges: dict[str, tuple[float, float]] = {}
+    from src.midas.replay_engine import build_default_registry
+    registry = build_default_registry(instrument=config.instrument)
+    for p in registry.all_tunable_params():
+        outer_ranges[p.name] = (float(p.low), float(p.high))
+    if config.outer_param_ranges:
+        outer_ranges.update(config.outer_param_ranges)
+
+    # Skip fixed params
+    fixed_inner = set(config.fixed_inner_params or {})
+
+    warnings: list[str] = []
+    threshold = 0.05  # 5% of range width
+
+    for result in results:
+        for label, params, ranges in [
+            ("inner", result.best_inner_params, inner_ranges),
+            ("outer", result.best_outer_params, outer_ranges),
+        ]:
+            for key, value in params.items():
+                if key in fixed_inner:
+                    continue
+                if key not in ranges or not isinstance(value, (int, float)):
+                    continue
+                lo, hi = ranges[key]
+                span = hi - lo
+                if span <= 0:
+                    continue
+                margin = span * threshold
+                side = None
+                if value <= lo + margin:
+                    side = "MIN"
+                elif value >= hi - margin:
+                    side = "MAX"
+                if side is not None:
+                    warnings.append(
+                        f"  {label}__{key} = {value:.4f} "
+                        f"at {side} of [{lo}, {hi}]"
+                    )
+
+    if warnings:
+        # Deduplicate
+        unique = sorted(set(warnings))
+        print(f"\n{'!'*70}")
+        print("RANGE SATURATION WARNING")
+        print(f"{'!'*70}")
+        print("Best params hitting range boundaries (within 5%):")
+        for w in unique:
+            print(w)
+        print("Consider widening these ranges for the next run.")

@@ -221,6 +221,10 @@ class TrialRecord:
     outer_params: dict[str, Any]
     inner_params: dict[str, Any]
     trades: list[MidasTrade]
+    val_score: float | None = None
+    val_n_trades: int = 0
+    val_win_rate: float = 0.0
+    val_pnl: float = 0.0
 
 
 @dataclass
@@ -677,6 +681,48 @@ async def run_nested_optuna(
         outer_study.tell(outer_trial, best_inner_score)
         result.total_inner_trials += config.inner_trials
 
+        # Validation pass for this outer trial
+        v_sc: float | None = None
+        v_nt = 0
+        v_wr_val = 0.0
+        v_pnl_val = 0.0
+        if (has_validation
+                and best_inner_trainer is not None
+                and best_inner_params_local):
+            assert config.validation_start is not None
+            assert config.validation_end is not None
+            vt_config = dataclasses.replace(
+                config,
+                test_start=config.validation_start,
+                test_end=config.validation_end,
+                validation_start=None,
+                validation_end=None,
+            )
+            vt_sim = SimConfig(
+                sl_points=best_inner_params_local.get("sl_fallback", 3.0),
+                tp_points=best_inner_params_local.get("tp_fallback", 3.0),
+                k_sl=best_inner_params_local.get("k_sl", 1.0),
+                k_tp=best_inner_params_local.get("k_tp", 1.0),
+                max_spread=2.0,
+                gamma=best_inner_params_local.get("gamma", 1.0),
+                max_margin_proba=best_inner_params_local.get(
+                    "max_margin_proba", 0.80,
+                ),
+                sizing_threshold=best_inner_params_local.get(
+                    "entry_threshold", 0.5,
+                ),
+                min_risk_pct=best_inner_params_local.get(
+                    "min_risk_pct", 0.005,
+                ),
+                slippage_min_pts=config.slippage_min_pts,
+                slippage_max_pts=config.slippage_max_pts,
+                slippage_seed=config.slippage_seed,
+            )
+            v_sc, v_nt, v_wr_val, v_pnl_val, _ = await _evaluate_oos_async(
+                best_inner_trainer, vt_sim, db, vt_config,
+                registry_factory, extractor_params,
+            )
+
         # Record best-inner result for this outer trial
         result.trial_records.append(TrialRecord(
             window_idx=window_idx,
@@ -688,15 +734,22 @@ async def run_nested_optuna(
             outer_params=dict(extractor_params),
             inner_params=dict(best_inner_params_local),
             trades=list(best_inner_trades_list),
+            val_score=v_sc,
+            val_n_trades=v_nt,
+            val_win_rate=v_wr_val,
+            val_pnl=v_pnl_val,
         ))
 
+        val_str = ""
+        if v_sc is not None:
+            val_str = f", val_PnL={v_pnl_val:+.1f}"
         print(f"  Best inner: score={best_inner_score:+.2f}, "
               f"k_sl={best_inner_params_local.get('k_sl', 0):.2f}, "
               f"k_tp={best_inner_params_local.get('k_tp', 0):.2f}, "
               f"gamma={best_inner_params_local.get('gamma', 0):.2f}, "
               f"trades={best_inner_trades}, "
               f"WR={best_inner_wr*100:.0f}%, "
-              f"PnL={best_inner_pnl:+.1f}, "
+              f"PnL={best_inner_pnl:+.1f}{val_str}, "
               f"threshold={best_inner_params_local.get('entry_threshold', '?')}")
 
         if best_inner_score > best_score:
@@ -717,39 +770,13 @@ async def run_nested_optuna(
     result.best_win_rate = best_wr
     result.best_pnl = best_pnl
 
-    # --- Validation pass ---
-    if has_validation and result.best_trainer is not None:
-        assert config.validation_start is not None
-        assert config.validation_end is not None
-        val_config = dataclasses.replace(
-            config,
-            test_start=config.validation_start,
-            test_end=config.validation_end,
-            validation_start=None,
-            validation_end=None,
-        )
-        val_sim = SimConfig(
-            sl_points=best_inner.get("sl_fallback", 3.0),
-            tp_points=best_inner.get("tp_fallback", 3.0),
-            k_sl=best_inner.get("k_sl", 1.0),
-            k_tp=best_inner.get("k_tp", 1.0),
-            max_spread=2.0,
-            gamma=best_inner.get("gamma", 1.0),
-            max_margin_proba=best_inner.get("max_margin_proba", 0.80),
-            sizing_threshold=best_inner.get("entry_threshold", 0.5),
-            min_risk_pct=best_inner.get("min_risk_pct", 0.005),
-            slippage_min_pts=config.slippage_min_pts,
-            slippage_max_pts=config.slippage_max_pts,
-            slippage_seed=config.slippage_seed,
-        )
-        v_score, v_n, v_wr, v_pnl, _ = await _evaluate_oos_async(
-            result.best_trainer, val_sim, db, val_config,
-            registry_factory, best_outer,
-        )
-        result.val_score = v_score
-        result.val_n_trades = v_n
-        result.val_win_rate = v_wr
-        result.val_pnl = v_pnl
+    # Pick validation results from the best trial record
+    if has_validation and result.trial_records:
+        best_rec = max(result.trial_records, key=lambda r: r.score)
+        result.val_score = best_rec.val_score
+        result.val_n_trades = best_rec.val_n_trades
+        result.val_win_rate = best_rec.val_win_rate
+        result.val_pnl = best_rec.val_pnl
 
     _print_result(result)
     return result
@@ -793,8 +820,11 @@ def write_trial_logs(
     inner_sorted = sorted(inner_keys)
 
     # --- Trials CSV ---
+    has_val = any(r.val_score is not None for r in records)
     trial_fields = (
         ["window_idx", "outer_idx", "score", "n_trades", "win_rate", "pnl"]
+        + (["val_score", "val_n_trades", "val_win_rate", "val_pnl"]
+           if has_val else [])
         + [f"outer__{k}" for k in outer_sorted]
         + [f"inner__{k}" for k in inner_sorted]
     )
@@ -810,6 +840,13 @@ def write_trial_logs(
                 "win_rate": round(r.win_rate, 4),
                 "pnl": round(r.pnl, 2),
             }
+            if has_val:
+                row["val_score"] = (
+                    round(r.val_score, 2) if r.val_score is not None else ""
+                )
+                row["val_n_trades"] = r.val_n_trades
+                row["val_win_rate"] = round(r.val_win_rate, 4)
+                row["val_pnl"] = round(r.val_pnl, 2)
             for k in outer_sorted:
                 row[f"outer__{k}"] = r.outer_params.get(k, "")
             for k in inner_sorted:
