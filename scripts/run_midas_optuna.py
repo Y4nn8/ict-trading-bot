@@ -202,6 +202,17 @@ def cli() -> None:
                 datetime.strptime(val, "%Y-%m-%d").replace(tzinfo=UTC),
             )
 
+    has_val_start = args.validation_start is not None
+    has_val_end = args.validation_end is not None
+    if has_val_start != has_val_end:
+        parser.error(
+            "--validation-start and --validation-end must be provided together",
+        )
+    if has_val_start and args.validation_start >= args.validation_end:
+        parser.error(
+            "--validation-start must be earlier than --validation-end",
+        )
+
     asyncio.run(main(args))
 
 

@@ -13,7 +13,7 @@ import csv
 import dataclasses
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -126,6 +126,8 @@ def load_outer_param_ranges(path: str) -> dict[str, tuple[float, float]]:
 def _count_trading_days(start: datetime, end: datetime) -> int:
     """Count weekdays (Mon-Fri) between start (inclusive) and end (exclusive).
 
+    Uses O(1) formula instead of day-by-day iteration.
+
     Args:
         start: Window start datetime.
         end: Window end datetime.
@@ -133,13 +135,15 @@ def _count_trading_days(start: datetime, end: datetime) -> int:
     Returns:
         Number of trading days (at least 1).
     """
-    days = 0
-    current = start
-    one_day = timedelta(days=1)
-    while current < end:
-        if current.weekday() < 5:  # Mon=0 .. Fri=4
+    total_days = (end.date() - start.date()).days
+    if total_days <= 0:
+        return 1
+    full_weeks, remainder = divmod(total_days, 7)
+    days = full_weeks * 5
+    start_weekday = start.weekday()
+    for offset in range(remainder):
+        if (start_weekday + offset) % 7 < 5:
             days += 1
-        current += one_day
     return max(days, 1)
 
 
@@ -428,14 +432,13 @@ async def _evaluate_oos_async(
         max(0, min_trades - n_trades) * config.trade_deficit_penalty
     )
 
-    if config.score_metric == "composite":
-        score = total_pnl - deficit_penalty
-    elif config.score_metric == "win_rate":
+    if config.score_metric == "win_rate":
         score = win_rate
     elif config.score_metric == "pnl_per_trade":
         score = total_pnl / n_trades if n_trades > 0 else -1000.0
     else:
-        score = total_pnl
+        # "composite" and "pnl" both use PnL - deficit penalty
+        score = total_pnl - deficit_penalty
 
     return score, n_trades, win_rate, total_pnl, trades
 

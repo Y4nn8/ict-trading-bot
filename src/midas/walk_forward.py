@@ -796,17 +796,18 @@ def _check_range_saturation(
 
     # Skip fixed params
     fixed_inner = set(config.fixed_inner_params or {})
+    fixed_outer = set(config.fixed_outer_params or {})
 
     warnings: list[str] = []
     threshold = 0.05  # 5% of range width
 
     for result in results:
-        for label, params, ranges in [
-            ("inner", result.best_inner_params, inner_ranges),
-            ("outer", result.best_outer_params, outer_ranges),
+        for label, params, ranges, fixed_set in [
+            ("inner", result.best_inner_params, inner_ranges, fixed_inner),
+            ("outer", result.best_outer_params, outer_ranges, fixed_outer),
         ]:
             for key, value in params.items():
-                if key in fixed_inner:
+                if key in fixed_set:
                     continue
                 if key not in ranges or not isinstance(value, (int, float)):
                     continue
