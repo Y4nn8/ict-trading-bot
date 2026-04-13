@@ -123,27 +123,44 @@ def generate_windows(
     step_days: int,
     *,
     align_monday: bool = False,
-) -> list[tuple[datetime, datetime, datetime, datetime]]:
-    """Generate (train_start, train_end, test_start, test_end) windows.
+    validation_days: int = 0,
+) -> list[tuple[datetime, datetime, datetime, datetime, datetime | None, datetime | None]]:
+    """Generate walk-forward windows.
+
+    Returns:
+        List of (train_start, train_end, test_start, test_end,
+        val_start, val_end) tuples. val_start/val_end are None
+        when ``validation_days`` is 0.
 
     Args:
         data_start: Start of available data.
         data_end: End of available data.
         train_days: Training window in days.
-        test_days: Test window in days.
+        test_days: Test (selection) window in days.
         step_days: Step between windows in days.
         align_monday: Snap the first window to start on Monday.
+        validation_days: Validation window in days (0 = no validation).
     """
-    windows = []
+    windows: list[
+        tuple[datetime, datetime, datetime, datetime, datetime | None, datetime | None]
+    ] = []
     train_delta = timedelta(days=train_days)
     test_delta = timedelta(days=test_days)
+    val_delta = timedelta(days=validation_days)
     step_delta = timedelta(days=step_days)
 
     current = _snap_to_monday(data_start) if align_monday else data_start
-    while current + train_delta + test_delta <= data_end:
+    total_delta = train_delta + test_delta + val_delta
+    while current + total_delta <= data_end:
         train_end = current + train_delta
         test_end = train_end + test_delta
-        windows.append((current, train_end, train_end, test_end))
+        if validation_days > 0:
+            val_start = test_end
+            val_end = test_end + val_delta
+        else:
+            val_start = None
+            val_end = None
+        windows.append((current, train_end, train_end, test_end, val_start, val_end))
         current += step_delta
 
     return windows
@@ -191,7 +208,7 @@ async def run_midas_walk_forward(
 
     results: list[WindowResult] = []
 
-    for i, (train_start, train_end, test_start, test_end) in enumerate(windows):
+    for i, (train_start, train_end, test_start, test_end, _, _) in enumerate(windows):
         print(f"\n{'='*60}")
         print(f"Window {i+1}/{len(windows)}: "
               f"train {train_start.date()}→{train_end.date()}, "
@@ -483,7 +500,7 @@ class WalkForwardOptunaConfig:
         score_metric: Metric to optimize (composite uses PnL + trade deficit).
         min_daily_trades: Minimum expected trades per trading day.
         trade_deficit_penalty: Penalty per missing trade below minimum.
-        split_oos: Split OOS into selection (Optuna) + validation halves.
+        validation_days: Validation window in days (0 = no validation).
         fixed_inner_params: Fixed inner params (skip suggestion for these).
         align_monday: Snap window boundaries to Monday.
         sl_range: SL search range in points.
@@ -508,7 +525,7 @@ class WalkForwardOptunaConfig:
     score_metric: str = "composite"
     min_daily_trades: int = 10
     trade_deficit_penalty: float = 10.0
-    split_oos: bool = False
+    validation_days: int = 0
     fixed_inner_params: dict[str, Any] | None = None
     align_monday: bool = False
     sl_range: tuple[float, float] = (1.5, 8.0)
@@ -551,6 +568,7 @@ async def run_midas_wf_optuna(
         data_start, data_end,
         config.train_days, config.test_days, config.step_days,
         align_monday=config.align_monday,
+        validation_days=config.validation_days,
     )
 
     if not windows:
@@ -558,19 +576,25 @@ async def run_midas_wf_optuna(
         return []
 
     print(f"\nWalk-Forward Optuna: {len(windows)} windows")
-    print(f"  Train: {config.train_days}d, Test: {config.test_days}d, "
-          f"Step: {config.step_days}d")
+    desc = f"  Train: {config.train_days}d, Selection: {config.test_days}d"
+    if config.validation_days > 0:
+        desc += f", Validation: {config.validation_days}d"
+    desc += f", Step: {config.step_days}d"
+    print(desc)
     print(f"  Per window: {config.outer_trials} outer x "
           f"{config.inner_trials} inner trials")
 
     results: list[OptimizationResult] = []
     all_records: list[TrialRecord] = []
 
-    for i, (train_start, train_end, test_start, test_end) in enumerate(windows):
+    for i, (train_start, train_end, test_start, test_end, val_start, val_end) in enumerate(windows):
         print(f"\n{'#'*60}")
-        print(f"WINDOW {i+1}/{len(windows)}: "
-              f"train {train_start.date()}→{train_end.date()}, "
-              f"test {test_start.date()}→{test_end.date()}")
+        window_desc = (f"WINDOW {i+1}/{len(windows)}: "
+                       f"train {train_start.date()}→{train_end.date()}, "
+                       f"sel {test_start.date()}→{test_end.date()}")
+        if val_start is not None:
+            window_desc += f", val {val_start.date()}→{val_end.date()}"  # type: ignore[union-attr]
+        print(window_desc)
         print(f"{'#'*60}")
 
         opt_config = OptimizerConfig(
@@ -585,7 +609,8 @@ async def run_midas_wf_optuna(
             score_metric=config.score_metric,
             min_daily_trades=config.min_daily_trades,
             trade_deficit_penalty=config.trade_deficit_penalty,
-            split_oos=config.split_oos,
+            validation_start=val_start,
+            validation_end=val_end,
             fixed_inner_params=config.fixed_inner_params,
             sl_range=config.sl_range,
             tp_range=config.tp_range,
@@ -619,7 +644,7 @@ async def run_midas_wf_optuna(
 
 def _print_wf_optuna_summary(
     results: list[OptimizationResult],
-    windows: list[tuple[datetime, datetime, datetime, datetime]],
+    windows: list[tuple[datetime, datetime, datetime, datetime, datetime | None, datetime | None]],
 ) -> None:
     """Print per-window OOS summary table."""
     has_val = any(r.val_score is not None for r in results)

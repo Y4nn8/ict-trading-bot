@@ -27,11 +27,13 @@ class TestGenerateWindows:
 
         assert len(windows) > 0
         # First window: train 30d + test 2d = 32d from start
-        t_start, t_end, test_s, test_e = windows[0]
+        t_start, t_end, test_s, test_e, val_s, val_e = windows[0]
         assert t_start == start
         assert (t_end - t_start).days == 30
         assert test_s == t_end
         assert (test_e - test_s).days == 2
+        assert val_s is None
+        assert val_e is None
 
     def test_step_advances(self) -> None:
         start = datetime(2025, 1, 1, tzinfo=UTC)
@@ -227,6 +229,20 @@ class TestAlignMonday:
         assert windows[0][0].weekday() == 0
         assert windows[0][0] == datetime(2025, 10, 6, tzinfo=UTC)
 
+    def test_validation_days(self) -> None:
+        start = datetime(2025, 1, 1, tzinfo=UTC)
+        end = datetime(2025, 4, 1, tzinfo=UTC)
+
+        windows = generate_windows(
+            start, end, train_days=30, test_days=7, step_days=7,
+            validation_days=7,
+        )
+        assert len(windows) > 0
+        _, _, test_s, test_e, val_s, val_e = windows[0]
+        assert (test_e - test_s).days == 7
+        assert val_s == test_e
+        assert (val_e - val_s).days == 7  # type: ignore[operator]
+
     def test_non_aligned_preserves_start(self) -> None:
         # Without align_monday, start stays as-is
         start = datetime(2025, 10, 1, tzinfo=UTC)  # Wednesday
@@ -244,7 +260,7 @@ class TestWFOptunaConfigNewFields:
 
     def test_new_defaults(self) -> None:
         cfg = WalkForwardOptunaConfig()
-        assert cfg.split_oos is False
+        assert cfg.validation_days == 0
         assert cfg.fixed_inner_params is None
         assert cfg.align_monday is False
         assert cfg.min_daily_trades == 10
@@ -265,7 +281,8 @@ class TestWFOptunaSummary:
         ]
         windows = [
             (datetime(2025, 1, 1, tzinfo=UTC), datetime(2025, 1, 31, tzinfo=UTC),
-             datetime(2025, 1, 31, tzinfo=UTC), datetime(2025, 2, 7, tzinfo=UTC)),
+             datetime(2025, 1, 31, tzinfo=UTC), datetime(2025, 2, 7, tzinfo=UTC),
+             None, None),
         ]
         _print_wf_optuna_summary(results, windows)
         captured = capsys.readouterr()  # type: ignore[union-attr]
@@ -286,7 +303,8 @@ class TestWFOptunaSummary:
         ]
         windows = [
             (datetime(2025, 1, 1, tzinfo=UTC), datetime(2025, 1, 31, tzinfo=UTC),
-             datetime(2025, 1, 31, tzinfo=UTC), datetime(2025, 2, 7, tzinfo=UTC)),
+             datetime(2025, 1, 31, tzinfo=UTC), datetime(2025, 2, 7, tzinfo=UTC),
+             datetime(2025, 2, 7, tzinfo=UTC), datetime(2025, 2, 14, tzinfo=UTC)),
         ]
         _print_wf_optuna_summary(results, windows)
         captured = capsys.readouterr()  # type: ignore[union-attr]

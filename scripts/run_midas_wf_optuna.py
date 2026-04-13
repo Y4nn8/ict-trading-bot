@@ -86,7 +86,7 @@ async def main(args: argparse.Namespace) -> None:
             score_metric=args.score,
             min_daily_trades=args.min_daily_trades,
             trade_deficit_penalty=args.trade_deficit_penalty,
-            split_oos=args.split_oos,
+            validation_days=args.validation_days,
             fixed_inner_params=fixed_inner,
             align_monday=args.align_monday,
             sl_range=tuple(args.sl_range),
@@ -135,8 +135,8 @@ def cli() -> None:
                         help="Min trades/day for trade deficit penalty (default: 10)")
     parser.add_argument("--trade-deficit-penalty", type=float, default=10.0,
                         help="Penalty per missing trade below minimum (default: 10.0)")
-    parser.add_argument("--split-oos", action="store_true",
-                        help="Split OOS into selection + validation halves")
+    parser.add_argument("--validation-days", type=int, default=0,
+                        help="Validation window in days after selection (0=disabled)")
     parser.add_argument("--align-monday", action="store_true",
                         help="Snap window boundaries to Monday")
     parser.add_argument("--fix-inner-params", type=str, default=None,

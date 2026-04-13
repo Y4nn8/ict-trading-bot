@@ -160,7 +160,8 @@ class OptimizerConfig:
         score_metric: Metric to optimize (composite uses PnL + trade deficit).
         min_daily_trades: Minimum expected trades per trading day.
         trade_deficit_penalty: Penalty per missing trade below minimum.
-        split_oos: Split OOS into selection (Optuna) + validation halves.
+        validation_start: Validation window start (None = no validation).
+        validation_end: Validation window end (None = no validation).
         fixed_inner_params: Fixed inner params (skip suggestion for these).
         sl_range: SL search range in points (fixed mode fallback).
         tp_range: TP search range in points (fixed mode fallback).
@@ -185,7 +186,8 @@ class OptimizerConfig:
     score_metric: str = "composite"
     min_daily_trades: int = 10
     trade_deficit_penalty: float = 10.0
-    split_oos: bool = False
+    validation_start: datetime | None = None
+    validation_end: datetime | None = None
     fixed_inner_params: dict[str, Any] | None = None
     sl_range: tuple[float, float] = (1.5, 8.0)
     tp_range: tuple[float, float] = (1.5, 8.0)
@@ -458,13 +460,9 @@ async def run_nested_optuna(
     sample_registry = registry_factory()
     registry_params = sample_registry.all_tunable_params()
 
-    # Split OOS: selection half for Optuna, validation half for reporting
-    if config.split_oos:
-        oos_mid = config.test_start + (config.test_end - config.test_start) / 2
-        eval_config = dataclasses.replace(config, test_end=oos_mid)
-    else:
-        eval_config = config
-        oos_mid = None
+    has_validation = (
+        config.validation_start is not None and config.validation_end is not None
+    )
 
     n_fixed_inner = len(config.fixed_inner_params) if config.fixed_inner_params else 0
     n_inner_params = 17 - n_fixed_inner
@@ -479,14 +477,13 @@ async def run_nested_optuna(
         print(f"  Outer ranges restricted: {config.outer_param_ranges}")
     if config.fixed_inner_params:
         print(f"  Fixed inner: {config.fixed_inner_params}")
-    print(f"  Train: {config.train_start.date()} → {config.train_end.date()}")
-    if config.split_oos:
-        print(f"  OOS selection:  {config.test_start.date()}"
-              f" → {oos_mid.date()}")  # type: ignore[union-attr]
-        print(f"  OOS validation: {oos_mid.date()}"  # type: ignore[union-attr]
-              f" → {config.test_end.date()}")
-    else:
-        print(f"  Test:  {config.test_start.date()} → {config.test_end.date()}")
+    print(f"  Train:      {config.train_start.date()}"
+          f" → {config.train_end.date()}")
+    print(f"  Selection:  {config.test_start.date()}"
+          f" → {config.test_end.date()}")
+    if has_validation:
+        print(f"  Validation: {config.validation_start.date()}"  # type: ignore[union-attr]
+              f" → {config.validation_end.date()}")  # type: ignore[union-attr]
 
     best_score = -float("inf")
     best_outer: dict[str, Any] = {}
@@ -661,7 +658,7 @@ async def run_nested_optuna(
                 slippage_seed=config.slippage_seed,
             )
             score, n_tr, wr, pnl, trades_list = await _evaluate_oos_async(
-                trainer, sim_config, db, eval_config,
+                trainer, sim_config, db, config,
                 registry_factory, extractor_params,
             )
 
@@ -720,10 +717,16 @@ async def run_nested_optuna(
     result.best_win_rate = best_wr
     result.best_pnl = best_pnl
 
-    # --- Validation pass on second OOS half ---
-    if config.split_oos and oos_mid is not None and result.best_trainer is not None:
+    # --- Validation pass ---
+    if has_validation and result.best_trainer is not None:
+        assert config.validation_start is not None
+        assert config.validation_end is not None
         val_config = dataclasses.replace(
-            config, test_start=oos_mid, split_oos=False,
+            config,
+            test_start=config.validation_start,
+            test_end=config.validation_end,
+            validation_start=None,
+            validation_end=None,
         )
         val_sim = SimConfig(
             sl_points=best_inner.get("sl_fallback", 3.0),

@@ -91,7 +91,8 @@ async def main(args: argparse.Namespace) -> None:
             score_metric=args.score,
             min_daily_trades=args.min_daily_trades,
             trade_deficit_penalty=args.trade_deficit_penalty,
-            split_oos=args.split_oos,
+            validation_start=args.validation_start,
+            validation_end=args.validation_end,
             fixed_inner_params=fixed_inner,
             fixed_outer_params=fixed_outer,
             outer_param_ranges=outer_ranges,
@@ -157,8 +158,10 @@ def cli() -> None:
                         help="Min trades/day for trade deficit penalty (default: 10)")
     parser.add_argument("--trade-deficit-penalty", type=float, default=10.0,
                         help="Penalty per missing trade below minimum (default: 10.0)")
-    parser.add_argument("--split-oos", action="store_true",
-                        help="Split OOS into selection + validation halves")
+    parser.add_argument("--validation-start", type=str, default=None,
+                        help="Validation window start YYYY-MM-DD")
+    parser.add_argument("--validation-end", type=str, default=None,
+                        help="Validation window end YYYY-MM-DD")
     parser.add_argument("--fix-inner-params", type=str, default=None,
                         help="YAML file with fixed inner params to reduce search space")
     parser.add_argument("--sl-range", type=float, nargs=2, default=[1.5, 8.0],
@@ -190,6 +193,14 @@ def cli() -> None:
                 tzinfo=UTC,
             ),
         )
+
+    for attr in ("validation_start", "validation_end"):
+        val = getattr(args, attr)
+        if val is not None:
+            setattr(
+                args, attr,
+                datetime.strptime(val, "%Y-%m-%d").replace(tzinfo=UTC),
+            )
 
     asyncio.run(main(args))
 

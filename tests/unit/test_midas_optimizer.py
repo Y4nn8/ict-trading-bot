@@ -476,12 +476,13 @@ class TestFixedInnerParams:
         assert params["min_child_samples"] == 50
 
 
-class TestSplitOOS:
-    """Tests for split OOS configuration."""
+class TestValidation:
+    """Tests for validation window configuration."""
 
     def test_config_defaults(self) -> None:
         config = OptimizerConfig()
-        assert config.split_oos is False
+        assert config.validation_start is None
+        assert config.validation_end is None
 
     def test_val_fields_default(self) -> None:
         result = OptimizationResult()
