@@ -8,11 +8,11 @@ import optuna
 import pytest
 
 from src.midas.optimizer import (
-    INNER_PARAM_KEYS,
     OptimizationResult,
     OptimizerConfig,
     TrialRecord,
     _count_trading_days,
+    _print_result,
     _suggest_inner_params,
     _suggest_outer_params,
     default_output_prefix,
@@ -438,6 +438,43 @@ class TestFixedInnerParams:
         assert "subsample" in loaded
         assert "some_outer_param" not in loaded
 
+    def test_load_fixed_inner_params_invalid_raises(
+        self, tmp_path: object,
+    ) -> None:
+        from pathlib import Path
+
+        path = Path(str(tmp_path)) / "bad.yml"
+        path.write_text("- just a list\n")
+        with pytest.raises(ValueError, match="Expected a YAML mapping"):
+            load_fixed_inner_params(str(path))
+
+    def test_load_fixed_inner_params_all_sizing(
+        self, tmp_path: object,
+    ) -> None:
+        """Test the standard sizing+regularization reduction (17→11)."""
+        from pathlib import Path
+
+        path = Path(str(tmp_path)) / "sizing.yml"
+        path.write_text(
+            "gamma: 1.0\n"
+            "max_margin_proba: 0.80\n"
+            "min_risk_pct: 0.005\n"
+            "subsample: 0.8\n"
+            "colsample_bytree: 0.8\n"
+            "min_child_samples: 50\n"
+        )
+        loaded = load_fixed_inner_params(str(path))
+        assert len(loaded) == 6
+
+        # Verify these reduce inner params from 17 to 11
+        config = OptimizerConfig(fixed_inner_params=loaded)
+        study = optuna.create_study()
+        trial = study.ask()
+        params = _suggest_inner_params(trial, config)
+        assert len(params) == 17  # all 17 returned, 6 are fixed values
+        assert params["gamma"] == 1.0
+        assert params["min_child_samples"] == 50
+
 
 class TestSplitOOS:
     """Tests for split OOS configuration."""
@@ -451,3 +488,45 @@ class TestSplitOOS:
         assert result.val_score is None
         assert result.val_n_trades == 0
         assert result.val_pnl == 0.0
+
+
+class TestPrintResult:
+    """Tests for result printing with and without validation."""
+
+    def test_print_without_validation(self, capsys: object) -> None:
+        result = OptimizationResult(
+            best_score=42.5,
+            best_n_trades=20,
+            best_win_rate=0.6,
+            best_pnl=150.0,
+            total_outer_trials=10,
+            total_inner_trials=300,
+            best_outer_params={"atr_period": 14},
+            best_inner_params={"k_sl": 1.5, "entry_threshold": 0.4},
+        )
+        _print_result(result)
+        captured = capsys.readouterr()  # type: ignore[union-attr]
+        assert "+42.50" in captured.out
+        assert "Validation" not in captured.out
+        assert "atr_period" in captured.out
+
+    def test_print_with_validation(self, capsys: object) -> None:
+        result = OptimizationResult(
+            best_score=42.5,
+            best_n_trades=20,
+            best_win_rate=0.6,
+            best_pnl=150.0,
+            total_outer_trials=10,
+            total_inner_trials=300,
+            best_outer_params={},
+            best_inner_params={"k_sl": 1.5},
+            val_score=35.0,
+            val_n_trades=18,
+            val_win_rate=0.55,
+            val_pnl=120.0,
+        )
+        _print_result(result)
+        captured = capsys.readouterr()  # type: ignore[union-attr]
+        assert "Validation" in captured.out
+        assert "+35.00" in captured.out
+        assert "+120.00" in captured.out

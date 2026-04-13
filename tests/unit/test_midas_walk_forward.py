@@ -10,6 +10,7 @@ from src.midas.walk_forward import (
     WalkForwardOptunaConfig,
     _midas_to_common_trade,
     _print_param_stability,
+    _print_wf_optuna_summary,
     _snap_to_monday,
     generate_windows,
 )
@@ -248,3 +249,47 @@ class TestWFOptunaConfigNewFields:
         assert cfg.align_monday is False
         assert cfg.min_daily_trades == 10
         assert cfg.trade_deficit_penalty == 10.0
+
+
+class TestWFOptunaSummary:
+    """Tests for WF Optuna summary printing."""
+
+    def test_summary_without_validation(self, capsys: object) -> None:
+        results = [
+            OptimizationResult(
+                best_score=50.0, best_n_trades=30,
+                best_win_rate=0.5, best_pnl=100.0,
+                total_outer_trials=10, total_inner_trials=300,
+                best_outer_params={}, best_inner_params={},
+            ),
+        ]
+        windows = [
+            (datetime(2025, 1, 1, tzinfo=UTC), datetime(2025, 1, 31, tzinfo=UTC),
+             datetime(2025, 1, 31, tzinfo=UTC), datetime(2025, 2, 7, tzinfo=UTC)),
+        ]
+        _print_wf_optuna_summary(results, windows)
+        captured = capsys.readouterr()  # type: ignore[union-attr]
+        assert "W1" in captured.out
+        assert "+100.00" in captured.out
+        assert "ValPnL" not in captured.out
+
+    def test_summary_with_validation(self, capsys: object) -> None:
+        results = [
+            OptimizationResult(
+                best_score=50.0, best_n_trades=30,
+                best_win_rate=0.5, best_pnl=100.0,
+                total_outer_trials=10, total_inner_trials=300,
+                best_outer_params={}, best_inner_params={},
+                val_score=40.0, val_n_trades=25,
+                val_win_rate=0.48, val_pnl=80.0,
+            ),
+        ]
+        windows = [
+            (datetime(2025, 1, 1, tzinfo=UTC), datetime(2025, 1, 31, tzinfo=UTC),
+             datetime(2025, 1, 31, tzinfo=UTC), datetime(2025, 2, 7, tzinfo=UTC)),
+        ]
+        _print_wf_optuna_summary(results, windows)
+        captured = capsys.readouterr()  # type: ignore[union-attr]
+        assert "ValPnL" in captured.out
+        assert "+80.00" in captured.out
+        assert "Profitable windows: 1/1" in captured.out
