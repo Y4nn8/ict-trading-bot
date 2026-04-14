@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import csv
 import dataclasses
+import heapq
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -22,6 +23,7 @@ import numpy as np
 import optuna
 import polars as pl
 
+from src.midas.ensemble import EnsembleMember, EnsemblePredictor
 from src.midas.labeler import build_exit_dataset, relabel_dataframe
 from src.midas.replay_engine import (
     ReplayConfig,
@@ -206,6 +208,7 @@ class OptimizerConfig:
     slippage_min_pts: float = 0.0
     slippage_max_pts: float = 0.0
     slippage_seed: int | None = None
+    ensemble_k: int = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +253,11 @@ class OptimizationResult:
     val_n_trades: int = 0
     val_win_rate: float = 0.0
     val_pnl: float = 0.0
+    ensemble: EnsemblePredictor | None = None
+    ensemble_val_score: float | None = None
+    ensemble_val_n_trades: int = 0
+    ensemble_val_win_rate: float = 0.0
+    ensemble_val_pnl: float = 0.0
 
 
 def _suggest_outer_params(
@@ -338,7 +346,7 @@ def _suggest_inner_params(
 
 
 async def _evaluate_oos_async(
-    trainer: MidasTrainer,
+    trainer: MidasTrainer | EnsemblePredictor,
     sim_config: SimConfig,
     db: Any,
     config: OptimizerConfig,
@@ -347,7 +355,7 @@ async def _evaluate_oos_async(
 ) -> tuple[float, int, float, float, list[MidasTrade]]:
     """Run OOS test and return (score, n_trades, win_rate, total_pnl, trades)."""
     simulator = TradeSimulator(sim_config)
-    _trainer = trainer
+    _predictor = trainer
     _simulator = simulator
     _atr_col = config.atr_column
     latest_features: dict[str, float] = {}
@@ -356,17 +364,16 @@ async def _evaluate_oos_async(
         tick: Tick,
         features: dict[str, float],
         *,
-        tr: MidasTrainer = _trainer,
+        pred: MidasTrainer | EnsemblePredictor = _predictor,
         sim: TradeSimulator = _simulator,
         atr_col: str = _atr_col,
         feat: dict[str, float] = latest_features,
     ) -> None:
         feat.update(features)
-        # Exit model at sample time (candle close when sample_on_candle=True)
-        if tr.has_exit_model and sim.open_count > 0:
+        if pred.has_exit_model and sim.open_count > 0:
             ctx = sim.get_position_context(tick)
             if ctx is not None:
-                should_close, _ = tr.predict_exit(
+                should_close, _ = pred.predict_exit(
                     feat,
                     pos_unrealized_pnl=ctx["pos_unrealized_pnl"],
                     pos_duration_sec=ctx["pos_duration_sec"],
@@ -374,7 +381,7 @@ async def _evaluate_oos_async(
                 )
                 if should_close:
                     sim.early_close(tick)
-        signal, confidence = tr.predict(features)
+        signal, confidence = pred.predict(features)
         sim.on_signal(
             tick, signal,
             atr=features.get(atr_col, 0.0),
@@ -563,6 +570,10 @@ async def run_nested_optuna(
         best_inner_params_local: dict[str, Any] = {}
         best_inner_trades_list: list[MidasTrade] = []
 
+        # Top-K heap for ensemble (score, trainer, params)
+        topk: list[tuple[float, int, MidasTrainer, dict[str, Any]]] = []
+        _topk_counter = 0  # tie-breaker for heapq
+
         for _inner_i in range(config.inner_trials):
             inner_trial = inner_study.ask()
             inner_params = _suggest_inner_params(inner_trial, config)
@@ -671,6 +682,17 @@ async def run_nested_optuna(
 
             inner_study.tell(inner_trial, score)
 
+            # Maintain top-K heap (min-heap on score)
+            _topk_counter += 1
+            if len(topk) < config.ensemble_k:
+                heapq.heappush(
+                    topk, (score, _topk_counter, trainer, dict(inner_params)),
+                )
+            elif score > topk[0][0]:
+                heapq.heapreplace(
+                    topk, (score, _topk_counter, trainer, dict(inner_params)),
+                )
+
             if score > best_inner_score:
                 best_inner_score = score
                 best_inner_trainer = trainer
@@ -680,15 +702,30 @@ async def run_nested_optuna(
                 best_inner_pnl = pnl
                 best_inner_trades_list = trades_list
 
+        # Build ensemble from top-K inner trials
+        topk_sorted = sorted(topk, key=lambda x: x[0], reverse=True)
+        ensemble = EnsemblePredictor(
+            members=[
+                EnsembleMember(
+                    trainer=t, inner_params=p, score=s,
+                )
+                for s, _, t, p in topk_sorted
+            ],
+        )
+
         # Report to outer
         outer_study.tell(outer_trial, best_inner_score)
         result.total_inner_trials += config.inner_trials
 
-        # Validation pass for this outer trial
+        # Validation pass — single best AND ensemble
         v_sc: float | None = None
         v_nt = 0
         v_wr_val = 0.0
         v_pnl_val = 0.0
+        ev_sc: float | None = None
+        ev_nt = 0
+        ev_wr_val = 0.0
+        ev_pnl_val = 0.0
         if (has_validation
                 and best_inner_trainer is not None
                 and best_inner_params_local):
@@ -726,6 +763,30 @@ async def run_nested_optuna(
                 registry_factory, extractor_params,
             )
 
+            # Ensemble validation
+            if ensemble.size >= 2:
+                ov = ensemble.build_sim_config_overrides()
+                ev_sim = SimConfig(
+                    sl_points=ov["sl_fallback"],
+                    tp_points=ov["tp_fallback"],
+                    k_sl=ov["k_sl"],
+                    k_tp=ov["k_tp"],
+                    max_spread=2.0,
+                    gamma=ov["gamma"],
+                    max_margin_proba=ov["max_margin_proba"],
+                    sizing_threshold=ov["sizing_threshold"],
+                    min_risk_pct=ov["min_risk_pct"],
+                    slippage_min_pts=config.slippage_min_pts,
+                    slippage_max_pts=config.slippage_max_pts,
+                    slippage_seed=config.slippage_seed,
+                )
+                ev_sc, ev_nt, ev_wr_val, ev_pnl_val, _ = (
+                    await _evaluate_oos_async(
+                        ensemble, ev_sim, db, vt_config,
+                        registry_factory, extractor_params,
+                    )
+                )
+
         # Record best-inner result for this outer trial
         result.trial_records.append(TrialRecord(
             window_idx=window_idx,
@@ -748,14 +809,24 @@ async def run_nested_optuna(
             val_str = (f", val_trades={v_nt}, "
                        f"val_WR={v_wr_val*100:.0f}%, "
                        f"val_PnL={v_pnl_val:+.1f}")
+        ens_str = ""
+        if ev_sc is not None:
+            ens_str = (f", ens_val_trades={ev_nt}, "
+                       f"ens_val_WR={ev_wr_val*100:.0f}%, "
+                       f"ens_val_PnL={ev_pnl_val:+.1f}")
         print(f"  Best inner: score={best_inner_score:+.2f}, "
               f"k_sl={best_inner_params_local.get('k_sl', 0):.2f}, "
               f"k_tp={best_inner_params_local.get('k_tp', 0):.2f}, "
               f"gamma={best_inner_params_local.get('gamma', 0):.2f}, "
               f"sel_trades={best_inner_trades}, "
               f"WR={best_inner_wr*100:.0f}%, "
-              f"PnL={best_inner_pnl:+.1f}{val_str}, "
+              f"PnL={best_inner_pnl:+.1f}{val_str}{ens_str}, "
               f"threshold={best_inner_params_local.get('entry_threshold', '?')}")
+        if ensemble.size >= 2:
+            print(f"  Ensemble: K={ensemble.size}, "
+                  f"scores=[{', '.join(f'{m.score:+.0f}' for m in ensemble.members)}]")
+            if best_inner_params_local:
+                print("  Best inner params (SL/TP + LightGBM):")
 
         if best_inner_score > best_score:
             best_score = best_inner_score
@@ -763,6 +834,7 @@ async def run_nested_optuna(
             best_inner = best_inner_params_local
             result.best_trainer = best_inner_trainer
             result.best_trades = best_inner_trades_list
+            result.ensemble = ensemble
             best_trades = best_inner_trades
             best_wr = best_inner_wr
             best_pnl = best_inner_pnl
@@ -782,6 +854,13 @@ async def run_nested_optuna(
         result.val_n_trades = best_rec.val_n_trades
         result.val_win_rate = best_rec.val_win_rate
         result.val_pnl = best_rec.val_pnl
+
+    # Pick ensemble validation from the best outer trial's ensemble
+    if has_validation and ev_sc is not None:
+        result.ensemble_val_score = ev_sc
+        result.ensemble_val_n_trades = ev_nt
+        result.ensemble_val_win_rate = ev_wr_val
+        result.ensemble_val_pnl = ev_pnl_val
 
     _print_result(result)
     return result
@@ -905,10 +984,17 @@ def _print_result(result: OptimizationResult) -> None:
           f"WR: {result.best_win_rate*100:.1f}%, "
           f"PnL: {result.best_pnl:+.2f}")
     if result.val_score is not None:
-        print(f"  Validation: score={result.val_score:+.2f}, "
+        print(f"  Validation (best-1): score={result.val_score:+.2f}, "
               f"trades={result.val_n_trades}, "
               f"WR={result.val_win_rate*100:.1f}%, "
               f"PnL={result.val_pnl:+.2f}")
+    if result.ensemble_val_score is not None:
+        print(f"  Validation (ensemble): score={result.ensemble_val_score:+.2f}, "
+              f"trades={result.ensemble_val_n_trades}, "
+              f"WR={result.ensemble_val_win_rate*100:.1f}%, "
+              f"PnL={result.ensemble_val_pnl:+.2f}")
+    if result.ensemble is not None:
+        print(f"  Ensemble: K={result.ensemble.size}")
     print(f"  Outer trials: {result.total_outer_trials}, "
           f"Inner trials: {result.total_inner_trials}")
     print("\n  Best outer params (extractor):")

@@ -1,9 +1,10 @@
-# Fixed inner params — derived from step 2 WF analysis (16 windows, 4 val-positive)
-# Reduces search space from 17 → 12 dimensions for better convergence with 100 trials.
+# Fixed inner params — derived from step 2b WF analysis (15 windows, 3 val-positive)
+# Reduces search space from 17 → 11 dimensions for better convergence with 100 trials.
+
+# Entry threshold: only converged param (CV 5.6%, range 0.49-0.58, median 0.546)
+entry_threshold: 0.55
 
 # Sizing: gamma=1.0 (neutral), min_risk=1% capital floor, margin proba 85%+ = full engage
-# Rationale: best val windows converge on min_risk~0.019, max_margin~0.94.
-# We fix slightly below observed values to leave room for Optuna to work on other dims.
 gamma: 1.0
 min_risk_pct: 0.01
 max_margin_proba: 0.85

@@ -539,6 +539,7 @@ class WalkForwardOptunaConfig:
     slippage_min_pts: float = 0.0
     slippage_max_pts: float = 0.0
     slippage_seed: int | None = None
+    ensemble_k: int = 5
 
 
 async def run_midas_wf_optuna(
@@ -623,6 +624,7 @@ async def run_midas_wf_optuna(
             slippage_min_pts=config.slippage_min_pts,
             slippage_max_pts=config.slippage_max_pts,
             slippage_seed=config.slippage_seed,
+            ensemble_k=config.ensemble_k,
         )
 
         result = await run_nested_optuna(opt_config, db, window_idx=i)
@@ -650,21 +652,26 @@ def _print_wf_optuna_summary(
 ) -> None:
     """Print per-window OOS summary table."""
     has_val = any(r.val_score is not None for r in results)
+    has_ens = any(r.ensemble_val_score is not None for r in results)
 
-    print(f"\n{'='*70}")
+    print(f"\n{'='*90}")
     print("WALK-FORWARD OPTUNA SUMMARY")
-    print(f"{'='*70}")
+    print(f"{'='*90}")
     header = (f"{'Window':<8} {'Test dates':<25} {'Score':>8} "
               f"{'Trades':>7} {'WR':>6} {'PnL':>10}")
     if has_val:
         header += f" {'ValPnL':>10}"
+    if has_ens:
+        header += f" {'EnsValPnL':>10}"
     print(header)
-    print("-" * (80 if has_val else 70))
+    print("-" * 90)
 
     total_trades = 0
     total_pnl = 0.0
     total_val_pnl = 0.0
+    total_ens_val_pnl = 0.0
     profitable = 0
+    ens_profitable = 0
 
     for i, (result, win) in enumerate(zip(results, windows, strict=True)):
         test_str = f"{win[2].date()} → {win[3].date()}"
@@ -676,19 +683,33 @@ def _print_wf_optuna_summary(
             val_pnl = result.val_pnl if result.val_score is not None else 0.0
             line += f" {val_pnl:>+10.2f}"
             total_val_pnl += val_pnl
+        if has_ens:
+            ens_pnl = (
+                result.ensemble_val_pnl
+                if result.ensemble_val_score is not None else 0.0
+            )
+            line += f" {ens_pnl:>+10.2f}"
+            total_ens_val_pnl += ens_pnl
+            if ens_pnl > 0:
+                ens_profitable += 1
         print(line)
         total_trades += result.best_n_trades
         total_pnl += result.best_pnl
         if result.best_pnl > 0:
             profitable += 1
 
-    print("-" * (80 if has_val else 70))
+    print("-" * 90)
     totals = (f"{'Total':<34} {'':<8} {total_trades:>7} "
               f"{'':<6} {total_pnl:>+10.2f}")
     if has_val:
         totals += f" {total_val_pnl:>+10.2f}"
+    if has_ens:
+        totals += f" {total_ens_val_pnl:>+10.2f}"
     print(totals)
-    print(f"  Profitable windows: {profitable}/{len(results)}")
+    print(f"  Profitable windows (sel): {profitable}/{len(results)}")
+    if has_ens:
+        print(f"  Profitable windows (ensemble val): "
+              f"{ens_profitable}/{len(results)}")
 
 
 def _print_param_stability(results: list[OptimizationResult]) -> None:

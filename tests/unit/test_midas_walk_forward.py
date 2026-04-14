@@ -311,7 +311,7 @@ class TestWFOptunaSummary:
         captured = capsys.readouterr()  # type: ignore[union-attr]
         assert "ValPnL" in captured.out
         assert "+80.00" in captured.out
-        assert "Profitable windows: 1/1" in captured.out
+        assert "Profitable windows (sel): 1/1" in captured.out
 
 
 class TestRangeSaturation:

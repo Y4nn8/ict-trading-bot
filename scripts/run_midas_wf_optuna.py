@@ -98,6 +98,7 @@ async def main(args: argparse.Namespace) -> None:
             slippage_min_pts=args.slippage_min,
             slippage_max_pts=args.slippage_max,
             slippage_seed=args.slippage_seed,
+            ensemble_k=args.ensemble_k,
         )
 
         prefix = args.output or default_output_prefix()
@@ -156,6 +157,8 @@ def cli() -> None:
                         help="YAML file with fixed outer params")
     parser.add_argument("--outer-ranges-from", type=str, default=None,
                         help="YAML file with restricted outer ranges {name: [lo, hi]}")
+    parser.add_argument("--ensemble-k", type=int, default=5,
+                        help="Number of top-K models for ensemble voting (default: 5)")
     parser.add_argument("--output", type=str, default=None,
                         help="Output prefix (default: timestamped)")
     args = parser.parse_args()
