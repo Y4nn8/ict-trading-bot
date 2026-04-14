@@ -201,3 +201,50 @@ class TestMidasTrainer:
         )
         assert should_close is False
         assert confidence == 0.0
+
+
+class TestMidasTrainerCV:
+    """Tests for cross-validated training."""
+
+    def test_train_cv_returns_loss_and_result(self) -> None:
+        df = _make_features(500)
+        target = _make_target(500)
+        trainer = MidasTrainer(TrainerConfig(n_estimators=10))
+        cv_loss, result = trainer.train_cv(df, target, n_folds=3)
+
+        assert 0.0 < cv_loss < 10.0
+        assert trainer.is_trained
+        assert result.n_train > 0
+
+    def test_train_cv_with_weights(self) -> None:
+        df = _make_features(500)
+        target = _make_target(500)
+        weights = np.ones(500)
+        trainer = MidasTrainer(TrainerConfig(n_estimators=10))
+        cv_loss, result = trainer.train_cv(
+            df, target, sample_weights=weights, n_folds=5,
+        )
+        assert cv_loss > 0
+        assert result.n_train > 0
+
+    def test_train_cv_model_usable_after(self) -> None:
+        df = _make_features(300)
+        target = _make_target(300)
+        trainer = MidasTrainer(TrainerConfig(
+            n_estimators=10, entry_threshold=0.3,
+        ))
+        trainer.train_cv(df, target, n_folds=3)
+
+        features = {"feat_1": 0.5, "feat_2": -0.3, "feat_3": 1.0}
+        signal, confidence = trainer.predict(features)
+        assert signal in (0, 1, 2)
+        assert 0.0 <= confidence <= 1.0
+
+    def test_reg_alpha_lambda_wired(self) -> None:
+        df = _make_features(300)
+        target = _make_target(300)
+        trainer = MidasTrainer(TrainerConfig(
+            n_estimators=10, reg_alpha=1.0, reg_lambda=1.0,
+        ))
+        cv_loss, _ = trainer.train_cv(df, target, n_folds=3)
+        assert cv_loss > 0

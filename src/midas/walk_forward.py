@@ -536,6 +536,8 @@ class WalkForwardOptunaConfig:
     max_margin_proba_range: tuple[float, float] = (0.70, 0.95)
     fixed_outer_params: dict[str, Any] | None = None
     outer_param_ranges: dict[str, tuple[float, float]] | None = None
+    inner_objective: str = "oos_pnl"
+    cv_folds: int = 5
     slippage_min_pts: float = 0.0
     slippage_max_pts: float = 0.0
     slippage_seed: int | None = None
@@ -576,11 +578,15 @@ async def run_midas_wf_optuna(
         return []
 
     print(f"\nWalk-Forward Optuna: {len(windows)} windows")
-    desc = f"  Train: {config.train_days}d, Selection: {config.test_days}d"
+    is_cv = config.inner_objective == "cv_logloss"
+    sel_label = "OOS" if is_cv else "Selection"
+    desc = f"  Train: {config.train_days}d, {sel_label}: {config.test_days}d"
     if config.validation_days > 0:
         desc += f", Validation: {config.validation_days}d"
     desc += f", Step: {config.step_days}d"
     print(desc)
+    if is_cv:
+        print(f"  Inner objective: CV log loss ({config.cv_folds}-fold)")
     print(f"  Per window: {config.outer_trials} outer x "
           f"{config.inner_trials} inner trials")
 
@@ -589,9 +595,10 @@ async def run_midas_wf_optuna(
 
     for i, (train_start, train_end, test_start, test_end, val_start, val_end) in enumerate(windows):
         print(f"\n{'#'*60}")
+        oos_label = "OOS" if is_cv else "sel"
         window_desc = (f"WINDOW {i+1}/{len(windows)}: "
                        f"train {train_start.date()}→{train_end.date()}, "
-                       f"sel {test_start.date()}→{test_end.date()}")
+                       f"{oos_label} {test_start.date()}→{test_end.date()}")
         if val_start is not None:
             window_desc += f", val {val_start.date()}→{val_end.date()}"  # type: ignore[union-attr]
         print(window_desc)
@@ -620,6 +627,8 @@ async def run_midas_wf_optuna(
             max_margin_proba_range=config.max_margin_proba_range,
             fixed_outer_params=config.fixed_outer_params,
             outer_param_ranges=config.outer_param_ranges,
+            inner_objective=config.inner_objective,
+            cv_folds=config.cv_folds,
             slippage_min_pts=config.slippage_min_pts,
             slippage_max_pts=config.slippage_max_pts,
             slippage_seed=config.slippage_seed,
@@ -634,7 +643,7 @@ async def run_midas_wf_optuna(
             write_trial_logs(all_records, output_prefix)
 
     # Print per-window OOS summary + param stability
-    _print_wf_optuna_summary(results, windows)
+    _print_wf_optuna_summary(results, windows, config.inner_objective)
 
     if len(results) >= 2:
         _print_param_stability(results)
@@ -647,15 +656,19 @@ async def run_midas_wf_optuna(
 def _print_wf_optuna_summary(
     results: list[OptimizationResult],
     windows: list[tuple[datetime, datetime, datetime, datetime, datetime | None, datetime | None]],
+    inner_objective: str = "oos_pnl",
 ) -> None:
     """Print per-window OOS summary table."""
     has_val = any(r.val_score is not None for r in results)
+    is_cv = inner_objective == "cv_logloss"
 
     print(f"\n{'='*70}")
     print("WALK-FORWARD OPTUNA SUMMARY")
     print(f"{'='*70}")
-    header = (f"{'Window':<8} {'Test dates':<25} {'Score':>8} "
-              f"{'Trades':>7} {'WR':>6} {'PnL':>10}")
+    score_label = "CVLoss" if is_cv else "Score"
+    pnl_label = "OOS_PnL" if is_cv else "PnL"
+    header = (f"{'Window':<8} {'Test dates':<25} {score_label:>8} "
+              f"{'Trades':>7} {'WR':>6} {pnl_label:>10}")
     if has_val:
         header += f" {'ValPnL':>10}"
     print(header)
@@ -668,10 +681,13 @@ def _print_wf_optuna_summary(
 
     for i, (result, win) in enumerate(zip(results, windows, strict=True)):
         test_str = f"{win[2].date()} → {win[3].date()}"
-        line = (f"W{i+1:<6} {test_str:<25} {result.best_score:>+8.1f} "
-                f"{result.best_n_trades:>7} "
-                f"{result.best_win_rate*100:>5.1f}% "
-                f"{result.best_pnl:>+10.2f}")
+        score_display = -result.best_score if is_cv else result.best_score
+        line = (f"W{i+1:<6} {test_str:<25} {score_display:>8.4f} "
+                if is_cv else
+                f"W{i+1:<6} {test_str:<25} {result.best_score:>+8.1f} ")
+        line += (f"{result.best_n_trades:>7} "
+                 f"{result.best_win_rate*100:>5.1f}% "
+                 f"{result.best_pnl:>+10.2f}")
         if has_val:
             val_pnl = result.val_pnl if result.val_score is not None else 0.0
             line += f" {val_pnl:>+10.2f}"

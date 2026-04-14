@@ -52,6 +52,8 @@ class TrainerConfig:
     colsample_bytree: float = 0.8
     entry_threshold: float = 0.55
     exit_threshold: float = 0.55
+    reg_alpha: float = 0.0
+    reg_lambda: float = 0.0
     val_fraction: float = 0.1
     early_stopping_rounds: int = 50
 
@@ -195,6 +197,8 @@ class MidasTrainer:
             "min_child_samples": cfg.min_child_samples,
             "subsample": cfg.subsample,
             "colsample_bytree": cfg.colsample_bytree,
+            "reg_alpha": cfg.reg_alpha,
+            "reg_lambda": cfg.reg_lambda,
             "is_unbalance": True,
             "verbosity": -1,
             "seed": 42,
@@ -233,6 +237,74 @@ class MidasTrainer:
             n_train=n_train,
             n_val=n_val,
         )
+
+    def train_cv(
+        self,
+        df: pl.DataFrame,
+        target: np.ndarray,
+        sample_weights: np.ndarray | None = None,
+        *,
+        n_folds: int = 5,
+    ) -> tuple[float, TrainResult]:
+        """Train with k-fold CV and return (cv_loss, final_model_result).
+
+        Uses lgb.cv for cross-validation, then trains a final model on
+        all data for downstream OOS evaluation.
+
+        Args:
+            df: Feature DataFrame.
+            target: Target array (0=PASS, 1=BUY, 2=SELL).
+            sample_weights: Optional PnL-based weights per sample.
+            n_folds: Number of CV folds.
+
+        Returns:
+            (cv_log_loss, train_result) where cv_log_loss is the mean
+            multi_logloss across folds.
+        """
+        feature_cols = [c for c in df.columns if c not in _META_COLUMNS]
+        x_all = df.select(feature_cols).to_numpy()
+
+        cfg = self._config
+        params: dict[str, Any] = {
+            "objective": "multiclass",
+            "num_class": 3,
+            "metric": "multi_logloss",
+            "learning_rate": cfg.learning_rate,
+            "max_depth": cfg.max_depth,
+            "num_leaves": cfg.num_leaves,
+            "min_child_samples": cfg.min_child_samples,
+            "subsample": cfg.subsample,
+            "colsample_bytree": cfg.colsample_bytree,
+            "reg_alpha": cfg.reg_alpha,
+            "reg_lambda": cfg.reg_lambda,
+            "is_unbalance": True,
+            "verbosity": -1,
+            "seed": 42,
+        }
+
+        train_set = lgb.Dataset(
+            x_all, label=target, weight=sample_weights,
+            feature_name=feature_cols,
+        )
+
+        cv_results = lgb.cv(
+            params,
+            train_set,
+            num_boost_round=cfg.n_estimators,
+            nfold=n_folds,
+            stratified=False,
+            callbacks=[
+                lgb.early_stopping(cfg.early_stopping_rounds, verbose=False),
+                lgb.log_evaluation(period=0),
+            ],
+            return_cvbooster=False,
+        )
+
+        cv_loss = float(min(cv_results["valid multi_logloss-mean"]))  # type: ignore[arg-type]
+
+        final_result = self.train(df, target, sample_weights=sample_weights)
+
+        return cv_loss, final_result
 
     def train_exit(
         self,

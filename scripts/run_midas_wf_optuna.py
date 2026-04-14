@@ -95,6 +95,8 @@ async def main(args: argparse.Namespace) -> None:
             k_tp_range=tuple(args.k_tp_range),
             fixed_outer_params=fixed_outer,
             outer_param_ranges=outer_ranges,
+            inner_objective=args.inner_objective,
+            cv_folds=args.cv_folds,
             slippage_min_pts=args.slippage_min,
             slippage_max_pts=args.slippage_max,
             slippage_seed=args.slippage_seed,
@@ -131,6 +133,11 @@ def cli() -> None:
                         help="Sample every tick instead of on candle close")
     parser.add_argument("--score", default="composite",
                         choices=["composite", "pnl", "win_rate", "pnl_per_trade"])
+    parser.add_argument("--inner-objective", default="oos_pnl",
+                        choices=["oos_pnl", "cv_logloss"],
+                        help="Inner objective: OOS PnL sim or CV log loss")
+    parser.add_argument("--cv-folds", type=int, default=5,
+                        help="CV folds for cv_logloss objective (default: 5)")
     parser.add_argument("--min-daily-trades", type=int, default=10,
                         help="Min trades/day for trade deficit penalty (default: 10)")
     parser.add_argument("--trade-deficit-penalty", type=float, default=10.0,

@@ -14,6 +14,7 @@ from src.midas.optimizer import (
     _count_trading_days,
     _print_result,
     _suggest_inner_params,
+    _suggest_lgb_only_params,
     _suggest_outer_params,
     default_output_prefix,
     load_fixed_inner_params,
@@ -531,3 +532,63 @@ class TestPrintResult:
         assert "Validation" in captured.out
         assert "+35.00" in captured.out
         assert "+120.00" in captured.out
+
+
+class TestLGBOnlyParams:
+    """Tests for LightGBM-only param suggestion (CV log loss mode)."""
+
+    def test_suggests_lgb_params_only(self) -> None:
+        config = OptimizerConfig(inner_objective="cv_logloss")
+        study = optuna.create_study()
+        trial = study.ask()
+        params = _suggest_lgb_only_params(trial, config)
+
+        assert "n_estimators" in params
+        assert "learning_rate" in params
+        assert "reg_alpha" in params
+        assert "reg_lambda" in params
+        assert "max_depth" in params
+        assert "num_leaves" in params
+        assert "min_child_samples" in params
+        # Should NOT contain trading params
+        assert "k_sl" not in params
+        assert "k_tp" not in params
+        assert "gamma" not in params
+        assert "entry_threshold" not in params
+
+    def test_respects_fixed_params(self) -> None:
+        config = OptimizerConfig(
+            inner_objective="cv_logloss",
+            fixed_inner_params={"n_estimators": 200, "learning_rate": 0.05},
+        )
+        study = optuna.create_study()
+        trial = study.ask()
+        params = _suggest_lgb_only_params(trial, config)
+
+        assert params["n_estimators"] == 200
+        assert params["learning_rate"] == 0.05
+
+    def test_reg_alpha_lambda_ranges(self) -> None:
+        config = OptimizerConfig(inner_objective="cv_logloss")
+        study = optuna.create_study()
+        trial = study.ask()
+        params = _suggest_lgb_only_params(trial, config)
+
+        assert 1e-8 <= params["reg_alpha"] <= 10.0
+        assert 1e-8 <= params["reg_lambda"] <= 10.0
+
+
+class TestCVLogLossConfig:
+    """Tests for CV log loss configuration."""
+
+    def test_default_inner_objective(self) -> None:
+        config = OptimizerConfig()
+        assert config.inner_objective == "oos_pnl"
+        assert config.cv_folds == 5
+
+    def test_cv_mode_config(self) -> None:
+        config = OptimizerConfig(
+            inner_objective="cv_logloss", cv_folds=3,
+        )
+        assert config.inner_objective == "cv_logloss"
+        assert config.cv_folds == 3

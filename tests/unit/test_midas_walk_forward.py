@@ -314,6 +314,42 @@ class TestWFOptunaSummary:
         assert "Profitable windows: 1/1" in captured.out
 
 
+class TestWFOptunaConfigCV:
+    """Tests for CV log loss walk-forward config."""
+
+    def test_cv_logloss_defaults(self) -> None:
+        cfg = WalkForwardOptunaConfig()
+        assert cfg.inner_objective == "oos_pnl"
+        assert cfg.cv_folds == 5
+
+    def test_cv_logloss_custom(self) -> None:
+        cfg = WalkForwardOptunaConfig(
+            inner_objective="cv_logloss", cv_folds=3,
+        )
+        assert cfg.inner_objective == "cv_logloss"
+        assert cfg.cv_folds == 3
+
+    def test_summary_cv_mode(self, capsys: object) -> None:
+        results = [
+            OptimizationResult(
+                best_score=-0.85, best_n_trades=30,
+                best_win_rate=0.5, best_pnl=100.0,
+                total_outer_trials=1, total_inner_trials=100,
+                best_outer_params={}, best_inner_params={},
+            ),
+        ]
+        windows = [
+            (datetime(2025, 1, 1, tzinfo=UTC), datetime(2025, 3, 1, tzinfo=UTC),
+             datetime(2025, 3, 1, tzinfo=UTC), datetime(2025, 3, 8, tzinfo=UTC),
+             None, None),
+        ]
+        _print_wf_optuna_summary(results, windows, inner_objective="cv_logloss")
+        captured = capsys.readouterr()  # type: ignore[union-attr]
+        assert "CVLoss" in captured.out
+        assert "OOS_PnL" in captured.out
+        assert "0.8500" in captured.out
+
+
 class TestRangeSaturation:
     """Tests for range saturation warnings."""
 

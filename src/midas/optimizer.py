@@ -203,6 +203,8 @@ class OptimizerConfig:
     atr_column: str = ATR_COLUMN_DEFAULT
     fixed_outer_params: dict[str, Any] | None = None
     outer_param_ranges: dict[str, tuple[float, float]] | None = None
+    inner_objective: str = "oos_pnl"
+    cv_folds: int = 5
     slippage_min_pts: float = 0.0
     slippage_max_pts: float = 0.0
     slippage_seed: int | None = None
@@ -334,6 +336,38 @@ def _suggest_inner_params(
         "entry_threshold": _float("entry_threshold", 0.25, 0.60),
         # Exit model threshold
         "exit_threshold": _float("exit_threshold", 0.30, 0.80),
+    }
+
+
+def _suggest_lgb_only_params(
+    trial: optuna.Trial,
+    config: OptimizerConfig,
+) -> dict[str, Any]:
+    """Suggest only LightGBM hyperparams (CV log loss objective).
+
+    Trading params (k_sl, k_tp, gamma, etc.) are all fixed and not
+    part of the search space.
+    """
+    fixed = config.fixed_inner_params or {}
+
+    def _float(name: str, low: float, high: float, **kw: Any) -> float:
+        if name in fixed:
+            return float(fixed[name])
+        return trial.suggest_float(name, low, high, **kw)
+
+    def _int(name: str, low: int, high: int) -> int:
+        if name in fixed:
+            return int(fixed[name])
+        return trial.suggest_int(name, low, high)
+
+    return {
+        "n_estimators": _int("n_estimators", 50, 1000),
+        "learning_rate": _float("learning_rate", 0.01, 0.3, log=True),
+        "max_depth": _int("max_depth", 3, 10),
+        "num_leaves": _int("num_leaves", 15, 127),
+        "min_child_samples": _int("min_child_samples", 10, 300),
+        "reg_alpha": _float("reg_alpha", 1e-8, 10.0, log=True),
+        "reg_lambda": _float("reg_lambda", 1e-8, 10.0, log=True),
     }
 
 
@@ -471,11 +505,15 @@ async def run_nested_optuna(
         config.validation_start is not None and config.validation_end is not None
     )
 
+    is_cv_mode = config.inner_objective == "cv_logloss"
+
     n_fixed_inner = len(config.fixed_inner_params) if config.fixed_inner_params else 0
-    n_inner_params = 17 - n_fixed_inner
+    n_inner_params = (7 if is_cv_mode else 17) - n_fixed_inner
 
     print(f"\nNested Optuna: {config.outer_trials} outer x "
           f"{config.inner_trials} inner trials")
+    if is_cv_mode:
+        print(f"  Inner objective: CV log loss ({config.cv_folds}-fold)")
     print(f"  Outer: {len(registry_params)} extractor params")
     print(f"  Inner: {n_inner_params} params"
           f"{f' ({n_fixed_inner} fixed)' if n_fixed_inner else ''}")
@@ -486,8 +524,12 @@ async def run_nested_optuna(
         print(f"  Fixed inner: {config.fixed_inner_params}")
     print(f"  Train:      {config.train_start.date()}"
           f" → {config.train_end.date()}")
-    print(f"  Selection:  {config.test_start.date()}"
-          f" → {config.test_end.date()}")
+    if is_cv_mode:
+        print(f"  OOS:        {config.test_start.date()}"
+              f" → {config.test_end.date()}")
+    else:
+        print(f"  Selection:  {config.test_start.date()}"
+              f" → {config.test_end.date()}")
     if has_validation:
         print(f"  Validation: {config.validation_start.date()}"  # type: ignore[union-attr]
               f" → {config.validation_end.date()}")  # type: ignore[union-attr]
@@ -548,7 +590,7 @@ async def run_nested_optuna(
 
         print(f"  Features: {len(df)} rows")
 
-        # --- Inner: relabel + train + evaluate for each SL/TP combo ---
+        # --- Inner loop ---
         inner_study = optuna.create_study(
             direction="maximize",
             study_name=f"midas_inner_{outer_i}",
@@ -563,17 +605,15 @@ async def run_nested_optuna(
         best_inner_params_local: dict[str, Any] = {}
         best_inner_trades_list: list[MidasTrade] = []
 
-        for _inner_i in range(config.inner_trials):
-            inner_trial = inner_study.ask()
-            inner_params = _suggest_inner_params(inner_trial, config)
+        if is_cv_mode:
+            # ── CV log loss path: relabel once, then search LightGBM only ──
+            fixed = config.fixed_inner_params or {}
+            k_sl = float(fixed.get("k_sl", 1.5))
+            k_tp = float(fixed.get("k_tp", 1.5))
+            sl_fallback = float(fixed.get("sl_fallback", 3.0))
+            tp_fallback = float(fixed.get("tp_fallback", 3.0))
+            timeout = float(fixed.get("label_timeout", 300.0))
 
-            k_sl = inner_params["k_sl"]
-            k_tp = inner_params["k_tp"]
-            sl_fallback = inner_params["sl_fallback"]
-            tp_fallback = inner_params["tp_fallback"]
-            timeout = inner_params["label_timeout"]
-
-            # Relabel in-memory with ATR-based SL/TP (fast, no DB)
             label_result = relabel_dataframe(
                 df,
                 sl_points=sl_fallback,
@@ -584,7 +624,6 @@ async def run_nested_optuna(
                 atr_column=config.atr_column,
             )
 
-            # Build target + filter
             target = MidasTrainer.build_target(
                 label_result.buy_labels,
                 label_result.sell_labels,
@@ -594,91 +633,226 @@ async def run_nested_optuna(
             mask = ~((buy_arr == -1) & (sell_arr == -1))
 
             if mask.sum() < 100:
-                inner_study.tell(inner_trial, -1000.0)
+                print(f"  SKIP: only {mask.sum()} valid rows after labeling")
+                outer_study.tell(outer_trial, -1000.0)
+                result.total_inner_trials += config.inner_trials
+                result.trial_records.append(TrialRecord(
+                    window_idx=window_idx, outer_idx=outer_i,
+                    score=-1000.0, n_trades=0, win_rate=0.0, pnl=0.0,
+                    outer_params=dict(extractor_params),
+                    inner_params={}, trades=[],
+                ))
                 continue
 
             df_filtered = df.filter(pl.Series(mask))
             target_filtered = target[mask]
 
-            # PnL weights
-            buy_pnls = [label_result.buy_pnls[i] for i, m in enumerate(mask) if m]
-            sell_pnls = [label_result.sell_pnls[i] for i, m in enumerate(mask) if m]
+            buy_pnls = [
+                label_result.buy_pnls[i] for i, m in enumerate(mask) if m
+            ]
+            sell_pnls = [
+                label_result.sell_pnls[i] for i, m in enumerate(mask) if m
+            ]
             weights = MidasTrainer.build_sample_weights(
                 buy_pnls, sell_pnls, target_filtered,
             )
 
-            # Train entry model
-            trainer_config = TrainerConfig(
-                n_estimators=inner_params["n_estimators"],
-                learning_rate=inner_params["learning_rate"],
-                max_depth=inner_params["max_depth"],
-                num_leaves=inner_params["num_leaves"],
-                min_child_samples=inner_params["min_child_samples"],
-                subsample=inner_params["subsample"],
-                colsample_bytree=inner_params["colsample_bytree"],
-                entry_threshold=inner_params["entry_threshold"],
-                exit_threshold=inner_params["exit_threshold"],
-                early_stopping_rounds=30,
-            )
+            for _inner_i in range(config.inner_trials):
+                inner_trial = inner_study.ask()
+                lgb_params = _suggest_lgb_only_params(inner_trial, config)
 
-            trainer = MidasTrainer(trainer_config)
-            try:
-                trainer.train(df_filtered, target_filtered, sample_weights=weights)
-            except (ValueError, lgb.basic.LightGBMError):
-                inner_study.tell(inner_trial, -1000.0)
-                continue
-
-            # Train exit model (optimal-close labeling)
-            exit_ds = build_exit_dataset(
-                df_filtered,
-                target_filtered,
-                sl_points=sl_fallback,
-                tp_points=tp_fallback,
-                timeout_seconds=timeout,
-                k_sl=k_sl,
-                k_tp=k_tp,
-                atr_column=config.atr_column,
-            )
-
-            if exit_ds.n_rows >= 50:
-                exit_df = df_filtered[exit_ds.row_indices].with_columns(
-                    pl.Series("pos_unrealized_pnl", exit_ds.unrealized_pnls),
-                    pl.Series("pos_duration_sec", exit_ds.durations),
-                    pl.Series("pos_direction", exit_ds.directions),
+                trainer_config = TrainerConfig(
+                    n_estimators=lgb_params["n_estimators"],
+                    learning_rate=lgb_params["learning_rate"],
+                    max_depth=lgb_params["max_depth"],
+                    num_leaves=lgb_params["num_leaves"],
+                    min_child_samples=lgb_params["min_child_samples"],
+                    subsample=float(fixed.get("subsample", 0.8)),
+                    colsample_bytree=float(fixed.get("colsample_bytree", 0.8)),
+                    entry_threshold=float(fixed.get("entry_threshold", 0.55)),
+                    exit_threshold=float(fixed.get("exit_threshold", 0.55)),
+                    reg_alpha=lgb_params["reg_alpha"],
+                    reg_lambda=lgb_params["reg_lambda"],
+                    early_stopping_rounds=30,
                 )
-                with contextlib.suppress(ValueError, lgb.basic.LightGBMError):
-                    trainer.train_exit(exit_df, exit_ds.exit_labels)
 
-            # Evaluate on OOS with ATR-based SL/TP + dynamic sizing
-            sim_config = SimConfig(
-                sl_points=sl_fallback,
-                tp_points=tp_fallback,
-                k_sl=k_sl,
-                k_tp=k_tp,
-                max_spread=2.0,
-                gamma=inner_params["gamma"],
-                max_margin_proba=inner_params["max_margin_proba"],
-                sizing_threshold=inner_params["entry_threshold"],
-                min_risk_pct=inner_params["min_risk_pct"],
-                slippage_min_pts=config.slippage_min_pts,
-                slippage_max_pts=config.slippage_max_pts,
-                slippage_seed=config.slippage_seed,
-            )
-            score, n_tr, wr, pnl, trades_list = await _evaluate_oos_async(
-                trainer, sim_config, db, config,
-                registry_factory, extractor_params,
-            )
+                trainer = MidasTrainer(trainer_config)
+                try:
+                    cv_loss, _ = trainer.train_cv(
+                        df_filtered, target_filtered,
+                        sample_weights=weights,
+                        n_folds=config.cv_folds,
+                    )
+                except (ValueError, lgb.basic.LightGBMError):
+                    inner_study.tell(inner_trial, -1000.0)
+                    continue
 
-            inner_study.tell(inner_trial, score)
+                score = -cv_loss
+                inner_study.tell(inner_trial, score)
 
-            if score > best_inner_score:
-                best_inner_score = score
-                best_inner_trainer = trainer
-                best_inner_params_local = dict(inner_params)
+                if score > best_inner_score:
+                    best_inner_score = score
+                    best_inner_trainer = trainer
+                    best_inner_params_local = {**lgb_params, **fixed}
+
+            # OOS thermometer for the best CV trial
+            if best_inner_trainer is not None:
+                # Train exit model for the best trial
+                exit_ds = build_exit_dataset(
+                    df_filtered, target_filtered,
+                    sl_points=sl_fallback, tp_points=tp_fallback,
+                    timeout_seconds=timeout,
+                    k_sl=k_sl, k_tp=k_tp,
+                    atr_column=config.atr_column,
+                )
+                if exit_ds.n_rows >= 50:
+                    exit_df = df_filtered[exit_ds.row_indices].with_columns(
+                        pl.Series("pos_unrealized_pnl", exit_ds.unrealized_pnls),
+                        pl.Series("pos_duration_sec", exit_ds.durations),
+                        pl.Series("pos_direction", exit_ds.directions),
+                    )
+                    with contextlib.suppress(ValueError, lgb.basic.LightGBMError):
+                        best_inner_trainer.train_exit(
+                            exit_df, exit_ds.exit_labels,
+                        )
+
+                sim_config = SimConfig(
+                    sl_points=sl_fallback, tp_points=tp_fallback,
+                    k_sl=k_sl, k_tp=k_tp, max_spread=2.0,
+                    gamma=float(fixed.get("gamma", 1.0)),
+                    max_margin_proba=float(
+                        fixed.get("max_margin_proba", 0.85),
+                    ),
+                    sizing_threshold=float(
+                        fixed.get("entry_threshold", 0.55),
+                    ),
+                    min_risk_pct=float(fixed.get("min_risk_pct", 0.01)),
+                    slippage_min_pts=config.slippage_min_pts,
+                    slippage_max_pts=config.slippage_max_pts,
+                    slippage_seed=config.slippage_seed,
+                )
+                _, n_tr, wr, pnl, trades_list = await _evaluate_oos_async(
+                    best_inner_trainer, sim_config, db, config,
+                    registry_factory, extractor_params,
+                )
                 best_inner_trades = n_tr
                 best_inner_wr = wr
                 best_inner_pnl = pnl
                 best_inner_trades_list = trades_list
+
+        else:
+            # ── OOS PnL path (original): relabel + train + OOS sim per trial ──
+            for _inner_i in range(config.inner_trials):
+                inner_trial = inner_study.ask()
+                inner_params = _suggest_inner_params(inner_trial, config)
+
+                k_sl = inner_params["k_sl"]
+                k_tp = inner_params["k_tp"]
+                sl_fallback = inner_params["sl_fallback"]
+                tp_fallback = inner_params["tp_fallback"]
+                timeout = inner_params["label_timeout"]
+
+                label_result = relabel_dataframe(
+                    df,
+                    sl_points=sl_fallback,
+                    tp_points=tp_fallback,
+                    timeout_seconds=timeout,
+                    k_sl=k_sl,
+                    k_tp=k_tp,
+                    atr_column=config.atr_column,
+                )
+
+                target = MidasTrainer.build_target(
+                    label_result.buy_labels,
+                    label_result.sell_labels,
+                )
+                buy_arr = np.asarray(label_result.buy_labels)
+                sell_arr = np.asarray(label_result.sell_labels)
+                mask = ~((buy_arr == -1) & (sell_arr == -1))
+
+                if mask.sum() < 100:
+                    inner_study.tell(inner_trial, -1000.0)
+                    continue
+
+                df_filtered = df.filter(pl.Series(mask))
+                target_filtered = target[mask]
+
+                buy_pnls = [
+                    label_result.buy_pnls[i] for i, m in enumerate(mask) if m
+                ]
+                sell_pnls = [
+                    label_result.sell_pnls[i] for i, m in enumerate(mask) if m
+                ]
+                weights = MidasTrainer.build_sample_weights(
+                    buy_pnls, sell_pnls, target_filtered,
+                )
+
+                trainer_config = TrainerConfig(
+                    n_estimators=inner_params["n_estimators"],
+                    learning_rate=inner_params["learning_rate"],
+                    max_depth=inner_params["max_depth"],
+                    num_leaves=inner_params["num_leaves"],
+                    min_child_samples=inner_params["min_child_samples"],
+                    subsample=inner_params["subsample"],
+                    colsample_bytree=inner_params["colsample_bytree"],
+                    entry_threshold=inner_params["entry_threshold"],
+                    exit_threshold=inner_params["exit_threshold"],
+                    early_stopping_rounds=30,
+                )
+
+                trainer = MidasTrainer(trainer_config)
+                try:
+                    trainer.train(
+                        df_filtered, target_filtered,
+                        sample_weights=weights,
+                    )
+                except (ValueError, lgb.basic.LightGBMError):
+                    inner_study.tell(inner_trial, -1000.0)
+                    continue
+
+                exit_ds = build_exit_dataset(
+                    df_filtered, target_filtered,
+                    sl_points=sl_fallback, tp_points=tp_fallback,
+                    timeout_seconds=timeout,
+                    k_sl=k_sl, k_tp=k_tp,
+                    atr_column=config.atr_column,
+                )
+
+                if exit_ds.n_rows >= 50:
+                    exit_df = df_filtered[exit_ds.row_indices].with_columns(
+                        pl.Series("pos_unrealized_pnl", exit_ds.unrealized_pnls),
+                        pl.Series("pos_duration_sec", exit_ds.durations),
+                        pl.Series("pos_direction", exit_ds.directions),
+                    )
+                    with contextlib.suppress(ValueError, lgb.basic.LightGBMError):
+                        trainer.train_exit(exit_df, exit_ds.exit_labels)
+
+                sim_config = SimConfig(
+                    sl_points=sl_fallback, tp_points=tp_fallback,
+                    k_sl=k_sl, k_tp=k_tp, max_spread=2.0,
+                    gamma=inner_params["gamma"],
+                    max_margin_proba=inner_params["max_margin_proba"],
+                    sizing_threshold=inner_params["entry_threshold"],
+                    min_risk_pct=inner_params["min_risk_pct"],
+                    slippage_min_pts=config.slippage_min_pts,
+                    slippage_max_pts=config.slippage_max_pts,
+                    slippage_seed=config.slippage_seed,
+                )
+                score, n_tr, wr, pnl, trades_list = await _evaluate_oos_async(
+                    trainer, sim_config, db, config,
+                    registry_factory, extractor_params,
+                )
+
+                inner_study.tell(inner_trial, score)
+
+                if score > best_inner_score:
+                    best_inner_score = score
+                    best_inner_trainer = trainer
+                    best_inner_params_local = dict(inner_params)
+                    best_inner_trades = n_tr
+                    best_inner_wr = wr
+                    best_inner_pnl = pnl
+                    best_inner_trades_list = trades_list
 
         # Report to outer
         outer_study.tell(outer_trial, best_inner_score)
@@ -748,14 +922,22 @@ async def run_nested_optuna(
             val_str = (f", val_trades={v_nt}, "
                        f"val_WR={v_wr_val*100:.0f}%, "
                        f"val_PnL={v_pnl_val:+.1f}")
-        print(f"  Best inner: score={best_inner_score:+.2f}, "
-              f"k_sl={best_inner_params_local.get('k_sl', 0):.2f}, "
-              f"k_tp={best_inner_params_local.get('k_tp', 0):.2f}, "
-              f"gamma={best_inner_params_local.get('gamma', 0):.2f}, "
-              f"sel_trades={best_inner_trades}, "
-              f"WR={best_inner_wr*100:.0f}%, "
-              f"PnL={best_inner_pnl:+.1f}{val_str}, "
-              f"threshold={best_inner_params_local.get('entry_threshold', '?')}")
+        if is_cv_mode:
+            cv_loss_val = -best_inner_score if best_inner_score > -999 else 0
+            print(f"  Best inner: CV_loss={cv_loss_val:.4f}, "
+                  f"OOS_trades={best_inner_trades}, "
+                  f"WR={best_inner_wr*100:.0f}%, "
+                  f"OOS_PnL={best_inner_pnl:+.1f}{val_str}")
+        else:
+            print(f"  Best inner: score={best_inner_score:+.2f}, "
+                  f"k_sl={best_inner_params_local.get('k_sl', 0):.2f}, "
+                  f"k_tp={best_inner_params_local.get('k_tp', 0):.2f}, "
+                  f"gamma={best_inner_params_local.get('gamma', 0):.2f}, "
+                  f"sel_trades={best_inner_trades}, "
+                  f"WR={best_inner_wr*100:.0f}%, "
+                  f"PnL={best_inner_pnl:+.1f}{val_str}, "
+                  f"threshold="
+                  f"{best_inner_params_local.get('entry_threshold', '?')}")
 
         if best_inner_score > best_score:
             best_score = best_inner_score

@@ -1,0 +1,23 @@
+# Fixed trading params for CV log loss inner objective (Option A).
+# All trading/sizing/labeling params are frozen; only LightGBM hyperparams are searched.
+# Values from step 2b WF analysis (15 windows, val-positive subset).
+
+# ATR-based SL/TP (val-positive medians)
+k_sl: 1.5
+k_tp: 2.0
+sl_fallback: 3.0
+tp_fallback: 3.0
+label_timeout: 300.0
+
+# Entry/exit thresholds (only converged param from step 2b, CV 5.6%)
+entry_threshold: 0.55
+exit_threshold: 0.55
+
+# Dynamic sizing
+gamma: 1.0
+min_risk_pct: 0.01
+max_margin_proba: 0.85
+
+# LightGBM regularization (safe defaults, not worth burning Optuna budget)
+subsample: 0.8
+colsample_bytree: 0.8
