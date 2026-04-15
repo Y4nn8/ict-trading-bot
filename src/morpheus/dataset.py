@@ -65,7 +65,11 @@ class SegmentIndex:
 
     segments: list[NDArray[np.float32]] = field(default_factory=list)
     offsets: list[tuple[int, int]] = field(default_factory=list)
-    total_sequences: int = 0
+
+    @property
+    def total_sequences(self) -> int:
+        """Total number of sequences across all segments."""
+        return len(self.offsets)
 
 
 def load_parquet_dir(parquet_dir: Path) -> pl.DataFrame:
@@ -78,12 +82,11 @@ def load_parquet_dir(parquet_dir: Path) -> pl.DataFrame:
     return pl.concat(dfs).sort("time")
 
 
-def compute_observations(df: pl.DataFrame, bucket_seconds: int) -> pl.DataFrame:
+def compute_observations(df: pl.DataFrame) -> pl.DataFrame:
     """Compute the 10-dim observation vector from raw candle data.
 
     Args:
         df: DataFrame with columns [time, open, high, low, close, tick_count, spread].
-        bucket_seconds: Candle duration in seconds (for gap detection).
 
     Returns:
         DataFrame with original columns plus observation columns.
@@ -187,7 +190,6 @@ def build_segment_index(
         n_seqs = (len(seg) - seq_len) // stride + 1
         for s in range(n_seqs):
             index.offsets.append((seg_idx, s * stride))
-    index.total_sequences = len(index.offsets)
     return index
 
 
@@ -222,7 +224,7 @@ class MorpheusDataset(Dataset[torch.Tensor]):
         normalize: bool = True,
     ) -> None:
         df = load_parquet_dir(parquet_dir)
-        obs_df = compute_observations(df, bucket_seconds)
+        obs_df = compute_observations(df)
         segments = find_segments(obs_df, bucket_seconds, seq_len)
 
         if not segments:
@@ -252,6 +254,8 @@ class MorpheusDataset(Dataset[torch.Tensor]):
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         """Return observation sequence of shape (seq_len, OBS_DIM)."""
+        if idx < 0:
+            idx += len(self)
         if idx < 0 or idx >= len(self):
             msg = f"Index {idx} out of range [0, {len(self)})"
             raise IndexError(msg)

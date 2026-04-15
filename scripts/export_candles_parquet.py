@@ -30,23 +30,17 @@ from src.common.logging import get_logger
 
 logger = get_logger(__name__)
 
-DUKASCOPY_INSTRUMENTS: dict[str, str] = {
-    "XAUUSD": "xauusd",
-    "EUR/USD": "eurusd",
-    "GBP/USD": "gbpusd",
-}
-
-CANDLE_QUERY = """
+CANDLE_QUERY_TEMPLATE = """
 SELECT
-    time_bucket($1::interval, time) AS bucket,
+    time_bucket('{interval}', time) AS bucket,
     (first(bid, time) + first(ask, time)) / 2.0 AS open,
-    (max(bid) + max(ask)) / 2.0 AS high,
-    (min(bid) + min(ask)) / 2.0 AS low,
+    max((bid + ask) / 2.0) AS high,
+    min((bid + ask) / 2.0) AS low,
     (last(bid, time) + last(ask, time)) / 2.0 AS close,
     count(*)::int AS tick_count,
     last(ask, time) - last(bid, time) AS spread
 FROM ticks
-WHERE instrument = $2 AND time >= $3 AND time < $4
+WHERE instrument = $1 AND time >= $2 AND time < $3
 GROUP BY bucket
 ORDER BY bucket
 """
@@ -60,10 +54,9 @@ async def fetch_candles(
     bucket_seconds: int,
 ) -> pl.DataFrame:
     """Fetch aggregated candles from ticks table via time_bucket."""
-    db_instrument = DUKASCOPY_INSTRUMENTS.get(instrument, instrument.lower())
-    interval = f"{bucket_seconds} seconds"
+    query = CANDLE_QUERY_TEMPLATE.format(interval=f"{bucket_seconds} seconds")
 
-    rows = await db.fetch(CANDLE_QUERY, interval, db_instrument, start, end)
+    rows = await db.fetch(query, instrument, start, end)
     if not rows:
         return pl.DataFrame(
             schema={

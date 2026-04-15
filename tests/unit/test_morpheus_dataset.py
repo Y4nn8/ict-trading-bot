@@ -124,27 +124,27 @@ class TestMonthRanges:
 
 class TestComputeObservations:
     def test_shape(self, candle_df: pl.DataFrame) -> None:
-        obs = compute_observations(candle_df, bucket_seconds=10)
+        obs = compute_observations(candle_df)
         assert len(obs) == len(candle_df) - 1  # first row dropped
         for col in OBS_COLUMNS:
             assert col in obs.columns
 
     def test_returns_are_relative(self, candle_df: pl.DataFrame) -> None:
-        obs = compute_observations(candle_df, bucket_seconds=10)
+        obs = compute_observations(candle_df)
         ret_close = obs["ret_close"].to_numpy()
         closes = candle_df["close"].to_numpy()
         expected = (closes[1:] - closes[:-1]) / closes[:-1]
         np.testing.assert_allclose(ret_close, expected, rtol=1e-6)
 
     def test_time_encodings_bounded(self, candle_df: pl.DataFrame) -> None:
-        obs = compute_observations(candle_df, bucket_seconds=10)
+        obs = compute_observations(candle_df)
         for col in ["hour_sin", "hour_cos", "dow_sin", "dow_cos"]:
             vals = obs[col].to_numpy()
             assert np.all(vals >= -1.0 - 1e-9)
             assert np.all(vals <= 1.0 + 1e-9)
 
     def test_no_nans(self, candle_df: pl.DataFrame) -> None:
-        obs = compute_observations(candle_df, bucket_seconds=10)
+        obs = compute_observations(candle_df)
         data = obs.select(OBS_COLUMNS).to_numpy()
         assert not np.any(np.isnan(data))
 
@@ -155,24 +155,24 @@ class TestComputeObservations:
 
 class TestFindSegments:
     def test_no_gap_single_segment(self, candle_df: pl.DataFrame) -> None:
-        obs = compute_observations(candle_df, bucket_seconds=10)
+        obs = compute_observations(candle_df)
         segments = find_segments(obs, bucket_seconds=10, seq_len=10)
         assert len(segments) == 1
         assert segments[0].shape == (len(obs), OBS_DIM)
 
     def test_gap_splits_segments(self, candle_df_with_gap: pl.DataFrame) -> None:
-        obs = compute_observations(candle_df_with_gap, bucket_seconds=10)
+        obs = compute_observations(candle_df_with_gap)
         segments = find_segments(obs, bucket_seconds=10, seq_len=10)
         assert len(segments) == 2
 
     def test_short_segments_dropped(self) -> None:
         df = _make_candle_df(20, gap_at=10)
-        obs = compute_observations(df, bucket_seconds=10)
+        obs = compute_observations(df)
         segments = find_segments(obs, bucket_seconds=10, seq_len=15)
         assert len(segments) == 0
 
     def test_segment_dtype(self, candle_df: pl.DataFrame) -> None:
-        obs = compute_observations(candle_df, bucket_seconds=10)
+        obs = compute_observations(candle_df)
         segments = find_segments(obs, bucket_seconds=10, seq_len=10)
         assert segments[0].dtype == np.float32
 
@@ -272,7 +272,13 @@ class TestMorpheusDataset:
         with pytest.raises(IndexError):
             ds[len(ds)]
         with pytest.raises(IndexError):
-            ds[-1]
+            ds[-(len(ds) + 1)]
+
+    def test_negative_index(self, parquet_dir: Path) -> None:
+        ds = MorpheusDataset(parquet_dir, seq_len=10, stride=1)
+        last = ds[-1]
+        assert last.shape == (10, OBS_DIM)
+        torch.testing.assert_close(last, ds[len(ds) - 1])
 
     def test_stride_reduces_length(self, parquet_dir: Path) -> None:
         ds1 = MorpheusDataset(parquet_dir, seq_len=10, stride=1)
