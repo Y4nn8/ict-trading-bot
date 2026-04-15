@@ -87,9 +87,12 @@ class RSSM(nn.Module):
         )
 
     def initial_state(self, batch_size: int, *, device: torch.device | None = None) -> RSSMState:
-        """Return zero-initialised state."""
-        h = torch.zeros(batch_size, self.det_dim, device=device)
-        z = torch.zeros(batch_size, self.stoch_dim, device=device)
+        """Return zero-initialised state, matching model dtype for mixed precision."""
+        param = next(self.parameters())
+        state_device = param.device if device is None else device
+        state_dtype = param.dtype
+        h = torch.zeros(batch_size, self.det_dim, device=state_device, dtype=state_dtype)
+        z = torch.zeros(batch_size, self.stoch_dim, device=state_device, dtype=state_dtype)
         return RSSMState(h=h, z=z)
 
     def prior(self, h: Tensor) -> GaussianParams:
@@ -195,6 +198,13 @@ class RSSM(nn.Module):
             h_seq: (batch, horizon, det_dim)
             z_seq: (batch, horizon, stoch_dim)
         """
+        if horizon <= 0:
+            batch = state.h.shape[0]
+            return (
+                state.h.new_empty(batch, 0, self.det_dim),
+                state.z.new_empty(batch, 0, self.stoch_dim),
+            )
+
         h, z = state.h, state.z
         h_list: list[Tensor] = []
         z_list: list[Tensor] = []

@@ -105,6 +105,13 @@ class TestRSSM:
         assert torch.all(state.h == 0)
         assert torch.all(state.z == 0)
 
+    def test_initial_state_inherits_dtype(self) -> None:
+        model = RSSM(embed_dim=EMBED_DIM, det_dim=DET_DIM, stoch_dim=STOCH_DIM)
+        model = model.to(dtype=torch.float64)
+        state = model.initial_state(2)
+        assert state.h.dtype == torch.float64
+        assert state.z.dtype == torch.float64
+
     def test_prior_shape_and_positivity(self, rssm: RSSM) -> None:
         h = torch.randn(BATCH, DET_DIM)
         params = rssm.prior(h)
@@ -157,6 +164,12 @@ class TestRSSM:
         h_imag, z_imag = rssm.imagine(state, horizon)
         assert h_imag.shape == (BATCH, horizon, DET_DIM)
         assert z_imag.shape == (BATCH, horizon, STOCH_DIM)
+
+    def test_imagine_zero_horizon(self, rssm: RSSM) -> None:
+        state = rssm.initial_state(BATCH)
+        h_imag, z_imag = rssm.imagine(state, 0)
+        assert h_imag.shape == (BATCH, 0, DET_DIM)
+        assert z_imag.shape == (BATCH, 0, STOCH_DIM)
 
     def test_imagine_no_nan(self, rssm: RSSM) -> None:
         state = rssm.initial_state(BATCH)
