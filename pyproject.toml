@@ -28,6 +28,7 @@ dependencies = [
     "optuna>=4.0",
     "lightgbm>=4.0",
     "numba>=0.60",
+    "torch>=2.0",
     # Monitoring
     "python-telegram-bot>=21.0",
     "prometheus-client>=0.21",
@@ -89,6 +90,7 @@ module = [
     "optuna.*",
     "asyncpg.*",
     "numba.*",
+    "torch.*",
 ]
 ignore_missing_imports = true
 
