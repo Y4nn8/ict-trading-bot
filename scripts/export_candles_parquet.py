@@ -54,6 +54,9 @@ async def fetch_candles(
     bucket_seconds: int,
 ) -> pl.DataFrame:
     """Fetch aggregated candles from ticks table via time_bucket."""
+    if bucket_seconds <= 0:
+        msg = f"bucket_seconds must be positive, got {bucket_seconds}"
+        raise ValueError(msg)
     query = CANDLE_QUERY_TEMPLATE.format(interval=f"{bucket_seconds} seconds")
 
     rows = await db.fetch(query, instrument, start, end)

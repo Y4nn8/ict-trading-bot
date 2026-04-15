@@ -96,35 +96,30 @@ def compute_observations(df: pl.DataFrame) -> pl.DataFrame:
 
     time_col = df["time"]
     if time_col.dtype == pl.Datetime:
-        hours: pl.Series | pl.Expr = (
-            time_col.dt.hour().cast(pl.Float64)
-            + time_col.dt.minute().cast(pl.Float64) / 60.0
+        hour_rad = (
+            (
+                pl.col("time").dt.hour().cast(pl.Float64)
+                + pl.col("time").dt.minute().cast(pl.Float64) / 60.0
+            )
+            * (2.0 * math.pi / 24.0)
         )
-        dows: pl.Series | pl.Expr = time_col.dt.weekday().cast(pl.Float64)
+        dow_rad = pl.col("time").dt.weekday().cast(pl.Float64) * (
+            2.0 * math.pi / 7.0
+        )
     else:
-        hours = pl.lit(0.0)
-        dows = pl.lit(0.0)
+        hour_rad = pl.lit(0.0)
+        dow_rad = pl.lit(0.0)
 
-    hour_rad = (hours * 2.0 * math.pi / 24.0).alias("_hour_rad")
-    dow_rad = (dows * 2.0 * math.pi / 7.0).alias("_dow_rad")
-
-    result = df.with_columns(
+    return df.with_columns(
         ((pl.col("open") - prev_close) / prev_close).alias("ret_open"),
         ((pl.col("high") - prev_close) / prev_close).alias("ret_high"),
         ((pl.col("low") - prev_close) / prev_close).alias("ret_low"),
         ((pl.col("close") - prev_close) / prev_close).alias("ret_close"),
-        hour_rad,
-        dow_rad,
-    )
-    h_np = result["_hour_rad"].to_numpy()
-    d_np = result["_dow_rad"].to_numpy()
-    result = result.with_columns(
-        pl.Series("hour_sin", np.sin(h_np)),
-        pl.Series("hour_cos", np.cos(h_np)),
-        pl.Series("dow_sin", np.sin(d_np)),
-        pl.Series("dow_cos", np.cos(d_np)),
-    ).drop("_hour_rad", "_dow_rad")
-    return result.slice(1)
+        hour_rad.sin().alias("hour_sin"),
+        hour_rad.cos().alias("hour_cos"),
+        dow_rad.sin().alias("dow_sin"),
+        dow_rad.cos().alias("dow_cos"),
+    ).slice(1)
 
 
 def find_segments(
@@ -153,10 +148,10 @@ def find_segments(
     threshold_us = bucket_seconds * GAP_THRESHOLD_FACTOR * 1_000_000
 
     if times.dtype == pl.Datetime:
-        time_diffs = times.diff().dt.total_microseconds().to_numpy()
+        time_diffs = times.diff().dt.total_microseconds().fill_null(0).to_numpy()
     else:
         time_diffs = np.full(len(times), bucket_seconds * 1_000_000, dtype=np.int64)
-    time_diffs[0] = 0
+        time_diffs[0] = 0
 
     gap_indices = np.where(time_diffs > threshold_us)[0]
     split_points = [0, *gap_indices.tolist(), len(obs_data)]
@@ -185,6 +180,12 @@ def build_segment_index(
     Returns:
         SegmentIndex with precomputed offsets.
     """
+    if seq_len <= 0:
+        msg = f"seq_len must be positive, got {seq_len}"
+        raise ValueError(msg)
+    if stride <= 0:
+        msg = f"stride must be positive, got {stride}"
+        raise ValueError(msg)
     index = SegmentIndex(segments=segments)
     for seg_idx, seg in enumerate(segments):
         n_seqs = (len(seg) - seq_len) // stride + 1
@@ -195,6 +196,9 @@ def build_segment_index(
 
 def compute_norm_stats(segments: list[NDArray[np.float32]]) -> NormStats:
     """Compute per-feature mean and std across all segments."""
+    if not segments:
+        msg = "Cannot compute normalization stats from empty segment list"
+        raise ValueError(msg)
     all_data = np.concatenate(segments, axis=0)
     mean = all_data.mean(axis=0).astype(np.float32)
     std = all_data.std(axis=0).astype(np.float32)
@@ -261,9 +265,9 @@ class MorpheusDataset(Dataset[torch.Tensor]):
             raise IndexError(msg)
 
         seg_idx, offset = self._index.offsets[idx]
-        seq = self._index.segments[seg_idx][offset : offset + self._seq_len].copy()
+        seq = self._index.segments[seg_idx][offset : offset + self._seq_len]
 
         if self._normalize and self._stats is not None:
             seq = (seq - self._stats.mean) / self._stats.std
 
-        return torch.from_numpy(seq)
+        return torch.from_numpy(np.ascontiguousarray(seq))

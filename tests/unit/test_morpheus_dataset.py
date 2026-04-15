@@ -204,6 +204,16 @@ class TestBuildSegmentIndex:
         index = build_segment_index([seg], seq_len=10, stride=5)
         assert index.offsets == [(0, 0), (0, 5)]
 
+    def test_invalid_stride_raises(self) -> None:
+        seg = np.zeros((20, OBS_DIM), dtype=np.float32)
+        with pytest.raises(ValueError, match="stride must be positive"):
+            build_segment_index([seg], seq_len=10, stride=0)
+
+    def test_invalid_seq_len_raises(self) -> None:
+        seg = np.zeros((20, OBS_DIM), dtype=np.float32)
+        with pytest.raises(ValueError, match="seq_len must be positive"):
+            build_segment_index([seg], seq_len=0, stride=1)
+
 
 # ---------------------------------------------------------------------------
 # NormStats tests
@@ -221,6 +231,10 @@ class TestNormStats:
         seg = np.ones((50, OBS_DIM), dtype=np.float32)
         stats = compute_norm_stats([seg])
         assert np.all(stats.std >= 1.0)
+
+    def test_empty_segments_raises(self) -> None:
+        with pytest.raises(ValueError, match="empty segment list"):
+            compute_norm_stats([])
 
     def test_roundtrip(self) -> None:
         stats = NormStats(
