@@ -282,6 +282,13 @@ def train(
         )
         start_epoch = int(payload.get("epoch", 0))
 
+    if len(train_set) < config.batch_size:
+        msg = (
+            f"Training set size ({len(train_set)}) is smaller than "
+            f"batch_size ({config.batch_size}); DataLoader with drop_last=True "
+            "would yield zero batches."
+        )
+        raise ValueError(msg)
     train_loader: DataLoader[torch.Tensor] = DataLoader(
         train_set,
         batch_size=config.batch_size,

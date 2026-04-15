@@ -275,6 +275,25 @@ class TestTrainSmoke:
         for m in history:
             assert np.isfinite(m.train_loss)
 
+    def test_rejects_train_set_smaller_than_batch(
+        self, dataset: MorpheusDataset, tmp_path: Path,
+    ) -> None:
+        train_set, val_set = chronological_split(
+            dataset, val_fraction=0.2, gap=2,
+        )
+        config = TrainConfig(
+            epochs=1, batch_size=len(train_set) + 10, lr=1e-3,
+            embed_dim=16, det_dim=32, stoch_dim=16, hidden_dim=32,
+            free_nats=0.5,
+        )
+        with pytest.raises(ValueError, match="batch_size"):
+            train(
+                train_set=train_set, val_set=val_set,
+                norm_stats=dataset.norm_stats,
+                config=config, output_dir=tmp_path / "run",
+                device=torch.device("cpu"),
+            )
+
     def test_resume_continues_from_checkpoint(
         self, dataset: MorpheusDataset, tmp_path: Path,
     ) -> None:

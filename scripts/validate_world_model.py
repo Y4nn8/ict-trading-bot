@@ -26,12 +26,12 @@ import torch
 
 from src.common.logging import get_logger
 from src.morpheus.dataset import (
+    GAP_THRESHOLD_FACTOR,
     OBS_COLUMNS,
     NormStats,
     compute_observations,
     load_parquet_dir,
 )
-from src.morpheus.training import load_checkpoint
 from src.morpheus.validation import ValidationReport, validate_trajectories
 from src.morpheus.world_model import WorldModel
 
@@ -53,7 +53,7 @@ def _segments_with_time(
     if df.height == 0:
         return []
 
-    threshold_us = bucket_seconds * 6 * 1_000_000
+    threshold_us = bucket_seconds * GAP_THRESHOLD_FACTOR * 1_000_000
     time_diffs = df["time"].diff().dt.total_microseconds().fill_null(0).to_numpy()
     gap_indices = np.where(time_diffs > threshold_us)[0]
     split_points = [0, *gap_indices.tolist(), df.height]
@@ -94,23 +94,32 @@ def sample_windows(
         )
         raise ValueError(msg)
 
-    # Uniform sampling over all valid starting points.
-    starts: list[tuple[int, int]] = []
-    for seg_idx, (obs, _) in enumerate(segments):
-        n_starts = len(obs) - window_len + 1
-        starts.extend((seg_idx, s) for s in range(n_starts))
-    if not starts:
+    # Uniform sampling over all valid starting points without materializing
+    # every (segment, offset) pair — O(n_segments) memory instead of O(total_rows).
+    start_counts = np.fromiter(
+        (len(obs) - window_len + 1 for obs, _ in segments),
+        dtype=np.int64,
+        count=len(segments),
+    )
+    total_starts = int(start_counts.sum())
+    if total_starts <= 0:
         msg = "No valid starting points found"
         raise ValueError(msg)
 
-    picks = rng.choice(len(starts), size=n_samples, replace=len(starts) < n_samples)
+    cumulative_starts = np.cumsum(start_counts)
+    picks = rng.choice(
+        total_starts, size=n_samples, replace=total_starts < n_samples,
+    )
 
     context_batch = np.empty((n_samples, context_len, len(OBS_COLUMNS)), dtype=np.float32)
     future_batch = np.empty((n_samples, horizon, len(OBS_COLUMNS)), dtype=np.float32)
     hours_batch = np.empty((n_samples, horizon), dtype=np.int32)
 
     for i, pick in enumerate(picks):
-        seg_idx, offset = starts[int(pick)]
+        global_start = int(pick)
+        seg_idx = int(np.searchsorted(cumulative_starts, global_start, side="right"))
+        prev_cum = 0 if seg_idx == 0 else int(cumulative_starts[seg_idx - 1])
+        offset = global_start - prev_cum
         obs, hours = segments[seg_idx]
         window = obs[offset : offset + window_len]
         context_batch[i] = window[:context_len]
@@ -222,7 +231,7 @@ def main(argv: list[str] | None = None) -> None:
         kl_weight=cfg["kl_weight"],
         free_nats=cfg["free_nats"],
     ).to(device)
-    load_checkpoint(args.checkpoint, model=model, map_location=device)
+    model.load_state_dict(payload["model_state"])
 
     context, real_future, hours = sample_windows(
         args.parquet_dir,
