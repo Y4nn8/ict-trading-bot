@@ -447,3 +447,30 @@ Currently all 42 features are computed at candle close (10s). Entry predict betw
 - Retrain entry model with these features (sampled at tick or sub-candle level)
 - In live: predict entry at every tick (5-10 calls/sec, ~1ms total — no perf issue)
 - In backtest: predict entry every N ticks + at candle close (configurable subsampling to keep Optuna fast). Same approach as exit model — LightGBM has no incremental predict mode, each call is ~0.18ms regardless of how many features changed
+
+## Session 16 — 2026-04-15
+
+### Progress
+- Morpheus PR3 started: training loop + validation metrics + walk-forward validation script
+- Branch: `feat/morpheus-training`
+- 495 tests pass (30 new), ruff clean on touched files, mypy clean on morpheus (pre-existing errors in midas/backtest remain)
+
+### Decisions Made
+- **Training/validation split**: chronological with a configurable purge gap (default 256 sequences) between train and val to prevent a train sequence from overlapping the first val sequence. `torch.utils.data.Subset` keeps the split zero-copy
+- **Checkpoint format**: atomic `.tmp → rename`; stores `model_state`, `optimizer_state`, `epoch`, flattened `TrainConfig`, serialised `NormStats`. Resume picks up from the saved epoch
+- **Metrics logging**: CSV only for PR3 (structlog for console). Tensorboard/WandB deferred — no extra deps, CI doesn't need a writer, easy to add later as a flag
+- **Validation metrics**: KS 2-sample (returns distribution), ACF (lead/lag), ACF of squared returns (volatility clustering), hourly mean |return| profile. Scipy avoided — hand-rolled KS with Smirnov series p-value is ~20 lines and keeps deps unchanged
+- **ACF estimator**: biased divisor (by N, not N−k) for consistent scaling across lags — matches statsmodels default
+- **Hour axis for imagined trajectories**: taken from the real future timestamps (same for both real and imagined), not decoded from predicted `hour_sin/cos` — keeps the metric well-defined even when the model hasn't learned the time embedding well
+- **Return dimension**: CLI flag (`--return-dim`, default = index of `ret_close`) rather than hard-coded, so future experiments can validate other dimensions without code changes
+
+### Issues Encountered
+- KS p-value at d=0: the Smirnov series has alternating ±1 terms with 100-term truncation — early-return `p=1.0` when `d == 0.0`
+- Ruff EN DASH ambiguity (RUF002): replaced `–` with `-` in docstrings
+- Pre-existing mypy errors in `src/midas/trainer.py` and `src/backtest/vectorized.py` (ndarray generic args) — out of scope for this PR
+
+### TODO / Next Session
+- Open PR for `feat/morpheus-training`, address Copilot review
+- Export a validation Parquet slice and run an end-to-end smoke on CPU to eyeball the report CSV
+- Plan PR4 (Phase B — actor/critic) only after Phase A validation shows the world model captures market dynamics
+
