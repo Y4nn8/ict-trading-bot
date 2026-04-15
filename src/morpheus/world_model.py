@@ -11,10 +11,11 @@ from dataclasses import dataclass
 
 import torch
 from torch import Tensor, nn
+from torch.distributions import Normal, kl_divergence
 
 from src.morpheus.decoder import ObservationDecoder
 from src.morpheus.encoder import ObservationEncoder
-from src.morpheus.rssm import RSSM, GaussianParams, RSSMState
+from src.morpheus.rssm import RSSM, GaussianParams
 
 
 @dataclass(frozen=True)
@@ -31,9 +32,7 @@ def kl_divergence_gaussian(
     post: GaussianParams,
     prior: GaussianParams,
 ) -> Tensor:
-    """Analytic KL divergence between two diagonal Gaussians.
-
-    KL(q || p) = log(s_p/s_q) + (s_q^2 + (m_q - m_p)^2) / (2*s_p^2) - 0.5
+    """KL divergence between two diagonal Gaussians via torch.distributions.
 
     Args:
         post: Posterior distribution parameters.
@@ -42,13 +41,9 @@ def kl_divergence_gaussian(
     Returns:
         KL divergence per element, same shape as mu/std tensors.
     """
-    var_post = post.std.pow(2)
-    var_prior = prior.std.pow(2)
-    return (
-        torch.log(prior.std / post.std)
-        + (var_post + (post.mu - prior.mu).pow(2)) / (2.0 * var_prior)
-        - 0.5
-    )
+    q = Normal(post.mu, post.std)
+    p = Normal(prior.mu, prior.std)
+    return kl_divergence(q, p)
 
 
 class WorldModel(nn.Module):
@@ -154,12 +149,7 @@ class WorldModel(nn.Module):
 
         embeds = self.encoder(obs_context)
         state = self.rssm.initial_state(batch, device=device)
-        rssm_out = self.rssm.observe(embeds, state)
-
-        final_state = RSSMState(
-            h=rssm_out.h_seq[:, -1],
-            z=rssm_out.z_seq[:, -1],
-        )
+        final_state = self.rssm.observe_final(embeds, state)
 
         h_imag, z_imag = self.rssm.imagine(final_state, horizon)
 

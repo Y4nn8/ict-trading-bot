@@ -173,6 +173,26 @@ class TestRSSM:
         torch.testing.assert_close(h1, h2)
         torch.testing.assert_close(z1, z2)
 
+    def test_observe_final_matches_observe(self, rssm: RSSM) -> None:
+        embeds = torch.randn(BATCH, SEQ_LEN, EMBED_DIM)
+        state = rssm.initial_state(BATCH)
+
+        torch.manual_seed(0)
+        full_out = rssm.observe(embeds, state)
+
+        torch.manual_seed(0)
+        final_state = rssm.observe_final(embeds, state)
+
+        torch.testing.assert_close(final_state.h, full_out.h_seq[:, -1])
+        torch.testing.assert_close(final_state.z, full_out.z_seq[:, -1])
+
+    def test_observe_final_shape(self, rssm: RSSM) -> None:
+        embeds = torch.randn(BATCH, SEQ_LEN, EMBED_DIM)
+        state = rssm.initial_state(BATCH)
+        final = rssm.observe_final(embeds, state)
+        assert final.h.shape == (BATCH, DET_DIM)
+        assert final.z.shape == (BATCH, STOCH_DIM)
+
 
 # ---------------------------------------------------------------------------
 # ObservationDecoder tests

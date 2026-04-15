@@ -160,6 +160,30 @@ class RSSM(nn.Module):
             ),
         )
 
+    def observe_final(self, embeds: Tensor, state: RSSMState) -> RSSMState:
+        """Process a sequence and return only the terminal state.
+
+        Same dynamics as observe() but skips accumulating intermediate
+        distributions, saving memory when only the final state is needed
+        (e.g. for imagination rollouts).
+
+        Args:
+            embeds: (batch, seq_len, embed_dim) — encoder output.
+            state: Initial RSSM state.
+
+        Returns:
+            Terminal RSSMState (h_T, z_T).
+        """
+        _, seq_len, _ = embeds.shape
+        h, z = state.h, state.z
+
+        for t in range(seq_len):
+            h = self.gru(z, h)
+            post = self.posterior(h, embeds[:, t])
+            z = post.mu + post.std * torch.randn_like(post.std)
+
+        return RSSMState(h=h, z=z)
+
     def imagine(self, state: RSSMState, horizon: int) -> tuple[Tensor, Tensor]:
         """Roll forward using prior only (no observations).
 
