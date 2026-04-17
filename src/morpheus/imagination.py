@@ -99,17 +99,17 @@ class ImaginationEnv:
         raw_ret = obs_t[:, RET_CLOSE_IDX] * self._ret_std + self._ret_mean
         new_price = price * (1.0 + raw_ret)
 
-        # Notional exposure
-        notional = capital / self._margin_rate
+        # Position size in units
+        size = capital / (self._margin_rate * price)
 
         # Position sign: long=+1, short=-1, flat=0
         pos_sign = torch.zeros_like(capital)
         pos_sign = torch.where(pos == BUY, torch.ones_like(pos_sign), pos_sign)
         pos_sign = torch.where(pos == SELL, -torch.ones_like(pos_sign), pos_sign)
 
-        # Reward = position * return (normalized by initial capital)
+        # Reward = position * price_change * size / initial_capital
         price_change = new_price - price
-        rewards = pos_sign * price_change * notional / self._initial_capital
+        rewards = pos_sign * price_change * size / self._initial_capital
 
         # -- Process position changes --
         # HOLD keeps current position
@@ -128,7 +128,6 @@ class ImaginationEnv:
 
         spread_cost = torch.zeros_like(capital)
         spread_pts = self._config.spread_points
-        size = notional / new_price
         spread_cost = torch.where(
             opening, spread_pts * size, spread_cost,
         )
