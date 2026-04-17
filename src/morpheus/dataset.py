@@ -197,6 +197,24 @@ def compute_h1_features(df: pl.DataFrame) -> pl.DataFrame:
     return result.with_columns(**fill_cols)
 
 
+def _compute_split_points(
+    df: pl.DataFrame,
+    bucket_seconds: int,
+) -> list[int]:
+    """Find gap-based split points in a time-sorted DataFrame."""
+    times = df["time"]
+    if len(times) == 0:
+        return [0, 0]
+    threshold_us = bucket_seconds * GAP_THRESHOLD_FACTOR * 1_000_000
+    if times.dtype == pl.Datetime:
+        time_diffs = times.diff().dt.total_microseconds().fill_null(0).to_numpy()
+    else:
+        time_diffs = np.full(len(times), bucket_seconds * 1_000_000, dtype=np.int64)
+        time_diffs[0] = 0
+    gap_indices = np.where(time_diffs > threshold_us)[0]
+    return [0, *gap_indices.tolist(), len(times)]
+
+
 def find_segments(
     df: pl.DataFrame,
     bucket_seconds: int,
@@ -219,22 +237,11 @@ def find_segments(
     """
     if obs_columns is None:
         obs_columns = OBS_COLUMNS
-
-    times = df["time"]
-    if len(times) == 0:
+    if len(df) == 0:
         return []
 
     obs_data = df.select(obs_columns).to_numpy().astype(np.float32)
-    threshold_us = bucket_seconds * GAP_THRESHOLD_FACTOR * 1_000_000
-
-    if times.dtype == pl.Datetime:
-        time_diffs = times.diff().dt.total_microseconds().fill_null(0).to_numpy()
-    else:
-        time_diffs = np.full(len(times), bucket_seconds * 1_000_000, dtype=np.int64)
-        time_diffs[0] = 0
-
-    gap_indices = np.where(time_diffs > threshold_us)[0]
-    split_points = [0, *gap_indices.tolist(), len(obs_data)]
+    split_points = _compute_split_points(df, bucket_seconds)
 
     segments: list[NDArray[np.float32]] = []
     for i in range(len(split_points) - 1):
@@ -243,6 +250,44 @@ def find_segments(
             segments.append(obs_data[start:end])
 
     return segments
+
+
+def find_segments_with_close(
+    df: pl.DataFrame,
+    bucket_seconds: int,
+    seq_len: int,
+    obs_columns: list[str] | None = None,
+) -> tuple[list[NDArray[np.float32]], list[NDArray[np.float32]]]:
+    """Like find_segments, but also returns close prices per segment.
+
+    Args:
+        df: DataFrame with observation columns, 'time', and 'close'.
+        bucket_seconds: Expected candle interval.
+        seq_len: Minimum segment length.
+        obs_columns: Column names to extract. Defaults to OBS_COLUMNS.
+
+    Returns:
+        (obs_segments, close_segments) where each close segment has
+        shape (segment_len,).
+    """
+    if obs_columns is None:
+        obs_columns = OBS_COLUMNS
+    if len(df) == 0:
+        return [], []
+
+    obs_data = df.select(obs_columns).to_numpy().astype(np.float32)
+    close_data = df["close"].to_numpy().astype(np.float32)
+    split_points = _compute_split_points(df, bucket_seconds)
+
+    obs_segs: list[NDArray[np.float32]] = []
+    close_segs: list[NDArray[np.float32]] = []
+    for i in range(len(split_points) - 1):
+        start, end = split_points[i], split_points[i + 1]
+        if end - start >= seq_len:
+            obs_segs.append(obs_data[start:end])
+            close_segs.append(close_data[start:end])
+
+    return obs_segs, close_segs
 
 
 def build_segment_index(
@@ -313,7 +358,7 @@ class MorpheusDataset(Dataset[torch.Tensor]):
             df = compute_h1_features(df)
         obs_df = compute_observations(df)
         self._obs_columns = OBS_COLUMNS_H1 if use_h1 else OBS_COLUMNS
-        segments = find_segments(
+        segments, close_segments = find_segments_with_close(
             obs_df, bucket_seconds, seq_len,
             obs_columns=self._obs_columns,
         )
@@ -323,6 +368,7 @@ class MorpheusDataset(Dataset[torch.Tensor]):
             raise ValueError(msg)
 
         self._index = build_segment_index(segments, seq_len, stride)
+        self._close_segments = close_segments
         self._seq_len = seq_len
         self._normalize = normalize
         self._stats: NormStats | None = None
@@ -339,6 +385,13 @@ class MorpheusDataset(Dataset[torch.Tensor]):
     def obs_dim(self) -> int:
         """Observation dimensionality."""
         return len(self._obs_columns)
+
+    def get_close(self, idx: int) -> float:
+        """Return close price of the last candle in sequence ``idx``."""
+        if idx < 0:
+            idx += len(self)
+        seg_idx, offset = self._index.offsets[idx]
+        return float(self._close_segments[seg_idx][offset + self._seq_len - 1])
 
     def __len__(self) -> int:
         return self._index.total_sequences
