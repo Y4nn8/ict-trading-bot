@@ -13,14 +13,17 @@ core loop stays unit-testable.  Provides:
 from __future__ import annotations
 
 import csv
+import time
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
+from torch.amp import GradScaler, autocast  # type: ignore[attr-defined]
 from torch.optim import Adam
 from torch.utils.data import DataLoader, Subset
 
+from src.common.logging import get_logger
 from src.morpheus.world_model import WorldModel
 
 if TYPE_CHECKING:
@@ -28,6 +31,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from src.morpheus.dataset import MorpheusDataset, NormStats
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -51,6 +56,9 @@ class TrainConfig:
     hidden_dim: int = 128
     kl_weight: float = 1.0
     free_nats: float = 1.0
+    compile: bool = False
+    amp: bool = False
+    num_workers: int = 0
 
 
 @dataclass
@@ -171,25 +179,56 @@ def train_epoch(
     *,
     grad_clip: float,
     device: torch.device,
+    scaler: GradScaler | None = None,
+    use_amp: bool = False,
+    epoch: int = 0,
+    log_interval: int = 500,
 ) -> tuple[float, float, float]:
     """Run one training epoch and return (avg_loss, avg_recon, avg_kl)."""
     model.train()
     losses: list[float] = []
     recons: list[float] = []
     kls: list[float] = []
+    total_steps = len(loader)
+    t0 = time.monotonic()
 
-    for batch in loader:
+    for step, batch in enumerate(loader):
         batch = batch.to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
-        out = model(batch)
-        out.loss.backward()
-        if grad_clip > 0:
-            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        optimizer.step()
+
+        with autocast("cuda", enabled=use_amp):
+            out = model(batch)
+
+        if scaler is not None:
+            scaler.scale(out.loss).backward()
+            if grad_clip > 0:
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            out.loss.backward()
+            if grad_clip > 0:
+                nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
 
         losses.append(out.loss.item())
         recons.append(out.recon_loss.item())
         kls.append(out.kl_loss.item())
+
+        if log_interval > 0 and (step + 1) % log_interval == 0:
+            elapsed = time.monotonic() - t0
+            steps_per_sec = (step + 1) / elapsed
+            eta_sec = (total_steps - step - 1) / steps_per_sec if steps_per_sec > 0 else 0
+            logger.info(
+                "train_step",
+                epoch=epoch + 1,
+                step=step + 1,
+                total=total_steps,
+                loss=f"{_mean(losses[-log_interval:]):.4f}",
+                steps_per_sec=f"{steps_per_sec:.1f}",
+                eta_min=f"{eta_sec / 60:.1f}",
+            )
 
     return _mean(losses), _mean(recons), _mean(kls)
 
@@ -200,6 +239,7 @@ def evaluate(
     loader: DataLoader[torch.Tensor],
     *,
     device: torch.device,
+    use_amp: bool = False,
 ) -> tuple[float, float, float]:
     """Run one evaluation pass and return (avg_loss, avg_recon, avg_kl)."""
     model.eval()
@@ -209,7 +249,8 @@ def evaluate(
 
     for batch in loader:
         batch = batch.to(device, non_blocking=True)
-        out = model(batch)
+        with autocast("cuda", enabled=use_amp):
+            out = model(batch)
         losses.append(out.loss.item())
         recons.append(out.recon_loss.item())
         kls.append(out.kl_loss.item())
@@ -282,6 +323,15 @@ def train(
         )
         start_epoch = int(payload.get("epoch", 0))
 
+    if config.compile and device.type == "cuda":
+        logger.info("compiling_model")
+        model = torch.compile(model)  # type: ignore[assignment]
+
+    use_amp = config.amp and device.type == "cuda"
+    scaler = GradScaler("cuda") if use_amp else None
+    if use_amp:
+        logger.info("amp_enabled")
+
     if len(train_set) < config.batch_size:
         msg = (
             f"Training set size ({len(train_set)}) is smaller than "
@@ -289,11 +339,15 @@ def train(
             "would yield zero batches."
         )
         raise ValueError(msg)
+    pin = device.type == "cuda" and config.num_workers > 0
     train_loader: DataLoader[torch.Tensor] = DataLoader(
         train_set,
         batch_size=config.batch_size,
         shuffle=True,
         drop_last=True,
+        num_workers=config.num_workers,
+        pin_memory=pin,
+        persistent_workers=config.num_workers > 0,
     )
     val_loader: DataLoader[torch.Tensor] | None = None
     if val_set is not None and len(val_set) >= config.batch_size:
@@ -302,6 +356,9 @@ def train(
             batch_size=config.batch_size,
             shuffle=False,
             drop_last=False,
+            num_workers=config.num_workers,
+            pin_memory=pin,
+            persistent_workers=config.num_workers > 0,
         )
 
     metrics_path = output_dir / "metrics.csv"
@@ -311,11 +368,13 @@ def train(
         tr_loss, tr_recon, tr_kl = train_epoch(
             model, train_loader, optimizer,
             grad_clip=config.grad_clip, device=device,
+            scaler=scaler, use_amp=use_amp,
+            epoch=epoch, log_interval=config.log_interval,
         )
         val_loss = val_recon = val_kl = float("nan")
         if val_loader is not None:
             val_loss, val_recon, val_kl = evaluate(
-                model, val_loader, device=device,
+                model, val_loader, device=device, use_amp=use_amp,
             )
 
         m = EpochMetrics(
@@ -325,6 +384,17 @@ def train(
         )
         history.append(m)
         append_metrics_csv(metrics_path, m)
+
+        logger.info(
+            "epoch_complete",
+            epoch=epoch + 1,
+            train_loss=f"{tr_loss:.4f}",
+            train_recon=f"{tr_recon:.4f}",
+            train_kl=f"{tr_kl:.4f}",
+            val_loss=f"{val_loss:.4f}",
+            val_recon=f"{val_recon:.4f}",
+            val_kl=f"{val_kl:.4f}",
+        )
 
         if (epoch + 1) % config.checkpoint_interval == 0:
             save_checkpoint(

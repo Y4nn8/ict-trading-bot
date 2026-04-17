@@ -42,6 +42,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--bucket-seconds", type=int, default=10)
     p.add_argument("--seq-len", type=int, default=256)
     p.add_argument("--stride", type=int, default=1)
+    p.add_argument("--h1", action="store_true", help="Add H1 features (16 dims)")
 
     # Training
     p.add_argument("--epochs", type=int, default=10)
@@ -54,6 +55,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", choices=["cpu", "cuda", "auto"], default="auto")
     p.add_argument("--resume", type=Path, default=None)
+    p.add_argument(
+        "--shuffle-split", action="store_true",
+        help="Random split instead of chronological",
+    )
+    p.add_argument("--compile", action="store_true", help="torch.compile the model")
+    p.add_argument("--amp", action="store_true", help="Enable mixed-precision (float16)")
+    p.add_argument("--log-interval", type=int, default=10, help="Log every N train steps (0=off)")
+    p.add_argument("--num-workers", type=int, default=4, help="DataLoader workers (0=main thread)")
 
     # Model
     p.add_argument("--embed-dim", type=int, default=64)
@@ -91,6 +100,7 @@ def main(argv: list[str] | None = None) -> None:
         seq_len=args.seq_len,
         stride=args.stride,
         bucket_seconds=args.bucket_seconds,
+        use_h1=args.h1,
     )
     logger.info(
         "dataset_loaded",
@@ -98,15 +108,32 @@ def main(argv: list[str] | None = None) -> None:
         obs_dim=dataset.obs_dim,
     )
 
-    train_set, val_set = chronological_split(
-        dataset, val_fraction=args.val_fraction, gap=args.val_gap,
-    )
-    logger.info(
-        "dataset_split",
-        train_size=len(train_set),
-        val_size=len(val_set),
-        gap=args.val_gap,
-    )
+    if args.shuffle_split:
+        from torch.utils.data import random_split
+
+        val_size = round(len(dataset) * args.val_fraction)
+        train_size = len(dataset) - val_size
+        train_set, val_set = random_split(
+            dataset, [train_size, val_size],
+            generator=torch.Generator().manual_seed(args.seed),
+        )
+        logger.info(
+            "dataset_split",
+            mode="shuffle",
+            train_size=len(train_set),
+            val_size=len(val_set),
+        )
+    else:
+        train_set, val_set = chronological_split(
+            dataset, val_fraction=args.val_fraction, gap=args.val_gap,
+        )
+        logger.info(
+            "dataset_split",
+            mode="chronological",
+            train_size=len(train_set),
+            val_size=len(val_set),
+            gap=args.val_gap,
+        )
 
     config = TrainConfig(
         epochs=args.epochs,
@@ -115,6 +142,7 @@ def main(argv: list[str] | None = None) -> None:
         grad_clip=args.grad_clip,
         val_fraction=args.val_fraction,
         val_gap=args.val_gap,
+        log_interval=args.log_interval,
         checkpoint_interval=args.checkpoint_interval,
         seed=args.seed,
         obs_dim=dataset.obs_dim,
@@ -124,6 +152,9 @@ def main(argv: list[str] | None = None) -> None:
         hidden_dim=args.hidden_dim,
         kl_weight=args.kl_weight,
         free_nats=args.free_nats,
+        compile=args.compile,
+        amp=args.amp,
+        num_workers=args.num_workers,
     )
 
     history = train(

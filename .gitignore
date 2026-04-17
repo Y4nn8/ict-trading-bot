@@ -48,3 +48,16 @@ Thumbs.db
 *.log
 *.progress
 download/
+
+# Vast.ai local state
+infra/vast/.last-run
+.last-run
+
+# Experiment outputs
+results/
+runs/
+config/*.csv
+config/*.bin
+
+# Claude Code
+.claude/

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
-OBS_COLUMNS = [
+BASE_OBS_COLUMNS = [
     "ret_open",
     "ret_high",
     "ret_low",
@@ -34,7 +34,21 @@ OBS_COLUMNS = [
     "dow_sin",
     "dow_cos",
 ]
+
+H1_OBS_COLUMNS = [
+    "h1_ret_open",
+    "h1_ret_high",
+    "h1_ret_low",
+    "h1_ret_close",
+    "h1_tick_count",
+    "h1_spread",
+]
+
+OBS_COLUMNS = BASE_OBS_COLUMNS
 OBS_DIM = len(OBS_COLUMNS)
+
+OBS_COLUMNS_H1 = BASE_OBS_COLUMNS + H1_OBS_COLUMNS
+OBS_DIM_H1 = len(OBS_COLUMNS_H1)
 
 GAP_THRESHOLD_FACTOR = 6
 
@@ -78,7 +92,10 @@ def load_parquet_dir(parquet_dir: Path) -> pl.DataFrame:
     if not files:
         msg = f"No .parquet files found in {parquet_dir}"
         raise FileNotFoundError(msg)
-    dfs = [pl.read_parquet(f) for f in files]
+    dfs = [
+        pl.read_parquet(f).cast({"tick_count": pl.Int64}, strict=False)
+        for f in files
+    ]
     return pl.concat(dfs).sort("time")
 
 
@@ -122,10 +139,69 @@ def compute_observations(df: pl.DataFrame) -> pl.DataFrame:
     ).slice(1)
 
 
+def compute_h1_features(df: pl.DataFrame) -> pl.DataFrame:
+    """Compute H1-scale features and join back onto 10s rows.
+
+    For each 10s candle, adds features from the last *completed* H1 candle
+    (shifted by one hour to avoid look-ahead).  H1 candles are aggregated
+    from the raw 10s data using floor-to-hour bucketing.
+
+    Args:
+        df: DataFrame with columns [time, open, high, low, close,
+            tick_count, spread] — must already be sorted by time.
+
+    Returns:
+        DataFrame with additional h1_* columns.  Rows where no prior
+        completed H1 candle exists are filled with 0.0.
+    """
+    h1 = (
+        df.group_by_dynamic("time", every="1h")
+        .agg(
+            pl.col("open").first().alias("h1_open"),
+            pl.col("high").max().alias("h1_high"),
+            pl.col("low").min().alias("h1_low"),
+            pl.col("close").last().alias("h1_close"),
+            pl.col("tick_count").sum().alias("h1_tick_count_raw"),
+            pl.col("spread").mean().alias("h1_spread_raw"),
+        )
+        .sort("time")
+    )
+
+    h1_prev_close = h1["h1_close"].shift(1)
+    h1 = h1.with_columns(
+        ((pl.col("h1_open") - h1_prev_close) / h1_prev_close).alias(
+            "h1_ret_open"
+        ),
+        ((pl.col("h1_high") - h1_prev_close) / h1_prev_close).alias(
+            "h1_ret_high"
+        ),
+        ((pl.col("h1_low") - h1_prev_close) / h1_prev_close).alias(
+            "h1_ret_low"
+        ),
+        ((pl.col("h1_close") - h1_prev_close) / h1_prev_close).alias(
+            "h1_ret_close"
+        ),
+        pl.col("h1_tick_count_raw").alias("h1_tick_count"),
+        pl.col("h1_spread_raw").alias("h1_spread"),
+    ).select("time", *H1_OBS_COLUMNS)
+
+    h1_shifted = h1.with_columns(
+        (pl.col("time") + pl.duration(hours=1)).alias("time"),
+    )
+
+    result = df.join_asof(
+        h1_shifted, on="time", strategy="backward",
+    )
+
+    fill_cols = {c: pl.col(c).fill_null(0.0) for c in H1_OBS_COLUMNS}
+    return result.with_columns(**fill_cols)
+
+
 def find_segments(
     df: pl.DataFrame,
     bucket_seconds: int,
     seq_len: int,
+    obs_columns: list[str] | None = None,
 ) -> list[NDArray[np.float32]]:
     """Split observations into contiguous segments (no time gaps).
 
@@ -136,15 +212,19 @@ def find_segments(
         df: DataFrame with observation columns and 'time'.
         bucket_seconds: Expected candle interval.
         seq_len: Minimum segment length (shorter segments are dropped).
+        obs_columns: Column names to extract. Defaults to OBS_COLUMNS.
 
     Returns:
-        List of numpy arrays, each of shape (segment_len, OBS_DIM).
+        List of numpy arrays, each of shape (segment_len, obs_dim).
     """
+    if obs_columns is None:
+        obs_columns = OBS_COLUMNS
+
     times = df["time"]
     if len(times) == 0:
         return []
 
-    obs_data = df.select(OBS_COLUMNS).to_numpy().astype(np.float32)
+    obs_data = df.select(obs_columns).to_numpy().astype(np.float32)
     threshold_us = bucket_seconds * GAP_THRESHOLD_FACTOR * 1_000_000
 
     if times.dtype == pl.Datetime:
@@ -226,10 +306,17 @@ class MorpheusDataset(Dataset[torch.Tensor]):
         bucket_seconds: int = 10,
         norm_stats: NormStats | None = None,
         normalize: bool = True,
+        use_h1: bool = False,
     ) -> None:
         df = load_parquet_dir(parquet_dir)
+        if use_h1:
+            df = compute_h1_features(df)
         obs_df = compute_observations(df)
-        segments = find_segments(obs_df, bucket_seconds, seq_len)
+        self._obs_columns = OBS_COLUMNS_H1 if use_h1 else OBS_COLUMNS
+        segments = find_segments(
+            obs_df, bucket_seconds, seq_len,
+            obs_columns=self._obs_columns,
+        )
 
         if not segments:
             msg = "No valid segments found (all segments shorter than seq_len)"
@@ -251,7 +338,7 @@ class MorpheusDataset(Dataset[torch.Tensor]):
     @property
     def obs_dim(self) -> int:
         """Observation dimensionality."""
-        return OBS_DIM
+        return len(self._obs_columns)
 
     def __len__(self) -> int:
         return self._index.total_sequences
