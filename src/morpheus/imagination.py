@@ -83,7 +83,7 @@ class ImaginationEnv:
         actions: Tensor,
         obs_t: Tensor,
         portfolio: dict[str, Tensor],
-    ) -> tuple[Tensor, dict[str, Tensor]]:
+    ) -> tuple[Tensor, dict[str, Tensor], dict[str, int | float]]:
         """Execute one environment step.
 
         Args:
@@ -127,7 +127,9 @@ class ImaginationEnv:
         short_sl = in_short & (short_diff <= -self._sl)
         short_tp = in_short & (short_diff >= self._tp)
 
-        close_mask = long_sl | long_tp | short_sl | short_tp
+        sl_mask = long_sl | short_sl
+        tp_mask = long_tp | short_tp
+        close_mask = sl_mask | tp_mask
 
         # Realized PnL (clamped to SL/TP)
         realized_pnl = torch.zeros_like(capital)
@@ -177,7 +179,21 @@ class ImaginationEnv:
         rewards = torch.where(
             still_in, rewards + self._config.step_penalty, rewards,
         )
+
+        # -- Idle penalty when flat and choosing HOLD --
+        idle = is_flat & (actions == HOLD)
+        rewards = torch.where(
+            idle, rewards + self._config.idle_penalty, rewards,
+        )
+
         step_in = torch.where(still_in, step_in + 1, step_in)
+
+        stats = {
+            "opened": open_any.sum().item(),
+            "sl_hits": sl_mask.sum().item(),
+            "tp_hits": tp_mask.sum().item(),
+            "invalid": invalid.sum().item(),
+        }
 
         return rewards, {
             "position": pos,
@@ -188,7 +204,7 @@ class ImaginationEnv:
             "step_in_pos": step_in,
             "unrealized_pnl": unrealized,
             "size": size,
-        }
+        }, stats
 
     def force_close(self, portfolio: dict[str, Tensor]) -> Tensor:
         """Force-close all open positions at current unrealized PnL.

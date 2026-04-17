@@ -51,36 +51,32 @@ class PolicyEpochMetrics:
     mean_return: float
     entropy: float
     mean_capital: float = field(default=float("nan"))
+    trades_opened: int = 0
+    sl_hits: int = 0
+    tp_hits: int = 0
+    force_closed: int = 0
 
 
-def compute_lambda_returns(
+def compute_mc_returns(
     rewards: torch.Tensor,
-    values: torch.Tensor,
     gamma: float,
-    lambda_: float,
 ) -> torch.Tensor:
-    """Compute GAE lambda-returns.
+    """Compute Monte Carlo discounted returns (no bootstrapping).
 
     Args:
         rewards: (batch, horizon) per-step rewards.
-        values: (batch, horizon) critic value estimates.
         gamma: Discount factor.
-        lambda_: GAE lambda.
 
     Returns:
-        Lambda-returns (batch, horizon).
+        Discounted returns (batch, horizon).
     """
-    batch, horizon = rewards.shape
+    _, horizon = rewards.shape
     returns = torch.zeros_like(rewards)
-    last_val = torch.zeros(batch, device=rewards.device)
+    running = torch.zeros(rewards.shape[0], device=rewards.device)
 
     for t in reversed(range(horizon)):
-        next_val = values[:, t + 1] if t + 1 < horizon else last_val
-        delta = rewards[:, t] + gamma * next_val - values[:, t]
-        last_gae = delta + gamma * lambda_ * (
-            returns[:, t + 1] if t + 1 < horizon else torch.zeros_like(delta)
-        )
-        returns[:, t] = last_gae + values[:, t]
+        running = rewards[:, t] + gamma * running
+        returns[:, t] = running
 
     return returns
 
@@ -161,18 +157,21 @@ class PolicyTrainer:
         self,
         contexts: torch.Tensor,
         start_prices: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor,
+        torch.Tensor, torch.Tensor, torch.Tensor,
+        dict[str, int | float],
+    ]:
         """Run one batch of rollouts, collecting states, actions, rewards.
 
         Returns:
-            states: (batch, horizon, state_dim).
-            actions: (batch, horizon).
-            rewards: (batch, horizon).
-            final_capital: (batch,).
+            states, actions, rewards, final_capital, final_margin,
+            final_unrealized, rollout_stats.
         """
         imagined, hidden = self._generate_rollout_data(contexts)
         portfolio = self._env.reset(contexts.shape[0], start_prices)
         horizon = self._config.horizon
+        rollout_stats: dict[str, int | float] = {}
 
         states_list: list[torch.Tensor] = []
         actions_list: list[torch.Tensor] = []
@@ -189,21 +188,30 @@ class PolicyTrainer:
                 dist = Categorical(logits=logits)
                 action: torch.Tensor = dist.sample()  # type: ignore[no-untyped-call]
 
-            reward, portfolio = self._env.step(
+            reward, portfolio, step_stats = self._env.step(
                 action, imagined[:, t], portfolio,
             )
             actions_list.append(action)
             rewards_list.append(reward)
+            for k, v in step_stats.items():
+                rollout_stats[k] = rollout_stats.get(k, 0) + v
 
         # Force-close at end of horizon
         close_reward = self._env.force_close(portfolio)
+        in_pos_at_end = (portfolio["position"] != 0).sum().item()
+        rollout_stats["force_closed"] = int(in_pos_at_end)
         rewards_list[-1] = rewards_list[-1] + close_reward
 
         states = torch.stack(states_list, dim=1)
         actions = torch.stack(actions_list, dim=1)
         rewards = torch.stack(rewards_list, dim=1)
 
-        return states, actions, rewards, portfolio["capital"]
+        return (
+            states, actions, rewards,
+            portfolio["capital"], portfolio["margin_used"],
+            portfolio["unrealized_pnl"],
+            rollout_stats,
+        )
 
     def train_epoch(self, epoch: int) -> PolicyEpochMetrics:
         """Run one training epoch over multiple rollout batches."""
@@ -216,26 +224,26 @@ class PolicyTrainer:
         all_returns: list[float] = []
         all_entropy: list[float] = []
         all_capital: list[float] = []
+        total_stats: dict[str, int | float] = {}
         bs = self._config.batch_size
 
         for i in range(0, total_samples, bs):
             batch_ctx = contexts[i : i + bs]
             batch_closes = closes[i : i + bs]
-            states, actions, rewards, final_capital = self._rollout(
-                batch_ctx, batch_closes,
-            )
+            (
+                states, actions, rewards,
+                final_capital, final_margin, final_unrealized,
+                batch_stats,
+            ) = self._rollout(batch_ctx, batch_closes)
 
-            # Compute values and lambda-returns in symlog space
+            # Compute MC returns in symlog space (no critic bootstrapping)
             sym_rewards = symlog(rewards)
+            sym_returns = compute_mc_returns(sym_rewards, self._config.gamma)
             with torch.no_grad():
                 flat_states = states.reshape(-1, states.shape[-1])
                 sym_values = self._critic(flat_states).reshape(
                     states.shape[0], -1,
                 )
-            sym_returns = compute_lambda_returns(
-                sym_rewards, sym_values,
-                self._config.gamma, self._config.lambda_,
-            )
             advantages = sym_returns - sym_values
             advantages = (advantages - advantages.mean()) / (
                 advantages.std() + 1e-8
@@ -272,7 +280,12 @@ class PolicyTrainer:
             all_rewards.append(rewards.sum(dim=1).mean().item())
             all_returns.append(sym_returns.mean().item())
             all_entropy.append(entropies.mean().item())
-            all_capital.append(final_capital.mean().item())
+            effective_capital = (
+                final_capital + final_margin + final_unrealized
+            )
+            all_capital.append(effective_capital.mean().item())
+            for k, v in batch_stats.items():
+                total_stats[k] = total_stats.get(k, 0) + v
 
         def _avg(xs: list[float]) -> float:
             return sum(xs) / len(xs) if xs else float("nan")
@@ -285,6 +298,10 @@ class PolicyTrainer:
             mean_return=_avg(all_returns),
             entropy=_avg(all_entropy),
             mean_capital=_avg(all_capital),
+            trades_opened=int(total_stats.get("opened", 0)),
+            sl_hits=int(total_stats.get("sl_hits", 0)),
+            tp_hits=int(total_stats.get("tp_hits", 0)),
+            force_closed=int(total_stats.get("force_closed", 0)),
         )
 
     def train(self, output_dir: Path) -> list[PolicyEpochMetrics]:
@@ -296,6 +313,7 @@ class PolicyTrainer:
         fields = [
             "epoch", "actor_loss", "critic_loss",
             "mean_reward", "mean_return", "entropy", "mean_capital",
+            "trades_opened", "sl_hits", "tp_hits", "force_closed",
         ]
         with metrics_path.open("w", newline="") as fh:
             csv.DictWriter(fh, fieldnames=fields).writeheader()
@@ -315,6 +333,10 @@ class PolicyTrainer:
                 mean_reward=f"{m.mean_reward:.4f}",
                 mean_capital=f"{m.mean_capital:.0f}",
                 entropy=f"{m.entropy:.4f}",
+                opened=m.trades_opened,
+                sl=m.sl_hits,
+                tp=m.tp_hits,
+                fc=m.force_closed,
             )
 
         _save_policy_checkpoint(
