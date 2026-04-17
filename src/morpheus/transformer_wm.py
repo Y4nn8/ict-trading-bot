@@ -53,6 +53,10 @@ class RotaryPositionalEncoding(nn.Module):
         self, dim: int, max_seq_len: int = 1024, base: float = 10000.0,
     ) -> None:
         super().__init__()
+        if dim % 2 != 0:
+            msg = f"RotaryPositionalEncoding dim must be even, got {dim}"
+            raise ValueError(msg)
+        self.max_seq_len = max_seq_len
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq)
         t = torch.arange(max_seq_len, dtype=torch.float32)
@@ -74,6 +78,12 @@ class RotaryPositionalEncoding(nn.Module):
             Tuple of rotated (q, k) with same shape.
         """
         seq_len = q.shape[1]
+        if seq_len > self.max_seq_len:
+            msg = (
+                f"Sequence length {seq_len} exceeds max_seq_len "
+                f"{self.max_seq_len}. Increase max_seq_len."
+            )
+            raise ValueError(msg)
         cos = self.cos_cached[:seq_len]
         sin = self.sin_cached[:seq_len]
         return _apply_rotary(q, cos, sin), _apply_rotary(k, cos, sin)
@@ -202,6 +212,7 @@ class TransformerWorldModel(nn.Module):
     ) -> None:
         super().__init__()
         self.obs_dim = obs_dim
+        self.max_seq_len = max_seq_len
         self.input_proj = nn.Linear(obs_dim, d_model)
         self.blocks = nn.ModuleList([
             TransformerBlock(d_model, n_heads, d_ff, dropout, max_seq_len)
@@ -243,6 +254,10 @@ class TransformerWorldModel(nn.Module):
         Returns:
             WorldModelOutput with NLL as loss, kl_loss=0.
         """
+        if obs_seq.shape[1] < 2:
+            msg = "obs_seq must have seq_len >= 2 for next-step prediction"
+            raise ValueError(msg)
+
         h = self._run_backbone(obs_seq)
         params = self.output_head(h)
         mean, log_var = params.chunk(2, dim=-1)
@@ -288,6 +303,14 @@ class TransformerWorldModel(nn.Module):
         """
         if horizon == 0:
             return obs_context[:, :0]
+
+        total_len = obs_context.shape[1] + horizon
+        if total_len > self.max_seq_len:
+            msg = (
+                f"context_len ({obs_context.shape[1]}) + horizon ({horizon}) "
+                f"= {total_len} exceeds max_seq_len ({self.max_seq_len})"
+            )
+            raise ValueError(msg)
 
         generated: list[Tensor] = []
         current = obs_context

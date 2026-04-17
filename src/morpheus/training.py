@@ -309,17 +309,24 @@ def build_model(config: TrainConfig) -> nn.Module:
             max_seq_len=config.max_seq_len,
         )
 
-    from src.morpheus.world_model import WorldModel
+    if config.model_type == "rssm":
+        from src.morpheus.world_model import WorldModel
 
-    return WorldModel(
-        obs_dim=config.obs_dim,
-        embed_dim=config.embed_dim,
-        det_dim=config.det_dim,
-        stoch_dim=config.stoch_dim,
-        hidden_dim=config.hidden_dim,
-        kl_weight=config.kl_weight,
-        free_nats=config.free_nats,
+        return WorldModel(
+            obs_dim=config.obs_dim,
+            embed_dim=config.embed_dim,
+            det_dim=config.det_dim,
+            stoch_dim=config.stoch_dim,
+            hidden_dim=config.hidden_dim,
+            kl_weight=config.kl_weight,
+            free_nats=config.free_nats,
+        )
+
+    msg = (
+        f"Unsupported model_type: {config.model_type!r}. "
+        "Expected 'rssm' or 'transformer'."
     )
+    raise ValueError(msg)
 
 
 def train(
@@ -352,7 +359,8 @@ def train(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if model is None:
-        model = build_model(config).to(device)
+        model = build_model(config)
+    model = model.to(device)
     optimizer = Adam(model.parameters(), lr=config.lr)
 
     start_epoch = 0
