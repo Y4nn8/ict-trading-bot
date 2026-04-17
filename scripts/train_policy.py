@@ -61,6 +61,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--hidden-dim", type=int, default=128)
     p.add_argument("--n-hidden", type=int, default=2)
+    p.add_argument("--n-context-states", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", choices=["cpu", "cuda", "auto"], default="auto")
 
@@ -119,6 +120,7 @@ def main(argv: list[str] | None = None) -> None:
     policy_config = PolicyConfig(
         hidden_dim=args.hidden_dim,
         n_hidden=args.n_hidden,
+        n_context_states=args.n_context_states,
         spread_points=args.spread_points,
         margin_rate=args.margin_rate,
         initial_capital=args.initial_capital,

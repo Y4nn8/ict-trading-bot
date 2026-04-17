@@ -19,6 +19,7 @@ class PolicyConfig:
     # Network
     hidden_dim: int = 128
     n_hidden: int = 2
+    n_context_states: int = 8
 
     # Trading
     spread_points: float = 0.5
@@ -113,16 +114,16 @@ class Critic(nn.Module):
         return self.net(state).squeeze(-1)  # type: ignore[no-any-return]
 
 
-def compute_state_dim(d_model: int) -> int:
+def compute_state_dim(d_model: int, n_context_states: int = 1) -> int:
     """Total state dimension for actor/critic input."""
-    return d_model + PORTFOLIO_DIM
+    return d_model * n_context_states + PORTFOLIO_DIM
 
 
 def build_actor_critic(
     d_model: int, config: PolicyConfig,
 ) -> tuple[Actor, Critic]:
     """Construct actor and critic from config."""
-    state_dim = compute_state_dim(d_model)
+    state_dim = compute_state_dim(d_model, config.n_context_states)
     actor = Actor(state_dim, N_ACTIONS, config.hidden_dim, config.n_hidden)
     critic = Critic(state_dim, config.hidden_dim, config.n_hidden)
     return actor, critic

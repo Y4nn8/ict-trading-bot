@@ -147,10 +147,13 @@ class PolicyTrainer:
             imagined_obs: (batch, horizon, obs_dim).
             hidden_states: (batch, horizon, d_model).
         """
+        n_ctx = self._config.n_context_states
         imagined = self._wm.imagine(contexts, self._config.horizon)
         full_seq = torch.cat([contexts, imagined], dim=1)
         all_hidden = self._wm._run_backbone(full_seq)
-        hidden = all_hidden[:, self._config.context_len :]
+        # Keep n_ctx-1 states from context tail + all horizon states
+        start = self._config.context_len - (n_ctx - 1)
+        hidden = all_hidden[:, start:]
         return imagined, hidden
 
     def _rollout(
@@ -177,10 +180,15 @@ class PolicyTrainer:
         actions_list: list[torch.Tensor] = []
         rewards_list: list[torch.Tensor] = []
 
+        n_ctx = self._config.n_context_states
         for t in range(horizon):
-            h_t = hidden[:, t]
+            # hidden has n_ctx-1 context states prepended, so index t
+            # gives the window [t, t+n_ctx) which ends at the current step
+            h_window = hidden[:, t : t + n_ctx].reshape(
+                contexts.shape[0], -1,
+            )
             port_feat = self._env.get_features(portfolio)
-            state = torch.cat([h_t, port_feat], dim=-1)
+            state = torch.cat([h_window, port_feat], dim=-1)
             states_list.append(state)
 
             with torch.no_grad():
