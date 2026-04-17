@@ -34,8 +34,8 @@ from src.morpheus.dataset import (
     compute_observations,
     load_parquet_dir,
 )
+from src.morpheus.training import TrainConfig, build_model
 from src.morpheus.validation import ValidationReport, validate_trajectories
-from src.morpheus.world_model import WorldModel
 
 if TYPE_CHECKING:
     import polars as pl
@@ -151,7 +151,7 @@ def sample_windows(
 
 @torch.no_grad()
 def imagine_batch(
-    model: WorldModel,
+    model: torch.nn.Module,
     context: torch.Tensor,
     horizon: int,
     *,
@@ -163,7 +163,7 @@ def imagine_batch(
     outputs: list[NDArray[np.float32]] = []
     for start in range(0, context.shape[0], batch_size):
         chunk = context[start : start + batch_size].to(device)
-        pred = model.imagine(chunk, horizon=horizon)
+        pred: torch.Tensor = model.imagine(chunk, horizon=horizon)  # type: ignore[operator]
         outputs.append(pred.detach().cpu().numpy())
     return np.concatenate(outputs, axis=0)
 
@@ -237,15 +237,11 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError(msg)
     norm_stats = NormStats.from_dict(payload["norm_stats"])
 
-    model = WorldModel(
-        obs_dim=cfg["obs_dim"],
-        embed_dim=cfg["embed_dim"],
-        det_dim=cfg["det_dim"],
-        stoch_dim=cfg["stoch_dim"],
-        hidden_dim=cfg["hidden_dim"],
-        kl_weight=cfg["kl_weight"],
-        free_nats=cfg["free_nats"],
-    ).to(device)
+    train_config = TrainConfig(**{
+        k: v for k, v in cfg.items()
+        if k in TrainConfig.__dataclass_fields__
+    })
+    model = build_model(train_config).to(device)
     model.load_state_dict(payload["model_state"])
 
     context, real_future, hours = sample_windows(

@@ -24,7 +24,6 @@ from torch.optim import Adam
 from torch.utils.data import DataLoader, Subset
 
 from src.common.logging import get_logger
-from src.morpheus.world_model import WorldModel
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -49,13 +48,23 @@ class TrainConfig:
     checkpoint_interval: int = 1
     seed: int = 0
     # Model hyperparameters propagated into the checkpoint for reproducibility.
+    model_type: str = "rssm"
     obs_dim: int = 10
+    # RSSM-specific
     embed_dim: int = 64
     det_dim: int = 256
     stoch_dim: int = 64
     hidden_dim: int = 128
     kl_weight: float = 1.0
     free_nats: float = 1.0
+    # Transformer-specific
+    d_model: int = 128
+    n_heads: int = 4
+    n_layers: int = 4
+    d_ff: int = 512
+    dropout: float = 0.1
+    max_seq_len: int = 1024
+    # Training options
     compile: bool = False
     amp: bool = False
     num_workers: int = 0
@@ -119,7 +128,7 @@ def chronological_split(
 def save_checkpoint(
     path: Path,
     *,
-    model: WorldModel,
+    model: nn.Module,
     optimizer: Adam,
     epoch: int,
     config: TrainConfig,
@@ -149,7 +158,7 @@ def save_checkpoint(
 def load_checkpoint(
     path: Path,
     *,
-    model: WorldModel,
+    model: nn.Module,
     optimizer: Adam | None = None,
     map_location: str | torch.device | None = None,
 ) -> dict[str, Any]:
@@ -173,7 +182,7 @@ def _mean(values: Iterable[float]) -> float:
 
 
 def train_epoch(
-    model: WorldModel,
+    model: nn.Module,
     loader: DataLoader[torch.Tensor],
     optimizer: Adam,
     *,
@@ -235,7 +244,7 @@ def train_epoch(
 
 @torch.no_grad()
 def evaluate(
-    model: WorldModel,
+    model: nn.Module,
     loader: DataLoader[torch.Tensor],
     *,
     device: torch.device,
@@ -278,6 +287,48 @@ def append_metrics_csv(path: Path, metrics: EpochMetrics) -> None:
         writer.writerow(asdict(metrics))
 
 
+def build_model(config: TrainConfig) -> nn.Module:
+    """Construct a world model from config.
+
+    Args:
+        config: Training config with model_type and model hyperparameters.
+
+    Returns:
+        An nn.Module with forward() returning WorldModelOutput.
+    """
+    if config.model_type == "transformer":
+        from src.morpheus.transformer_wm import TransformerWorldModel
+
+        return TransformerWorldModel(
+            obs_dim=config.obs_dim,
+            d_model=config.d_model,
+            n_heads=config.n_heads,
+            n_layers=config.n_layers,
+            d_ff=config.d_ff,
+            dropout=config.dropout,
+            max_seq_len=config.max_seq_len,
+        )
+
+    if config.model_type == "rssm":
+        from src.morpheus.world_model import WorldModel
+
+        return WorldModel(
+            obs_dim=config.obs_dim,
+            embed_dim=config.embed_dim,
+            det_dim=config.det_dim,
+            stoch_dim=config.stoch_dim,
+            hidden_dim=config.hidden_dim,
+            kl_weight=config.kl_weight,
+            free_nats=config.free_nats,
+        )
+
+    msg = (
+        f"Unsupported model_type: {config.model_type!r}. "
+        "Expected 'rssm' or 'transformer'."
+    )
+    raise ValueError(msg)
+
+
 def train(
     *,
     train_set: Subset[torch.Tensor] | MorpheusDataset,
@@ -287,6 +338,7 @@ def train(
     output_dir: Path,
     device: torch.device,
     resume_from: Path | None = None,
+    model: nn.Module | None = None,
 ) -> list[EpochMetrics]:
     """Full training loop with checkpointing and CSV metrics logging.
 
@@ -298,6 +350,7 @@ def train(
         output_dir: Directory for checkpoints and metrics.csv.
         device: Target device (cpu/cuda).
         resume_from: Optional path to a checkpoint to resume from.
+        model: Pre-built model. If None, built from config.
 
     Returns:
         List of per-epoch metrics.
@@ -305,15 +358,9 @@ def train(
     torch.manual_seed(config.seed)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    model = WorldModel(
-        obs_dim=config.obs_dim,
-        embed_dim=config.embed_dim,
-        det_dim=config.det_dim,
-        stoch_dim=config.stoch_dim,
-        hidden_dim=config.hidden_dim,
-        kl_weight=config.kl_weight,
-        free_nats=config.free_nats,
-    ).to(device)
+    if model is None:
+        model = build_model(config)
+    model = model.to(device)
     optimizer = Adam(model.parameters(), lr=config.lr)
 
     start_epoch = 0
