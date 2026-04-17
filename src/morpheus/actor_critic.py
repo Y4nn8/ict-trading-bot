@@ -28,7 +28,7 @@ class PolicyConfig:
     # Reward shaping
     step_penalty: float = -0.0001
     invalid_penalty: float = -0.001
-    idle_penalty: float = -0.0005
+    idle_penalty: float = -0.0002
 
     # Training
     horizon: int = 64
@@ -37,7 +37,7 @@ class PolicyConfig:
     lambda_: float = 0.95
     actor_lr: float = 3e-4
     critic_lr: float = 1e-3
-    entropy_coef: float = 0.05
+    entropy_coef: float = 0.0002
     grad_clip: float = 1.0
     epochs: int = 100
     batch_size: int = 32
