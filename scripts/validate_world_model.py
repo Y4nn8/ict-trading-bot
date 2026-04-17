@@ -28,7 +28,9 @@ from src.common.logging import get_logger
 from src.morpheus.dataset import (
     GAP_THRESHOLD_FACTOR,
     OBS_COLUMNS,
+    OBS_COLUMNS_H1,
     NormStats,
+    compute_h1_features,
     compute_observations,
     load_parquet_dir,
 )
@@ -43,13 +45,19 @@ logger = get_logger(__name__)
 
 
 def _segments_with_time(
-    df: pl.DataFrame, bucket_seconds: int, min_len: int,
+    df: pl.DataFrame,
+    bucket_seconds: int,
+    min_len: int,
+    obs_columns: list[str] | None = None,
 ) -> list[tuple[NDArray[np.float32], NDArray[np.int32]]]:
     """Return list of (obs_array, hours_array) for segments >= min_len.
 
     Same gap detection as :func:`find_segments`, but keeps the
     corresponding hour-of-day alongside each segment's observations.
     """
+    if obs_columns is None:
+        obs_columns = OBS_COLUMNS
+
     if df.height == 0:
         return []
 
@@ -58,7 +66,7 @@ def _segments_with_time(
     gap_indices = np.where(time_diffs > threshold_us)[0]
     split_points = [0, *gap_indices.tolist(), df.height]
 
-    obs_data = df.select(OBS_COLUMNS).to_numpy().astype(np.float32)
+    obs_data = df.select(obs_columns).to_numpy().astype(np.float32)
     hours = df["time"].dt.hour().to_numpy().astype(np.int32)
 
     out: list[tuple[NDArray[np.float32], NDArray[np.int32]]] = []
@@ -78,15 +86,21 @@ def sample_windows(
     n_samples: int,
     norm_stats: NormStats,
     rng: np.random.Generator,
+    use_h1: bool = False,
 ) -> tuple[torch.Tensor, NDArray[np.float32], NDArray[np.int32]]:
     """Sample ``n_samples`` (context, real_future, future_hours) tuples.
 
     Observations are z-score normalized using the checkpoint's stats.
     """
+    obs_columns = OBS_COLUMNS_H1 if use_h1 else OBS_COLUMNS
     df = load_parquet_dir(parquet_dir)
+    if use_h1:
+        df = compute_h1_features(df)
     obs_df = compute_observations(df)
     window_len = context_len + horizon
-    segments = _segments_with_time(obs_df, bucket_seconds, window_len)
+    segments = _segments_with_time(
+        obs_df, bucket_seconds, window_len, obs_columns=obs_columns,
+    )
     if not segments:
         msg = (
             f"No segments >= {window_len} in {parquet_dir}. "
@@ -111,8 +125,8 @@ def sample_windows(
         total_starts, size=n_samples, replace=total_starts < n_samples,
     )
 
-    context_batch = np.empty((n_samples, context_len, len(OBS_COLUMNS)), dtype=np.float32)
-    future_batch = np.empty((n_samples, horizon, len(OBS_COLUMNS)), dtype=np.float32)
+    context_batch = np.empty((n_samples, context_len, len(obs_columns)), dtype=np.float32)
+    future_batch = np.empty((n_samples, horizon, len(obs_columns)), dtype=np.float32)
     hours_batch = np.empty((n_samples, horizon), dtype=np.int32)
 
     for i, pick in enumerate(picks):
@@ -168,6 +182,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", choices=["cpu", "cuda", "auto"], default="auto")
     p.add_argument("--output-csv", type=Path, default=None)
+    p.add_argument("--h1", action="store_true", help="Use H1 features (16 dims)")
     # Which observation dimension to treat as "return" for KS/ACF metrics.
     # Default: ret_close (index 3 in OBS_COLUMNS).
     p.add_argument("--return-dim", type=int, default=OBS_COLUMNS.index("ret_close"))
@@ -241,6 +256,7 @@ def main(argv: list[str] | None = None) -> None:
         n_samples=args.n_samples,
         norm_stats=norm_stats,
         rng=rng,
+        use_h1=args.h1,
     )
 
     imag_future = imagine_batch(

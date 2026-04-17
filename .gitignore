@@ -48,3 +48,6 @@ Thumbs.db
 *.log
 *.progress
 download/
+
+# Vast.ai local state
+infra/vast/.last-run
