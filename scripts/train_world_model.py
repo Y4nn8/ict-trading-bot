@@ -64,13 +64,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--log-interval", type=int, default=10, help="Log every N train steps (0=off)")
     p.add_argument("--num-workers", type=int, default=4, help="DataLoader workers (0=main thread)")
 
-    # Model
+    # Model selection
+    p.add_argument(
+        "--model", choices=["rssm", "transformer"], default="rssm",
+        help="World model architecture",
+    )
+
+    # RSSM-specific
     p.add_argument("--embed-dim", type=int, default=64)
     p.add_argument("--det-dim", type=int, default=256)
     p.add_argument("--stoch-dim", type=int, default=64)
     p.add_argument("--hidden-dim", type=int, default=128)
     p.add_argument("--kl-weight", type=float, default=1.0)
     p.add_argument("--free-nats", type=float, default=1.0)
+
+    # Transformer-specific
+    p.add_argument("--d-model", type=int, default=128)
+    p.add_argument("--n-heads", type=int, default=4)
+    p.add_argument("--n-layers", type=int, default=4)
+    p.add_argument("--d-ff", type=int, default=512)
+    p.add_argument("--dropout", type=float, default=0.1)
+    p.add_argument("--max-seq-len", type=int, default=1024)
 
     return p.parse_args(argv)
 
@@ -145,6 +159,7 @@ def main(argv: list[str] | None = None) -> None:
         log_interval=args.log_interval,
         checkpoint_interval=args.checkpoint_interval,
         seed=args.seed,
+        model_type=args.model,
         obs_dim=dataset.obs_dim,
         embed_dim=args.embed_dim,
         det_dim=args.det_dim,
@@ -152,6 +167,12 @@ def main(argv: list[str] | None = None) -> None:
         hidden_dim=args.hidden_dim,
         kl_weight=args.kl_weight,
         free_nats=args.free_nats,
+        d_model=args.d_model,
+        n_heads=args.n_heads,
+        n_layers=args.n_layers,
+        d_ff=args.d_ff,
+        dropout=args.dropout,
+        max_seq_len=args.max_seq_len,
         compile=args.compile,
         amp=args.amp,
         num_workers=args.num_workers,
