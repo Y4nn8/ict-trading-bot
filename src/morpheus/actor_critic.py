@@ -21,8 +21,6 @@ class PolicyConfig:
     n_hidden: int = 2
 
     # Trading
-    sl_points: float = 6.0
-    tp_points: float = 5.0
     spread_points: float = 0.5
     margin_rate: float = 0.05
     initial_capital: float = 5000.0

@@ -42,8 +42,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--h1", action="store_true")
 
     # Trading
-    p.add_argument("--sl-points", type=float, default=6.0)
-    p.add_argument("--tp-points", type=float, default=5.0)
     p.add_argument("--spread-points", type=float, default=0.5)
     p.add_argument("--margin-rate", type=float, default=0.05)
     p.add_argument("--initial-capital", type=float, default=5000.0)
@@ -121,8 +119,6 @@ def main(argv: list[str] | None = None) -> None:
     policy_config = PolicyConfig(
         hidden_dim=args.hidden_dim,
         n_hidden=args.n_hidden,
-        sl_points=args.sl_points,
-        tp_points=args.tp_points,
         spread_points=args.spread_points,
         margin_rate=args.margin_rate,
         initial_capital=args.initial_capital,

@@ -51,10 +51,10 @@ class PolicyEpochMetrics:
     mean_return: float
     entropy: float
     mean_capital: float = field(default=float("nan"))
-    trades_opened: int = 0
-    sl_hits: int = 0
-    tp_hits: int = 0
-    force_closed: int = 0
+    position_changes: int = 0
+    long_steps: int = 0
+    short_steps: int = 0
+    flat_steps: int = 0
 
 
 def compute_mc_returns(
@@ -196,20 +196,14 @@ class PolicyTrainer:
             for k, v in step_stats.items():
                 rollout_stats[k] = rollout_stats.get(k, 0) + v
 
-        # Force-close at end of horizon
-        close_reward = self._env.force_close(portfolio)
-        in_pos_at_end = (portfolio["position"] != 0).sum().item()
-        rollout_stats["force_closed"] = int(in_pos_at_end)
-        rewards_list[-1] = rewards_list[-1] + close_reward
-
         states = torch.stack(states_list, dim=1)
         actions = torch.stack(actions_list, dim=1)
         rewards = torch.stack(rewards_list, dim=1)
 
         return (
             states, actions, rewards,
-            portfolio["capital"], portfolio["margin_used"],
-            portfolio["unrealized_pnl"],
+            portfolio["capital"], portfolio["cumulative_pnl"],
+            torch.zeros_like(portfolio["capital"]),
             rollout_stats,
         )
 
@@ -298,10 +292,10 @@ class PolicyTrainer:
             mean_return=_avg(all_returns),
             entropy=_avg(all_entropy),
             mean_capital=_avg(all_capital),
-            trades_opened=int(total_stats.get("opened", 0)),
-            sl_hits=int(total_stats.get("sl_hits", 0)),
-            tp_hits=int(total_stats.get("tp_hits", 0)),
-            force_closed=int(total_stats.get("force_closed", 0)),
+            position_changes=int(total_stats.get("position_changes", 0)),
+            long_steps=int(total_stats.get("long_steps", 0)),
+            short_steps=int(total_stats.get("short_steps", 0)),
+            flat_steps=int(total_stats.get("flat_steps", 0)),
         )
 
     def train(self, output_dir: Path) -> list[PolicyEpochMetrics]:
@@ -313,7 +307,7 @@ class PolicyTrainer:
         fields = [
             "epoch", "actor_loss", "critic_loss",
             "mean_reward", "mean_return", "entropy", "mean_capital",
-            "trades_opened", "sl_hits", "tp_hits", "force_closed",
+            "position_changes", "long_steps", "short_steps", "flat_steps",
         ]
         with metrics_path.open("w", newline="") as fh:
             csv.DictWriter(fh, fieldnames=fields).writeheader()
@@ -333,10 +327,10 @@ class PolicyTrainer:
                 mean_reward=f"{m.mean_reward:.4f}",
                 mean_capital=f"{m.mean_capital:.0f}",
                 entropy=f"{m.entropy:.4f}",
-                opened=m.trades_opened,
-                sl=m.sl_hits,
-                tp=m.tp_hits,
-                fc=m.force_closed,
+                pos_chg=m.position_changes,
+                long=m.long_steps,
+                short=m.short_steps,
+                flat=m.flat_steps,
             )
 
         _save_policy_checkpoint(
