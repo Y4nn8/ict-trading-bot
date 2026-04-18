@@ -44,6 +44,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--stride", type=int, default=1)
     p.add_argument("--h1", action="store_true", help="Add H1 features")
     p.add_argument("--m5", action="store_true", help="Add M5 features")
+    p.add_argument(
+        "--eurusd-dir", type=Path, default=None,
+        help="EUR/USD M1 parquet dir for cross-asset features",
+    )
+    p.add_argument(
+        "--usdjpy-dir", type=Path, default=None,
+        help="USD/JPY M1 parquet dir for cross-asset features",
+    )
 
     # Training
     p.add_argument("--epochs", type=int, default=10)
@@ -124,6 +132,8 @@ def main(argv: list[str] | None = None) -> None:
         bucket_seconds=args.bucket_seconds,
         use_h1=args.h1,
         use_m5=args.m5,
+        eurusd_dir=args.eurusd_dir,
+        usdjpy_dir=args.usdjpy_dir,
     )
     logger.info(
         "dataset_loaded",

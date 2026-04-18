@@ -62,6 +62,11 @@ OBS_DIM_H1 = len(OBS_COLUMNS_H1)
 OBS_COLUMNS_M5 = BASE_OBS_COLUMNS + M5_OBS_COLUMNS
 OBS_COLUMNS_M5_H1 = BASE_OBS_COLUMNS + M5_OBS_COLUMNS + H1_OBS_COLUMNS
 
+CROSS_OBS_COLUMNS = [
+    "eurusd_ret_close",
+    "usdjpy_ret_close",
+]
+
 GAP_THRESHOLD_FACTOR = 6
 
 
@@ -265,6 +270,44 @@ def compute_m5_features(df: pl.DataFrame) -> pl.DataFrame:
     return result.with_columns(**fill_cols)
 
 
+def compute_cross_features(
+    df: pl.DataFrame,
+    eurusd_dir: Path | None = None,
+    usdjpy_dir: Path | None = None,
+) -> pl.DataFrame:
+    """Add cross-asset ret_close features via time join.
+
+    Loads M1 parquets from external directories, computes ret_close
+    for each, and joins backward onto the main DataFrame's timestamps.
+    Missing values are filled with 0.0.
+
+    Args:
+        df: Main DataFrame with a 'time' column, sorted.
+        eurusd_dir: Directory with EUR/USD M1 parquets.
+        usdjpy_dir: Directory with USD/JPY M1 parquets.
+
+    Returns:
+        DataFrame with additional eurusd_ret_close, usdjpy_ret_close columns.
+    """
+    result = df
+    for name, directory in [("eurusd", eurusd_dir), ("usdjpy", usdjpy_dir)]:
+        col_name = f"{name}_ret_close"
+        if directory is None:
+            result = result.with_columns(pl.lit(0.0).alias(col_name))
+            continue
+
+        cross = load_parquet_dir(directory)
+        prev_close = cross["close"].shift(1)
+        cross = cross.with_columns(
+            ((pl.col("close") - prev_close) / prev_close).alias(col_name),
+        ).select("time", col_name).sort("time")
+
+        result = result.join_asof(cross, on="time", strategy="backward")
+        result = result.with_columns(pl.col(col_name).fill_null(0.0))
+
+    return result
+
+
 def _compute_split_points(
     df: pl.DataFrame,
     bucket_seconds: int,
@@ -421,22 +464,29 @@ class MorpheusDataset(Dataset[torch.Tensor]):
         normalize: bool = True,
         use_h1: bool = False,
         use_m5: bool = False,
+        eurusd_dir: Path | None = None,
+        usdjpy_dir: Path | None = None,
     ) -> None:
         df = load_parquet_dir(parquet_dir)
         if use_m5:
             df = compute_m5_features(df)
         if use_h1:
             df = compute_h1_features(df)
+
+        use_cross = eurusd_dir is not None or usdjpy_dir is not None
+        if use_cross:
+            df = compute_cross_features(df, eurusd_dir, usdjpy_dir)
+
         obs_df = compute_observations(df)
 
-        if use_m5 and use_h1:
-            self._obs_columns = OBS_COLUMNS_M5_H1
-        elif use_h1:
-            self._obs_columns = OBS_COLUMNS_H1
-        elif use_m5:
-            self._obs_columns = OBS_COLUMNS_M5
-        else:
-            self._obs_columns = OBS_COLUMNS
+        base_cols = BASE_OBS_COLUMNS.copy()
+        if use_m5:
+            base_cols = base_cols + M5_OBS_COLUMNS
+        if use_h1:
+            base_cols = base_cols + H1_OBS_COLUMNS
+        if use_cross:
+            base_cols = base_cols + CROSS_OBS_COLUMNS
+        self._obs_columns = base_cols
         segments, close_segments = find_segments_with_close(
             obs_df, bucket_seconds, seq_len,
             obs_columns=self._obs_columns,
