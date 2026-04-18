@@ -209,10 +209,14 @@ class TransformerWorldModel(nn.Module):
         d_ff: int = 512,
         dropout: float = 0.1,
         max_seq_len: int = 1024,
+        aux_horizon: int = 0,
+        aux_weight: float = 0.1,
     ) -> None:
         super().__init__()
         self.obs_dim = obs_dim
         self.max_seq_len = max_seq_len
+        self.aux_horizon = aux_horizon
+        self.aux_weight = aux_weight
         self.input_proj = nn.Linear(obs_dim, d_model)
         self.blocks = nn.ModuleList([
             TransformerBlock(d_model, n_heads, d_ff, dropout, max_seq_len)
@@ -220,6 +224,7 @@ class TransformerWorldModel(nn.Module):
         ])
         self.ln_final = nn.LayerNorm(d_model)
         self.output_head = nn.Linear(d_model, obs_dim * 2)
+        self.dir_head = nn.Linear(d_model, 1) if aux_horizon > 0 else None
 
         self._init_weights()
 
@@ -273,12 +278,24 @@ class TransformerWorldModel(nn.Module):
         )
         recon_loss = nll.mean()
 
-        kl_loss = torch.zeros(1, device=obs_seq.device, dtype=obs_seq.dtype).squeeze()
+        # Auxiliary directional loss
+        aux_loss = torch.zeros(1, device=obs_seq.device, dtype=obs_seq.dtype).squeeze()
+        seq_len = obs_seq.shape[1]
+        if self.dir_head is not None and self.aux_horizon > 0 and seq_len > self.aux_horizon + 1:
+            ret_close = obs_seq[:, :, 3]
+            cumsum = ret_close.cumsum(dim=1)
+            future_sum = cumsum[:, self.aux_horizon :] - cumsum[:, : -self.aux_horizon]
+            h_for_dir = h[:, : seq_len - self.aux_horizon]
+            dir_logits = self.dir_head(h_for_dir).squeeze(-1)
+            dir_targets = (future_sum > 0).float()
+            aux_loss = f.binary_cross_entropy_with_logits(dir_logits, dir_targets)
+
+        loss = recon_loss + self.aux_weight * aux_loss
 
         return WorldModelOutput(
-            loss=recon_loss,
+            loss=loss,
             recon_loss=recon_loss,
-            kl_loss=kl_loss,
+            kl_loss=aux_loss,
             reconstructed=mean,
         )
 

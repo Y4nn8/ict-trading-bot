@@ -86,6 +86,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--dropout", type=float, default=0.1)
     p.add_argument("--max-seq-len", type=int, default=1024)
 
+    # Auxiliary directional head
+    p.add_argument(
+        "--aux-horizon", type=int, default=0,
+        help="Directional prediction horizon (0=off)",
+    )
+    p.add_argument("--aux-weight", type=float, default=0.1, help="Weight for directional loss")
+
     return p.parse_args(argv)
 
 
@@ -173,6 +180,8 @@ def main(argv: list[str] | None = None) -> None:
         d_ff=args.d_ff,
         dropout=args.dropout,
         max_seq_len=args.max_seq_len,
+        aux_horizon=args.aux_horizon,
+        aux_weight=args.aux_weight,
         compile=args.compile,
         amp=args.amp,
         num_workers=args.num_workers,

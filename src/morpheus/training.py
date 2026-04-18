@@ -64,6 +64,8 @@ class TrainConfig:
     d_ff: int = 512
     dropout: float = 0.1
     max_seq_len: int = 1024
+    aux_horizon: int = 0
+    aux_weight: float = 0.1
     # Training options
     compile: bool = False
     amp: bool = False
@@ -307,6 +309,8 @@ def build_model(config: TrainConfig) -> nn.Module:
             d_ff=config.d_ff,
             dropout=config.dropout,
             max_seq_len=config.max_seq_len,
+            aux_horizon=config.aux_horizon,
+            aux_weight=config.aux_weight,
         )
 
     if config.model_type == "rssm":
