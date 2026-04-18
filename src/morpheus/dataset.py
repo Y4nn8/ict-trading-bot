@@ -35,6 +35,15 @@ BASE_OBS_COLUMNS = [
     "dow_cos",
 ]
 
+M5_OBS_COLUMNS = [
+    "m5_ret_open",
+    "m5_ret_high",
+    "m5_ret_low",
+    "m5_ret_close",
+    "m5_tick_count",
+    "m5_spread",
+]
+
 H1_OBS_COLUMNS = [
     "h1_ret_open",
     "h1_ret_high",
@@ -49,6 +58,9 @@ OBS_DIM = len(OBS_COLUMNS)
 
 OBS_COLUMNS_H1 = BASE_OBS_COLUMNS + H1_OBS_COLUMNS
 OBS_DIM_H1 = len(OBS_COLUMNS_H1)
+
+OBS_COLUMNS_M5 = BASE_OBS_COLUMNS + M5_OBS_COLUMNS
+OBS_COLUMNS_M5_H1 = BASE_OBS_COLUMNS + M5_OBS_COLUMNS + H1_OBS_COLUMNS
 
 GAP_THRESHOLD_FACTOR = 6
 
@@ -194,6 +206,62 @@ def compute_h1_features(df: pl.DataFrame) -> pl.DataFrame:
     )
 
     fill_cols = {c: pl.col(c).fill_null(0.0) for c in H1_OBS_COLUMNS}
+    return result.with_columns(**fill_cols)
+
+
+def compute_m5_features(df: pl.DataFrame) -> pl.DataFrame:
+    """Compute M5-scale features and join back onto base rows.
+
+    Same logic as compute_h1_features but with 5-minute aggregation.
+    Features come from the last *completed* M5 candle (shifted by 5min).
+
+    Args:
+        df: DataFrame with columns [time, open, high, low, close,
+            tick_count, spread] — must already be sorted by time.
+
+    Returns:
+        DataFrame with additional m5_* columns.
+    """
+    m5 = (
+        df.group_by_dynamic("time", every="5m")
+        .agg(
+            pl.col("open").first().alias("m5_open"),
+            pl.col("high").max().alias("m5_high"),
+            pl.col("low").min().alias("m5_low"),
+            pl.col("close").last().alias("m5_close"),
+            pl.col("tick_count").sum().alias("m5_tick_count_raw"),
+            pl.col("spread").mean().alias("m5_spread_raw"),
+        )
+        .sort("time")
+    )
+
+    m5_prev_close = m5["m5_close"].shift(1)
+    m5 = m5.with_columns(
+        ((pl.col("m5_open") - m5_prev_close) / m5_prev_close).alias(
+            "m5_ret_open",
+        ),
+        ((pl.col("m5_high") - m5_prev_close) / m5_prev_close).alias(
+            "m5_ret_high",
+        ),
+        ((pl.col("m5_low") - m5_prev_close) / m5_prev_close).alias(
+            "m5_ret_low",
+        ),
+        ((pl.col("m5_close") - m5_prev_close) / m5_prev_close).alias(
+            "m5_ret_close",
+        ),
+        pl.col("m5_tick_count_raw").alias("m5_tick_count"),
+        pl.col("m5_spread_raw").alias("m5_spread"),
+    ).select("time", *M5_OBS_COLUMNS)
+
+    m5_shifted = m5.with_columns(
+        (pl.col("time") + pl.duration(minutes=5)).alias("time"),
+    )
+
+    result = df.join_asof(
+        m5_shifted, on="time", strategy="backward",
+    )
+
+    fill_cols = {c: pl.col(c).fill_null(0.0) for c in M5_OBS_COLUMNS}
     return result.with_columns(**fill_cols)
 
 
@@ -352,12 +420,23 @@ class MorpheusDataset(Dataset[torch.Tensor]):
         norm_stats: NormStats | None = None,
         normalize: bool = True,
         use_h1: bool = False,
+        use_m5: bool = False,
     ) -> None:
         df = load_parquet_dir(parquet_dir)
+        if use_m5:
+            df = compute_m5_features(df)
         if use_h1:
             df = compute_h1_features(df)
         obs_df = compute_observations(df)
-        self._obs_columns = OBS_COLUMNS_H1 if use_h1 else OBS_COLUMNS
+
+        if use_m5 and use_h1:
+            self._obs_columns = OBS_COLUMNS_M5_H1
+        elif use_h1:
+            self._obs_columns = OBS_COLUMNS_H1
+        elif use_m5:
+            self._obs_columns = OBS_COLUMNS_M5
+        else:
+            self._obs_columns = OBS_COLUMNS
         segments, close_segments = find_segments_with_close(
             obs_df, bucket_seconds, seq_len,
             obs_columns=self._obs_columns,

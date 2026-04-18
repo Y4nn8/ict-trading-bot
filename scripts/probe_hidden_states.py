@@ -38,6 +38,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--checkpoint", type=Path, required=True)
     p.add_argument("--parquet-dir", type=Path, required=True)
     p.add_argument("--h1", action="store_true")
+    p.add_argument("--m5", action="store_true")
     p.add_argument("--seq-len", type=int, default=256)
     p.add_argument("--stride", type=int, default=64)
     p.add_argument("--bucket-seconds", type=int, default=10)
@@ -90,6 +91,7 @@ def main(argv: list[str] | None = None) -> None:
         bucket_seconds=args.bucket_seconds,
         norm_stats=norm_stats,
         use_h1=args.h1,
+        use_m5=args.m5,
     )
     n_samples = min(args.n_samples, len(dataset))
     logger.info("dataset_loaded", total_sequences=len(dataset), using=n_samples)
@@ -143,7 +145,7 @@ def main(argv: list[str] | None = None) -> None:
         probe = nn.Linear(d_model, 1)
         opt = Adam(probe.parameters(), lr=1e-3)
 
-        for epoch in range(args.probe_epochs):
+        for _epoch in range(args.probe_epochs):
             logits = probe(x_train).squeeze(-1)
             loss = nn.functional.binary_cross_entropy_with_logits(logits, y_train)
             opt.zero_grad()

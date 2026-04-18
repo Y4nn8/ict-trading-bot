@@ -42,7 +42,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--bucket-seconds", type=int, default=10)
     p.add_argument("--seq-len", type=int, default=256)
     p.add_argument("--stride", type=int, default=1)
-    p.add_argument("--h1", action="store_true", help="Add H1 features (16 dims)")
+    p.add_argument("--h1", action="store_true", help="Add H1 features")
+    p.add_argument("--m5", action="store_true", help="Add M5 features")
 
     # Training
     p.add_argument("--epochs", type=int, default=10)
@@ -122,6 +123,7 @@ def main(argv: list[str] | None = None) -> None:
         stride=args.stride,
         bucket_seconds=args.bucket_seconds,
         use_h1=args.h1,
+        use_m5=args.m5,
     )
     logger.info(
         "dataset_loaded",
