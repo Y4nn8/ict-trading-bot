@@ -17,11 +17,14 @@ if TYPE_CHECKING:
 
     import polars as pl
 
-# Columns excluded from training features
-_META_COLUMNS = {
+# Columns excluded from training features. Exposed for callers that need
+# to project a training DataFrame to the same feature set.
+META_COLUMNS = {
     "_time", "_bid", "_ask", "label_buy", "label_sell", "target",
     "pos_unrealized_pnl", "pos_duration_sec", "pos_direction",
     "exit_label",
+    # Meta-labeling aux columns (passed in separately, not as features)
+    "primary_proba", "primary_direction", "meta_label",
 }
 
 
@@ -39,6 +42,8 @@ class TrainerConfig:
         colsample_bytree: Column subsampling ratio.
         entry_threshold: Min P(BUY) or P(SELL) to generate entry signal.
         exit_threshold: Min P(CLOSE) to close a position early.
+        meta_threshold: Min P(profitable) from the meta model to let a
+            primary signal through (Lopez de Prado meta-labeling).
         val_fraction: Fraction of training data for early-stop validation.
         early_stopping_rounds: Stop if val metric doesn't improve for N rounds.
         importance_threshold: If > 0, run a 2-pass training: after the
@@ -56,6 +61,7 @@ class TrainerConfig:
     colsample_bytree: float = 0.8
     entry_threshold: float = 0.55
     exit_threshold: float = 0.55
+    meta_threshold: float = 0.55
     val_fraction: float = 0.1
     early_stopping_rounds: int = 50
     importance_threshold: float = 0.0
@@ -88,13 +94,20 @@ class MidasTrainer:
         self._config = config or TrainerConfig()
         self._entry_model: lgb.Booster | None = None
         self._exit_model: lgb.Booster | None = None
+        self._meta_model: lgb.Booster | None = None
         self._entry_features: list[str] = []
         self._exit_features: list[str] = []
+        self._meta_features: list[str] = []
 
     @property
     def is_trained(self) -> bool:
         """Whether the entry model has been trained."""
         return self._entry_model is not None
+
+    @property
+    def has_meta_model(self) -> bool:
+        """Whether a meta-labeling model has been trained."""
+        return self._meta_model is not None
 
     @property
     def has_exit_model(self) -> bool:
@@ -234,7 +247,7 @@ class MidasTrainer:
             TrainResult with metrics and feature importance.
         """
         feature_cols = [
-            c for c in df.columns if c not in _META_COLUMNS
+            c for c in df.columns if c not in META_COLUMNS
         ]
         x_all = df.select(feature_cols).to_numpy()
 
@@ -360,8 +373,117 @@ class MidasTrainer:
             n_val=n_val,
         )
 
+    def train_meta(
+        self,
+        df: pl.DataFrame,
+        primary_proba: np.ndarray,
+        primary_direction: np.ndarray,
+        meta_label: np.ndarray,
+    ) -> TrainResult:
+        """Train a binary meta-labeling model (Lopez de Prado).
+
+        For each row where the primary model issued a BUY/SELL signal,
+        the meta model predicts whether that trade would have been
+        profitable. At inference, a primary signal only fires if the
+        meta model agrees.
+
+        Args:
+            df: Feature DataFrame — same market features used for the
+                primary model. Must be restricted to rows where the
+                primary issued a non-PASS signal.
+            primary_proba: P(direction) from the primary model, same
+                length as ``df``.
+            primary_direction: 1=BUY, 2=SELL (matches primary encoding).
+            meta_label: Binary target — 1 if the trade was profitable
+                after cost, 0 otherwise.
+
+        Returns:
+            TrainResult for the meta model.
+        """
+        feature_cols = [c for c in df.columns if c not in META_COLUMNS]
+        x_market = df.select(feature_cols).to_numpy()
+        # Append primary model outputs as extra features
+        x_all = np.column_stack([
+            x_market,
+            primary_proba.astype(np.float64),
+            primary_direction.astype(np.float64),
+        ])
+        full_cols = [*feature_cols, "primary_proba", "primary_direction"]
+        self._meta_features = full_cols
+
+        cfg = self._config
+        n = len(x_all)
+        if n == 0:
+            msg = "train_meta called with empty dataset"
+            raise ValueError(msg)
+        n_val = max(1, int(n * cfg.val_fraction))
+        n_train = n - n_val
+
+        x_train, x_val = x_all[:n_train], x_all[n_train:]
+        y_train, y_val = meta_label[:n_train], meta_label[n_train:]
+
+        train_data = lgb.Dataset(
+            x_train, label=y_train, feature_name=full_cols,
+        )
+        val_data = lgb.Dataset(
+            x_val, label=y_val, reference=train_data,
+        )
+
+        params: dict[str, Any] = {
+            "objective": "binary",
+            "metric": "binary_logloss",
+            "learning_rate": cfg.learning_rate,
+            "max_depth": cfg.max_depth,
+            "num_leaves": cfg.num_leaves,
+            "min_child_samples": min(cfg.min_child_samples, 20),
+            "subsample": cfg.subsample,
+            "colsample_bytree": cfg.colsample_bytree,
+            "is_unbalance": True,
+            "verbosity": -1,
+            "seed": 42,
+        }
+
+        callbacks: list[Any] = [
+            lgb.early_stopping(cfg.early_stopping_rounds, verbose=False),
+            lgb.log_evaluation(period=0),
+        ]
+
+        self._meta_model = lgb.train(
+            params, train_data,
+            num_boost_round=cfg.n_estimators,
+            valid_sets=[val_data], valid_names=["val"],
+            callbacks=callbacks,
+        )
+
+        importance = dict(zip(
+            full_cols,
+            self._meta_model.feature_importance(importance_type="gain"),
+            strict=True,
+        ))
+
+        val_loss = 0.0
+        if self._meta_model.best_score and "val" in self._meta_model.best_score:
+            val_loss = self._meta_model.best_score["val"]["binary_logloss"]
+
+        unique, counts = np.unique(meta_label, return_counts=True)
+        dist = dict(zip(unique.tolist(), counts.tolist(), strict=True))
+
+        return TrainResult(
+            feature_names=full_cols,
+            feature_importance=importance,
+            val_log_loss=val_loss,
+            class_distribution=dist,
+            n_train=n_train,
+            n_val=n_val,
+        )
+
     def predict(self, features: dict[str, float]) -> tuple[int, float]:
         """Predict entry signal for a single feature row.
+
+        When a meta model is trained (``has_meta_model``), the primary
+        signal is gated through it: the meta model must agree that the
+        trade is likely profitable (P >= ``meta_threshold``) for the
+        signal to pass through. Otherwise PASS is returned.
 
         Returns:
             (signal, confidence) where signal is 0=PASS, 1=BUY, 2=SELL.
@@ -378,11 +500,24 @@ class MidasTrainer:
         p_buy = float(proba[1])
         p_sell = float(proba[2])
 
+        primary_signal = 0
+        primary_proba = float(proba[0])
         if p_buy >= threshold and p_buy > p_sell:
-            return 1, p_buy
-        if p_sell >= threshold and p_sell > p_buy:
-            return 2, p_sell
-        return 0, float(proba[0])
+            primary_signal, primary_proba = 1, p_buy
+        elif p_sell >= threshold and p_sell > p_buy:
+            primary_signal, primary_proba = 2, p_sell
+
+        if primary_signal == 0 or self._meta_model is None:
+            return primary_signal, primary_proba
+
+        # Gate the primary signal through the meta model
+        x_meta = np.array([[
+            features.get(f, 0.0) for f in self._meta_features[:-2]
+        ] + [primary_proba, float(primary_signal)]])
+        p_take = float(self._meta_model.predict(x_meta)[0])
+        if p_take >= self._config.meta_threshold:
+            return primary_signal, primary_proba
+        return 0, primary_proba
 
     def predict_exit(
         self,

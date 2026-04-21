@@ -541,6 +541,8 @@ class WalkForwardOptunaConfig:
     slippage_seed: int | None = None
     stability_cv_threshold: float = 15.0
     stability_warn_ratio: float = 0.30
+    importance_threshold: float = 0.0
+    use_meta_labeling: bool = False
 
 
 async def run_midas_wf_optuna(
@@ -625,6 +627,8 @@ async def run_midas_wf_optuna(
             slippage_min_pts=config.slippage_min_pts,
             slippage_max_pts=config.slippage_max_pts,
             slippage_seed=config.slippage_seed,
+            importance_threshold=config.importance_threshold,
+            use_meta_labeling=config.use_meta_labeling,
         )
 
         result = await run_nested_optuna(opt_config, db, window_idx=i)

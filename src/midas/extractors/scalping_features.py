@@ -63,6 +63,9 @@ class ScalpingFeatureExtractor(FeatureExtractor):
         scalp__{tf}_range_ratio: current candle range vs average range.
         scalp__{tf}_body_ratio: average body/range ratio.
         scalp__{tf}_direction_streak: consecutive candles in same direction.
+        scalp__{tf}_vol_regime: short ATR / long ATR (>1 = vol expanding).
+        scalp__{tf}_trend_regime: net directional bias over long window,
+            in [-1, 1]. +1 = trending up, -1 = trending down, 0 = chop.
     """
 
     def __init__(self) -> None:
@@ -70,6 +73,7 @@ class ScalpingFeatureExtractor(FeatureExtractor):
         self._roc_slow: int = 20
         self._mean_rev_period: int = 30
         self._atr_period: int = 14
+        self._regime_period: int = 100
         self._buffers: dict[str, _TFBuffers] = {}
         self._aggregators: dict[str, CandleAggregator] = {}
         self._init_tf_state()
@@ -78,6 +82,7 @@ class ScalpingFeatureExtractor(FeatureExtractor):
         """Initialize per-TF buffers and aggregators."""
         max_len = max(
             self._roc_slow, self._mean_rev_period, self._atr_period,
+            self._regime_period,
         ) + 1
         self._buffers = {tf: _TFBuffers(max_len) for tf in _TF_RATIOS}
         self._aggregators = {
@@ -96,6 +101,7 @@ class ScalpingFeatureExtractor(FeatureExtractor):
             ExtractorParam("roc_slow", 20, 10, 60, "int"),
             ExtractorParam("mean_rev_period", 30, 10, 100, "int"),
             ExtractorParam("atr_period", 14, 5, 50, "int"),
+            ExtractorParam("regime_period", 100, 40, 300, "int"),
         ]
 
     def configure(self, params: dict[str, float]) -> None:
@@ -103,6 +109,7 @@ class ScalpingFeatureExtractor(FeatureExtractor):
         self._roc_slow = int(params.get("roc_slow", 20))
         self._mean_rev_period = int(params.get("mean_rev_period", 30))
         self._atr_period = int(params.get("atr_period", 14))
+        self._regime_period = int(params.get("regime_period", 100))
         self._init_tf_state()
 
     def on_candle_close(
@@ -186,6 +193,22 @@ class ScalpingFeatureExtractor(FeatureExtractor):
                     break
             streak = float(count * last_dir)
 
+        # Volatility regime: short-term ATR / long-term ATR.
+        # > 1 = volatility expanding, < 1 = compressing.
+        vol_regime = 0.0
+        if n >= self._regime_period:
+            long_ranges = list(buf.ranges)[-self._regime_period:]
+            long_atr = sum(long_ranges) / len(long_ranges)
+            if long_atr > 0 and atr > 0:
+                vol_regime = atr / long_atr
+
+        # Trend regime: net directional bias in long window, in [-1, 1].
+        # +1 = consistently up, -1 = consistently down, 0 = choppy.
+        trend_regime = 0.0
+        if n >= self._regime_period:
+            long_dirs = list(buf.directions)[-self._regime_period:]
+            trend_regime = sum(long_dirs) / len(long_dirs)
+
         return {
             f"scalp__{tf}_roc_fast": roc_fast,
             f"scalp__{tf}_roc_slow": roc_slow,
@@ -194,6 +217,8 @@ class ScalpingFeatureExtractor(FeatureExtractor):
             f"scalp__{tf}_range_ratio": range_ratio,
             f"scalp__{tf}_body_ratio": body_ratio,
             f"scalp__{tf}_direction_streak": streak,
+            f"scalp__{tf}_vol_regime": vol_regime,
+            f"scalp__{tf}_trend_regime": trend_regime,
         }
 
     def extract(

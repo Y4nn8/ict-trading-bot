@@ -98,6 +98,10 @@ async def main(args: argparse.Namespace) -> None:
             slippage_min_pts=args.slippage_min,
             slippage_max_pts=args.slippage_max,
             slippage_seed=args.slippage_seed,
+            importance_threshold=args.importance_threshold,
+            stability_cv_threshold=args.stability_cv_threshold,
+            stability_warn_ratio=args.stability_warn_ratio,
+            use_meta_labeling=args.meta_labeling,
         )
 
         prefix = args.output or default_output_prefix()
@@ -152,6 +156,24 @@ def cli() -> None:
     parser.add_argument("--slippage-min", type=float, default=0.1)
     parser.add_argument("--slippage-max", type=float, default=0.5)
     parser.add_argument("--slippage-seed", type=int, default=None)
+    parser.add_argument(
+        "--importance-threshold", type=float, default=0.0,
+        help="Drop features whose gain-importance share is below this "
+             "fraction after pass 1, then retrain (0 = disabled)",
+    )
+    parser.add_argument(
+        "--meta-labeling", action="store_true",
+        help="Train a binary meta model that gates primary entry "
+             "signals (Lopez de Prado)",
+    )
+    parser.add_argument(
+        "--stability-cv-threshold", type=float, default=15.0,
+        help="CV%% below which a param is classified as stable",
+    )
+    parser.add_argument(
+        "--stability-warn-ratio", type=float, default=0.30,
+        help="Warn if fewer than this fraction of params are stable",
+    )
     parser.add_argument("--fix-outer-params", type=str, default=None,
                         help="YAML file with fixed outer params")
     parser.add_argument("--outer-ranges-from", type=str, default=None,

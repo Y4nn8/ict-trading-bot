@@ -29,7 +29,7 @@ from src.midas.replay_engine import (
     build_default_registry,
 )
 from src.midas.trade_simulator import MidasTrade, SimConfig, TradeSimulator
-from src.midas.trainer import MidasTrainer, TrainerConfig
+from src.midas.trainer import META_COLUMNS, MidasTrainer, TrainerConfig
 from src.midas.types import ATR_COLUMN_DEFAULT
 
 if TYPE_CHECKING:
@@ -206,6 +206,8 @@ class OptimizerConfig:
     slippage_min_pts: float = 0.0
     slippage_max_pts: float = 0.0
     slippage_seed: int | None = None
+    importance_threshold: float = 0.0
+    use_meta_labeling: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -619,6 +621,7 @@ async def run_nested_optuna(
                 entry_threshold=inner_params["entry_threshold"],
                 exit_threshold=inner_params["exit_threshold"],
                 early_stopping_rounds=30,
+                importance_threshold=config.importance_threshold,
             )
 
             trainer = MidasTrainer(trainer_config)
@@ -627,6 +630,41 @@ async def run_nested_optuna(
             except (ValueError, lgb.basic.LightGBMError):
                 inner_study.tell(inner_trial, -1000.0)
                 continue
+
+            # Train meta model (Lopez de Prado gate on primary signal)
+            if config.use_meta_labeling and trainer._entry_model is not None:
+                feature_cols = [
+                    c for c in df_filtered.columns if c not in META_COLUMNS
+                ]
+                x_train = df_filtered.select(feature_cols).to_numpy()
+                proba = np.asarray(trainer._entry_model.predict(x_train))
+                p_buy = proba[:, 1]
+                p_sell = proba[:, 2]
+                thr = trainer_config.entry_threshold
+                # Primary signal per row: 0=PASS, 1=BUY, 2=SELL
+                primary = np.where(
+                    (p_buy >= thr) & (p_buy > p_sell), 1,
+                    np.where((p_sell >= thr) & (p_sell > p_buy), 2, 0),
+                ).astype(np.int32)
+                signal_mask = primary != 0
+                if signal_mask.sum() >= 50:
+                    meta_df = df_filtered.filter(pl.Series(signal_mask))
+                    meta_proba = np.where(
+                        primary[signal_mask] == 1,
+                        p_buy[signal_mask],
+                        p_sell[signal_mask],
+                    ).astype(np.float32)
+                    meta_direction = primary[signal_mask]
+                    # meta_label: 1 if primary == target (correct direction)
+                    meta_label = (
+                        primary[signal_mask]
+                        == target_filtered[signal_mask]
+                    ).astype(np.int32)
+                    if meta_label.sum() > 0 and meta_label.sum() < len(meta_label):
+                        with contextlib.suppress(ValueError, lgb.basic.LightGBMError):
+                            trainer.train_meta(
+                                meta_df, meta_proba, meta_direction, meta_label,
+                            )
 
             # Train exit model (optimal-close labeling)
             exit_ds = build_exit_dataset(

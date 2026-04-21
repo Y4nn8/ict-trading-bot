@@ -170,6 +170,8 @@ class TestScalpingFeatureExtractor:
             assert f"scalp__{tf}_range_ratio" in features
             assert f"scalp__{tf}_body_ratio" in features
             assert f"scalp__{tf}_direction_streak" in features
+            assert f"scalp__{tf}_vol_regime" in features
+            assert f"scalp__{tf}_trend_regime" in features
         # M5/H1 momentum not produced here (covered by ict__ extractor)
         assert "scalp__m5_roc_fast" not in features
         assert "scalp__h1_roc_fast" not in features
@@ -238,6 +240,72 @@ class TestScalpingFeatureExtractor:
 
         features = ext.extract(_make_tick(price=106.0), _make_partial(), 6)
         assert features["scalp__m1_atr"] > 0
+
+    def test_vol_regime_detects_expansion(self) -> None:
+        """vol_regime > 1 when recent volatility exceeds long-term avg."""
+        ext = ScalpingFeatureExtractor()
+        ext.configure({"atr_period": 5, "regime_period": 20})
+
+        # 20 quiet candles (range ~0.5) + 5 loud ones (range ~5)
+        for i in range(20):
+            ext.on_candle_close(
+                _make_candle(i, open_=100, close=100.1,
+                             high=100.3, low=99.8),
+                i,
+            )
+        for i in range(20, 25):
+            ext.on_candle_close(
+                _make_candle(i, open_=100, close=102,
+                             high=105, low=100),
+                i,
+            )
+
+        features = ext.extract(_make_tick(price=102.0), _make_partial(), 25)
+        assert features["scalp__10s_vol_regime"] > 1.0
+
+    def test_trend_regime_detects_bullish(self) -> None:
+        """trend_regime close to +1 when all recent candles bullish."""
+        ext = ScalpingFeatureExtractor()
+        ext.configure({"regime_period": 20})
+
+        for i in range(25):
+            ext.on_candle_close(
+                _make_candle(i, open_=100 + i * 0.5, close=100.5 + i * 0.5,
+                             high=101 + i * 0.5, low=99.5 + i * 0.5),
+                i,
+            )
+
+        features = ext.extract(_make_tick(price=120.0), _make_partial(), 25)
+        assert features["scalp__10s_trend_regime"] == 1.0
+
+    def test_trend_regime_detects_chop(self) -> None:
+        """trend_regime near 0 when direction alternates."""
+        ext = ScalpingFeatureExtractor()
+        ext.configure({"regime_period": 20})
+
+        for i in range(25):
+            if i % 2 == 0:
+                ext.on_candle_close(
+                    _make_candle(i, open_=100, close=101,
+                                 high=102, low=99),
+                    i,
+                )
+            else:
+                ext.on_candle_close(
+                    _make_candle(i, open_=100, close=99,
+                                 high=101, low=98),
+                    i,
+                )
+
+        features = ext.extract(_make_tick(price=100.0), _make_partial(), 25)
+        assert abs(features["scalp__10s_trend_regime"]) < 0.2
+
+    def test_regime_zero_on_cold_start(self) -> None:
+        ext = ScalpingFeatureExtractor()
+        ext.configure({"regime_period": 50})
+        features = ext.extract(_make_tick(), _make_partial(), 0)
+        assert features["scalp__10s_vol_regime"] == 0.0
+        assert features["scalp__10s_trend_regime"] == 0.0
 
 
 class TestICTFeatureExtractor:

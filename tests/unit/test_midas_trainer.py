@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import polars as pl
+import pytest
 
 from src.midas.trainer import MidasTrainer, TrainerConfig
 
@@ -257,3 +258,92 @@ class TestImportanceThreshold:
         r_loose = loose.train(df, target)
         r_tight = tight.train(df, target)
         assert len(r_tight.feature_names) <= len(r_loose.feature_names)
+
+
+class TestMetaLabeling:
+    def _make_meta_dataset(
+        self, n: int = 300, n_features: int = 5,
+    ) -> tuple[pl.DataFrame, np.ndarray, np.ndarray, np.ndarray]:
+        rng = np.random.default_rng(123)
+        data: dict[str, list[float]] = {
+            f"f_{i}": rng.normal(0, 1, n).tolist() for i in range(n_features)
+        }
+        df = pl.DataFrame(data)
+        primary_proba = rng.uniform(0.5, 0.95, n).astype(np.float32)
+        primary_direction = rng.choice([1, 2], n).astype(np.int32)
+        # Meta label: profitable iff f_0 > 0 and primary_proba > 0.7
+        meta_label = (
+            (df["f_0"].to_numpy() > 0) & (primary_proba > 0.7)
+        ).astype(np.int32)
+        return df, primary_proba, primary_direction, meta_label
+
+    def test_train_meta_produces_model(self) -> None:
+        df, p_proba, p_dir, y = self._make_meta_dataset()
+        trainer = MidasTrainer(TrainerConfig(n_estimators=30))
+        result = trainer.train_meta(df, p_proba, p_dir, y)
+        assert trainer.has_meta_model
+        assert "primary_proba" in result.feature_names
+        assert "primary_direction" in result.feature_names
+        assert 0 <= result.val_log_loss <= 5
+
+    def test_train_meta_raises_on_empty(self) -> None:
+        trainer = MidasTrainer()
+        empty = pl.DataFrame({"f_0": []})
+        with pytest.raises(ValueError, match="empty"):
+            trainer.train_meta(
+                empty,
+                np.array([], dtype=np.float32),
+                np.array([], dtype=np.int32),
+                np.array([], dtype=np.int32),
+            )
+
+    def test_predict_without_meta_model_unchanged(self) -> None:
+        # Train primary only, predict should behave as before
+        rng = np.random.default_rng(42)
+        n = 300
+        df = pl.DataFrame({"f_0": rng.normal(0, 1, n).tolist()})
+        target = (df["f_0"].to_numpy() > 0).astype(np.int32)
+        target_3c = np.where(target == 0, 1, 2).astype(np.int32)
+        trainer = MidasTrainer(TrainerConfig(
+            n_estimators=30, entry_threshold=0.55,
+        ))
+        trainer.train(df, target_3c)
+        signal, _ = trainer.predict({"f_0": 5.0})
+        assert signal in (0, 1, 2)
+
+    def test_meta_gate_can_suppress_primary_signal(self) -> None:
+        # Train primary so it issues a signal
+        rng = np.random.default_rng(0)
+        n = 500
+        df = pl.DataFrame({"f_0": rng.normal(0, 1, n).tolist()})
+        target_3c = np.where(
+            df["f_0"].to_numpy() > 0, 1, 2,
+        ).astype(np.int32)
+        trainer = MidasTrainer(TrainerConfig(
+            n_estimators=30, entry_threshold=0.55,
+            meta_threshold=0.99,  # very strict meta gate
+        ))
+        trainer.train(df, target_3c)
+        signal_no_meta, _ = trainer.predict({"f_0": 3.0})
+
+        # Fake a meta dataset where the label is always 0 (never take trade)
+        meta_df, p_proba, p_dir, _ = self._make_meta_dataset()
+        # Use same single feature name as the primary model for
+        # realistic fit
+        meta_df = pl.DataFrame({"f_0": rng.normal(0, 1, 500).tolist()})
+        p_proba = rng.uniform(0.5, 0.95, 500).astype(np.float32)
+        p_dir = rng.choice([1, 2], 500).astype(np.int32)
+        y = np.zeros(500, dtype=np.int32)
+        trainer.train_meta(meta_df, p_proba, p_dir, y)
+
+        # Meta model learned "always 0" → predict should suppress signal
+        signal_with_meta, _ = trainer.predict({"f_0": 3.0})
+        assert signal_no_meta != 0  # primary would fire
+        assert signal_with_meta == 0  # meta suppressed it
+
+    def test_meta_properties(self) -> None:
+        trainer = MidasTrainer()
+        assert not trainer.has_meta_model
+        df, p_proba, p_dir, y = self._make_meta_dataset()
+        trainer.train_meta(df, p_proba, p_dir, y)
+        assert trainer.has_meta_model
