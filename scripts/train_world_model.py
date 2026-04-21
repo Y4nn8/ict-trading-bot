@@ -26,10 +26,12 @@ from pathlib import Path
 import torch
 
 from src.common.logging import get_logger
-from src.morpheus.dataset import MorpheusDataset
+from src.morpheus.dataset import BASE_OBS_COLUMNS, MorpheusDataset
 from src.morpheus.training import TrainConfig, chronological_split, train
 
 logger = get_logger(__name__)
+
+_RET_CLOSE_IDX = BASE_OBS_COLUMNS.index("ret_close")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -42,7 +44,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--bucket-seconds", type=int, default=10)
     p.add_argument("--seq-len", type=int, default=256)
     p.add_argument("--stride", type=int, default=1)
-    p.add_argument("--h1", action="store_true", help="Add H1 features (16 dims)")
+    p.add_argument("--h1", action="store_true", help="Add H1 features")
+    p.add_argument("--m5", action="store_true", help="Add M5 features")
+    p.add_argument(
+        "--eurusd-dir", type=Path, default=None,
+        help="EUR/USD M1 parquet dir for cross-asset features",
+    )
+    p.add_argument(
+        "--usdjpy-dir", type=Path, default=None,
+        help="USD/JPY M1 parquet dir for cross-asset features",
+    )
+    p.add_argument(
+        "--derived", action="store_true",
+        help="Add derived features (rolling vol, momentum, DXY proxy)",
+    )
 
     # Training
     p.add_argument("--epochs", type=int, default=10)
@@ -86,6 +101,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--dropout", type=float, default=0.1)
     p.add_argument("--max-seq-len", type=int, default=1024)
 
+    # Auxiliary directional head
+    p.add_argument(
+        "--aux-horizon", type=int, default=0,
+        help="Directional prediction horizon (0=off)",
+    )
+    p.add_argument("--aux-weight", type=float, default=0.1, help="Weight for directional loss")
+
     return p.parse_args(argv)
 
 
@@ -115,6 +137,10 @@ def main(argv: list[str] | None = None) -> None:
         stride=args.stride,
         bucket_seconds=args.bucket_seconds,
         use_h1=args.h1,
+        use_m5=args.m5,
+        eurusd_dir=args.eurusd_dir,
+        usdjpy_dir=args.usdjpy_dir,
+        use_derived=args.derived,
     )
     logger.info(
         "dataset_loaded",
@@ -173,6 +199,13 @@ def main(argv: list[str] | None = None) -> None:
         d_ff=args.d_ff,
         dropout=args.dropout,
         max_seq_len=args.max_seq_len,
+        aux_horizon=args.aux_horizon,
+        aux_weight=args.aux_weight,
+        ret_close_mean=(
+            float(dataset.norm_stats.mean[_RET_CLOSE_IDX])
+            if dataset.norm_stats is not None
+            else 0.0
+        ),
         compile=args.compile,
         amp=args.amp,
         num_workers=args.num_workers,

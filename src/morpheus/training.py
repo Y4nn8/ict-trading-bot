@@ -64,6 +64,9 @@ class TrainConfig:
     d_ff: int = 512
     dropout: float = 0.1
     max_seq_len: int = 1024
+    aux_horizon: int = 0
+    aux_weight: float = 0.1
+    ret_close_mean: float = 0.0
     # Training options
     compile: bool = False
     amp: bool = False
@@ -170,7 +173,17 @@ def load_checkpoint(
     payload: dict[str, Any] = torch.load(
         path, map_location=map_location, weights_only=False,
     )
-    model.load_state_dict(payload["model_state"])
+    result = model.load_state_dict(payload["model_state"], strict=False)
+    if result.missing_keys:
+        logger.warning(
+            "checkpoint_missing_keys",
+            keys=result.missing_keys,
+        )
+    if result.unexpected_keys:
+        logger.warning(
+            "checkpoint_unexpected_keys",
+            keys=result.unexpected_keys,
+        )
     if optimizer is not None and "optimizer_state" in payload:
         optimizer.load_state_dict(payload["optimizer_state"])
     return payload
@@ -307,6 +320,9 @@ def build_model(config: TrainConfig) -> nn.Module:
             d_ff=config.d_ff,
             dropout=config.dropout,
             max_seq_len=config.max_seq_len,
+            aux_horizon=config.aux_horizon,
+            aux_weight=config.aux_weight,
+            ret_close_mean=config.ret_close_mean,
         )
 
     if config.model_type == "rssm":
@@ -365,9 +381,18 @@ def train(
 
     start_epoch = 0
     if resume_from is not None:
-        payload = load_checkpoint(
-            resume_from, model=model, optimizer=optimizer, map_location=device,
-        )
+        try:
+            payload = load_checkpoint(
+                resume_from, model=model, optimizer=optimizer,
+                map_location=device,
+            )
+        except (ValueError, RuntimeError) as exc:
+            # Optimizer state incompatible (e.g., added dir_head) —
+            # fall back to loading model weights only.
+            logger.warning("optimizer_state_incompatible", reason=str(exc))
+            payload = load_checkpoint(
+                resume_from, model=model, map_location=device,
+            )
         start_epoch = int(payload.get("epoch", 0))
 
     if config.compile and device.type == "cuda":
