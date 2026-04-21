@@ -57,6 +57,9 @@ packages = ["src"]
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+extend-exclude = [
+    "scripts/run_lgbm_backtest.py",  # experimental, not in main worker path
+]
 
 [tool.ruff.lint]
 select = [

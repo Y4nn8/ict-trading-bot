@@ -49,7 +49,6 @@ def _download_day(
     """
     date_str = date.strftime("%Y-%m-%dT00:00:00")
     next_day = (date + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
-    out_file = output_dir / f"{duka_instrument}-{date.strftime('%Y%m%d')}.csv"
 
     try:
         result = subprocess.run(
