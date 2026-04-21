@@ -7,12 +7,14 @@ from datetime import UTC, datetime
 from src.midas.optimizer import OptimizationResult
 from src.midas.trade_simulator import MidasTrade
 from src.midas.walk_forward import (
+    ParamStabilityReport,
     WalkForwardOptunaConfig,
     _check_range_saturation,
     _midas_to_common_trade,
     _print_param_stability,
     _print_wf_optuna_summary,
     _snap_to_monday,
+    compute_param_stability,
     generate_windows,
 )
 
@@ -371,3 +373,94 @@ class TestRangeSaturation:
         _check_range_saturation(results, config)
         captured = capsys.readouterr()  # type: ignore[union-attr]
         assert "gamma" not in captured.out
+
+
+class TestComputeParamStability:
+    def _make_results(
+        self, inner_params_list: list[dict[str, float]],
+    ) -> list[OptimizationResult]:
+        return [
+            OptimizationResult(
+                best_inner_params=p, best_outer_params={},
+            )
+            for p in inner_params_list
+        ]
+
+    def test_stable_param_classified_stable(self) -> None:
+        # k_sl nearly identical across windows → CV ~0%, stable
+        results = self._make_results([
+            {"k_sl": 1.00, "k_tp": 2.0},
+            {"k_sl": 1.02, "k_tp": 2.5},
+            {"k_sl": 1.01, "k_tp": 3.0},
+            {"k_sl": 0.99, "k_tp": 4.0},
+        ])
+        report = compute_param_stability(results, cv_threshold=15.0)
+        # k_sl is stable, k_tp is not
+        k_sl_stats = report.per_param["inner__k_sl"]
+        assert k_sl_stats[2] < 15.0  # CV% < threshold
+        k_tp_stats = report.per_param["inner__k_tp"]
+        assert k_tp_stats[2] > 15.0
+        assert report.converged == 1
+        assert report.total == 2
+
+    def test_converged_ratio_computed(self) -> None:
+        results = self._make_results([
+            {"a": 1.0, "b": 1.0},
+            {"a": 1.01, "b": 1.02},
+        ])
+        report = compute_param_stability(results)
+        assert report.converged_ratio == 1.0
+
+    def test_empty_when_single_result(self) -> None:
+        results = self._make_results([{"a": 1.0}])
+        report = compute_param_stability(results)
+        assert report.total == 0
+        assert report.converged == 0
+        assert report.converged_ratio == 0.0
+
+    def test_zero_mean_returns_inf_cv(self) -> None:
+        results = self._make_results([
+            {"a": 0.0}, {"a": 0.0}, {"a": 0.0},
+        ])
+        report = compute_param_stability(results)
+        assert report.per_param["inner__a"][2] == float("inf")
+        assert report.converged == 0
+
+    def test_threshold_custom(self) -> None:
+        results = self._make_results([
+            {"a": 1.0}, {"a": 1.05}, {"a": 0.95},  # CV ~4%
+        ])
+        lenient = compute_param_stability(results, cv_threshold=10.0)
+        strict = compute_param_stability(results, cv_threshold=1.0)
+        assert lenient.converged == 1
+        assert strict.converged == 0
+
+    def test_non_numeric_params_skipped(self) -> None:
+        results = [
+            OptimizationResult(
+                best_inner_params={"a": 1.0, "label": "x"},
+                best_outer_params={},
+            ),
+            OptimizationResult(
+                best_inner_params={"a": 1.02, "label": "y"},
+                best_outer_params={},
+            ),
+        ]
+        report = compute_param_stability(results)
+        assert "inner__label" not in report.per_param
+        assert "inner__a" in report.per_param
+
+
+class TestParamStabilityReport:
+    def test_empty_report_zero_ratio(self) -> None:
+        report = ParamStabilityReport(
+            per_param={}, converged=0, total=0, cv_threshold=15.0,
+        )
+        assert report.converged_ratio == 0.0
+
+    def test_ratio_formula(self) -> None:
+        report = ParamStabilityReport(
+            per_param={"x": (1.0, 0.1, 10.0), "y": (2.0, 1.0, 50.0)},
+            converged=1, total=2, cv_threshold=15.0,
+        )
+        assert report.converged_ratio == 0.5

@@ -539,6 +539,8 @@ class WalkForwardOptunaConfig:
     slippage_min_pts: float = 0.0
     slippage_max_pts: float = 0.0
     slippage_seed: int | None = None
+    stability_cv_threshold: float = 15.0
+    stability_warn_ratio: float = 0.30
 
 
 async def run_midas_wf_optuna(
@@ -637,7 +639,11 @@ async def run_midas_wf_optuna(
     _print_wf_optuna_summary(results, windows)
 
     if len(results) >= 2:
-        _print_param_stability(results)
+        _print_param_stability(
+            results,
+            cv_threshold=config.stability_cv_threshold,
+            warn_ratio=config.stability_warn_ratio,
+        )
 
     _check_range_saturation(results, config)
 
@@ -691,41 +697,65 @@ def _print_wf_optuna_summary(
     print(f"  Profitable windows: {profitable}/{len(results)}")
 
 
-def _print_param_stability(results: list[OptimizationResult]) -> None:
-    """Print param stability analysis across windows.
+@dataclass(frozen=True, slots=True)
+class ParamStabilityReport:
+    """Summary of parameter stability across walk-forward windows.
 
-    For each inner param, shows mean, std, and coefficient of variation (CV).
-    Low CV = stable param, high CV = unstable / window-dependent.
+    Attributes:
+        per_param: Map from "inner__key" / "outer__key" to (mean, std, cv_pct).
+            cv_pct is infinity when mean is ~0.
+        converged: Number of params with cv_pct < cv_threshold.
+        total: Total number of numeric params analysed.
+        cv_threshold: CV% threshold used to classify a param as stable.
     """
-    # Collect best inner params per window
-    all_inner: list[dict[str, Any]] = [
-        r.best_inner_params for r in results if r.best_inner_params
-    ]
-    if len(all_inner) < 2:
-        return
 
-    # Also collect outer params
-    all_outer: list[dict[str, Any]] = [
-        r.best_outer_params for r in results if r.best_outer_params
-    ]
+    per_param: dict[str, tuple[float, float, float]]
+    converged: int
+    total: int
+    cv_threshold: float
 
-    print(f"\n{'='*70}")
-    print("PARAM STABILITY ACROSS WINDOWS")
-    print(f"{'='*70}")
-    print(f"{'Param':<30} {'Mean':>10} {'Std':>10} {'CV%':>8} {'Stable?':<8}")
-    print("-" * 70)
+    @property
+    def converged_ratio(self) -> float:
+        """Fraction of params classified as stable (0 if no params)."""
+        return self.converged / self.total if self.total > 0 else 0.0
 
+
+def compute_param_stability(
+    results: list[OptimizationResult],
+    cv_threshold: float = 15.0,
+) -> ParamStabilityReport:
+    """Compute param stability stats across windows.
+
+    For each numeric inner/outer param, reports mean, std, and
+    coefficient of variation (CV%). Params with CV% below the threshold
+    are classified as stable.
+
+    Args:
+        results: Per-window optimization results.
+        cv_threshold: CV% below which a param is considered stable.
+
+    Returns:
+        Stability report with per-param stats and aggregate ratios.
+    """
+    all_inner = [r.best_inner_params for r in results if r.best_inner_params]
+    all_outer = [r.best_outer_params for r in results if r.best_outer_params]
+
+    per_param: dict[str, tuple[float, float, float]] = {}
     converged = 0
     total = 0
 
-    for label, param_dicts in [("inner", all_inner), ("outer", all_outer)]:
-        if not param_dicts:
-            continue
+    if len(all_inner) < 2 and len(all_outer) < 2:
+        return ParamStabilityReport(
+            per_param=per_param, converged=0, total=0,
+            cv_threshold=cv_threshold,
+        )
 
+    for label, param_dicts in [("inner", all_inner), ("outer", all_outer)]:
+        if len(param_dicts) < 2:
+            continue
         all_keys = sorted(
             {k for d in param_dicts for k in d if isinstance(d[k], (int, float))},
         )
-
         for key in all_keys:
             values = [
                 float(d[key]) for d in param_dicts
@@ -733,27 +763,58 @@ def _print_param_stability(results: list[OptimizationResult]) -> None:
             ]
             if len(values) < 2:
                 continue
-
             total += 1
-            mean = np.mean(values)
-            std = np.std(values)
-            if abs(mean) > 1e-9:
-                cv = float(std / abs(mean) * 100)
-                stable = cv < 15.0
-                cv_display = f"{cv:>7.1f}%"
-            else:
-                stable = False
-                cv_display = f"{'N/A':>8}"
-            if stable:
+            mean = float(np.mean(values))
+            std = float(np.std(values))
+            cv = float(std / abs(mean) * 100) if abs(mean) > 1e-9 else float("inf")
+            per_param[f"{label}__{key}"] = (mean, std, cv)
+            if cv < cv_threshold:
                 converged += 1
-            marker = "YES" if stable else ""
-            name = f"{label}__{key}"
-            print(f"{name:<30} {mean:>10.4f} {std:>10.4f} "
-                  f"{cv_display} {marker:<8}")
 
-    if total > 0:
-        print(f"\nConverged: {converged}/{total} params "
-              f"({converged/total*100:.0f}%) with CV < 15%")
+    return ParamStabilityReport(
+        per_param=per_param, converged=converged, total=total,
+        cv_threshold=cv_threshold,
+    )
+
+
+def _print_param_stability(
+    results: list[OptimizationResult],
+    cv_threshold: float = 15.0,
+    warn_ratio: float = 0.30,
+) -> None:
+    """Print param stability analysis across windows.
+
+    For each inner param, shows mean, std, and coefficient of variation (CV).
+    Low CV = stable param, high CV = unstable / window-dependent.
+    Emits a warning if the converged ratio is below ``warn_ratio``.
+    """
+    report = compute_param_stability(results, cv_threshold=cv_threshold)
+    if report.total == 0:
+        return
+
+    print(f"\n{'='*70}")
+    print("PARAM STABILITY ACROSS WINDOWS")
+    print(f"{'='*70}")
+    print(f"{'Param':<30} {'Mean':>10} {'Std':>10} {'CV%':>8} {'Stable?':<8}")
+    print("-" * 70)
+
+    for name, (mean, std, cv) in report.per_param.items():
+        stable = cv < cv_threshold
+        marker = "YES" if stable else ""
+        cv_display = f"{cv:>7.1f}%" if cv != float("inf") else f"{'N/A':>8}"
+        print(f"{name:<30} {mean:>10.4f} {std:>10.4f} "
+              f"{cv_display} {marker:<8}")
+
+    ratio = report.converged_ratio
+    print(
+        f"\nConverged: {report.converged}/{report.total} params "
+        f"({ratio*100:.0f}%) with CV < {cv_threshold:.0f}%",
+    )
+    if ratio < warn_ratio:
+        print(
+            f"WARNING: param stability {ratio*100:.0f}% below threshold "
+            f"{warn_ratio*100:.0f}% — likely overfitting on per-window specifics",
+        )
 
 
 def _check_range_saturation(

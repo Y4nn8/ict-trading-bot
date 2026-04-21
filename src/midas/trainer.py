@@ -41,6 +41,10 @@ class TrainerConfig:
         exit_threshold: Min P(CLOSE) to close a position early.
         val_fraction: Fraction of training data for early-stop validation.
         early_stopping_rounds: Stop if val metric doesn't improve for N rounds.
+        importance_threshold: If > 0, run a 2-pass training: after the
+            first pass, drop features whose gain-importance share is
+            below this threshold (e.g. 0.01 = 1% of total gain) and
+            retrain on the remaining features only. 0 disables filtering.
     """
 
     n_estimators: int = 500
@@ -54,6 +58,7 @@ class TrainerConfig:
     exit_threshold: float = 0.55
     val_fraction: float = 0.1
     early_stopping_rounds: int = 50
+    importance_threshold: float = 0.0
 
 
 @dataclass
@@ -142,37 +147,21 @@ class MidasTrainer:
         # PASS targets: weight=1 (baseline)
         return weights
 
-    def train(
+    def _fit_entry(
         self,
-        df: pl.DataFrame,
+        x_all: np.ndarray,
         target: np.ndarray,
-        sample_weights: np.ndarray | None = None,
-    ) -> TrainResult:
-        """Train the entry model (3-class: PASS/BUY/SELL).
-
-        Args:
-            df: Feature DataFrame (may contain meta columns).
-            target: Target array (0=PASS, 1=BUY, 2=SELL).
-            sample_weights: Optional PnL-based weights per sample.
-
-        Returns:
-            TrainResult with metrics and feature importance.
-        """
-        feature_cols = [
-            c for c in df.columns if c not in _META_COLUMNS
-        ]
-        self._entry_features = feature_cols
-
-        x_all = df.select(feature_cols).to_numpy()
-        y = target
-
+        feature_cols: list[str],
+        sample_weights: np.ndarray | None,
+    ) -> tuple[lgb.Booster, dict[str, float], float, int, int]:
+        """Fit a 3-class LightGBM entry model. Internal helper for train()."""
         cfg = self._config
         n = len(x_all)
         n_val = max(1, int(n * cfg.val_fraction))
         n_train = n - n_val
 
         x_train, x_val = x_all[:n_train], x_all[n_train:]
-        y_train, y_val = y[:n_train], y[n_train:]
+        y_train, y_val = target[:n_train], target[n_train:]
         w_train = (
             sample_weights[:n_train] if sample_weights is not None else None
         )
@@ -205,7 +194,7 @@ class MidasTrainer:
             lgb.log_evaluation(period=0),
         ]
 
-        self._entry_model = lgb.train(
+        model = lgb.train(
             params, train_data,
             num_boost_round=cfg.n_estimators,
             valid_sets=[val_data], valid_names=["val"],
@@ -214,15 +203,64 @@ class MidasTrainer:
 
         importance = dict(zip(
             feature_cols,
-            self._entry_model.feature_importance(importance_type="gain"),
+            model.feature_importance(importance_type="gain"),
             strict=True,
         ))
 
         val_loss = 0.0
-        if self._entry_model.best_score and "val" in self._entry_model.best_score:
-            val_loss = self._entry_model.best_score["val"]["multi_logloss"]
+        if model.best_score and "val" in model.best_score:
+            val_loss = model.best_score["val"]["multi_logloss"]
 
-        unique, counts = np.unique(y, return_counts=True)
+        return model, importance, val_loss, n_train, n_val
+
+    def train(
+        self,
+        df: pl.DataFrame,
+        target: np.ndarray,
+        sample_weights: np.ndarray | None = None,
+    ) -> TrainResult:
+        """Train the entry model (3-class: PASS/BUY/SELL).
+
+        If ``config.importance_threshold > 0``, runs a second pass after
+        dropping features whose gain-importance share is below the
+        threshold (so the final model only keeps informative features).
+
+        Args:
+            df: Feature DataFrame (may contain meta columns).
+            target: Target array (0=PASS, 1=BUY, 2=SELL).
+            sample_weights: Optional PnL-based weights per sample.
+
+        Returns:
+            TrainResult with metrics and feature importance.
+        """
+        feature_cols = [
+            c for c in df.columns if c not in _META_COLUMNS
+        ]
+        x_all = df.select(feature_cols).to_numpy()
+
+        model, importance, val_loss, n_train, n_val = self._fit_entry(
+            x_all, target, feature_cols, sample_weights,
+        )
+
+        cfg = self._config
+        if cfg.importance_threshold > 0:
+            total = sum(importance.values()) or 1.0
+            kept = [
+                c for c in feature_cols
+                if importance[c] / total >= cfg.importance_threshold
+            ]
+            if kept and len(kept) < len(feature_cols):
+                # Second pass: retrain on kept features only.
+                feature_cols = kept
+                x_all = df.select(feature_cols).to_numpy()
+                model, importance, val_loss, n_train, n_val = self._fit_entry(
+                    x_all, target, feature_cols, sample_weights,
+                )
+
+        self._entry_features = feature_cols
+        self._entry_model = model
+
+        unique, counts = np.unique(target, return_counts=True)
         dist = dict(zip(unique.tolist(), counts.tolist(), strict=True))
 
         return TrainResult(

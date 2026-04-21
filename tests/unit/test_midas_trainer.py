@@ -201,3 +201,59 @@ class TestMidasTrainer:
         )
         assert should_close is False
         assert confidence == 0.0
+
+
+class TestImportanceThreshold:
+    def _make_dataset(self, n: int = 400, n_features: int = 10) -> tuple[pl.DataFrame, np.ndarray]:
+        rng = np.random.default_rng(42)
+        data: dict[str, list[float]] = {}
+        for i in range(n_features):
+            data[f"f_{i}"] = rng.normal(0, 1, n).tolist()
+        # Make f_0 a strong signal for the target
+        df = pl.DataFrame(data)
+        target = (df["f_0"].to_numpy() > 0).astype(np.int32)
+        # Convert to 3-class (PASS=0, BUY=1)
+        target_3c = np.where(target == 0, 1, 2).astype(np.int32)
+        return df, target_3c
+
+    def test_zero_threshold_keeps_all_features(self) -> None:
+        df, target = self._make_dataset()
+        trainer = MidasTrainer(TrainerConfig(
+            n_estimators=20, importance_threshold=0.0,
+        ))
+        result = trainer.train(df, target)
+        assert len(result.feature_names) == 10
+
+    def test_threshold_filters_low_importance_features(self) -> None:
+        df, target = self._make_dataset()
+        trainer = MidasTrainer(TrainerConfig(
+            n_estimators=20, importance_threshold=0.05,
+        ))
+        result = trainer.train(df, target)
+        # At least one feature dropped since only f_0 carries the signal
+        assert len(result.feature_names) < 10
+        assert len(result.feature_names) >= 1
+
+    def test_threshold_preserves_model_usability(self) -> None:
+        df, target = self._make_dataset()
+        trainer = MidasTrainer(TrainerConfig(
+            n_estimators=20, importance_threshold=0.05,
+        ))
+        trainer.train(df, target)
+        # Model still predicts with only the kept features
+        features = {name: 0.5 for name in trainer._entry_features}
+        signal, proba = trainer.predict(features)
+        assert signal in (0, 1, 2)
+        assert 0.0 <= proba <= 1.0
+
+    def test_higher_threshold_drops_more(self) -> None:
+        df, target = self._make_dataset()
+        loose = MidasTrainer(TrainerConfig(
+            n_estimators=20, importance_threshold=0.01,
+        ))
+        tight = MidasTrainer(TrainerConfig(
+            n_estimators=20, importance_threshold=0.50,
+        ))
+        r_loose = loose.train(df, target)
+        r_tight = tight.train(df, target)
+        assert len(r_tight.feature_names) <= len(r_loose.feature_names)
