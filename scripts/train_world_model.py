@@ -52,6 +52,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--usdjpy-dir", type=Path, default=None,
         help="USD/JPY M1 parquet dir for cross-asset features",
     )
+    p.add_argument(
+        "--derived", action="store_true",
+        help="Add derived features (rolling vol, momentum, DXY proxy)",
+    )
 
     # Training
     p.add_argument("--epochs", type=int, default=10)
@@ -134,6 +138,7 @@ def main(argv: list[str] | None = None) -> None:
         use_m5=args.m5,
         eurusd_dir=args.eurusd_dir,
         usdjpy_dir=args.usdjpy_dir,
+        use_derived=args.derived,
     )
     logger.info(
         "dataset_loaded",

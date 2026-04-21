@@ -35,6 +35,7 @@ INSTRUMENT_MAP: dict[str, str] = {
     "EURUSD": "eurusd",
     "GBPUSD": "gbpusd",
     "USDJPY": "usdjpy",
+    "LIGHTCMDUSD": "lightcmdusd",
 }
 
 

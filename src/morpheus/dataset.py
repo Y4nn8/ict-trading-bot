@@ -63,8 +63,30 @@ OBS_COLUMNS_M5 = BASE_OBS_COLUMNS + M5_OBS_COLUMNS
 OBS_COLUMNS_M5_H1 = BASE_OBS_COLUMNS + M5_OBS_COLUMNS + H1_OBS_COLUMNS
 
 CROSS_OBS_COLUMNS = [
+    "eurusd_ret_open",
+    "eurusd_ret_high",
+    "eurusd_ret_low",
     "eurusd_ret_close",
+    "eurusd_tick_count",
+    "eurusd_spread",
+    "usdjpy_ret_open",
+    "usdjpy_ret_high",
+    "usdjpy_ret_low",
     "usdjpy_ret_close",
+    "usdjpy_tick_count",
+    "usdjpy_spread",
+]
+
+DERIVED_OBS_COLUMNS = [
+    "gold_vol_5",
+    "gold_vol_20",
+    "gold_vol_60",
+    "gold_mom_5",
+    "gold_mom_20",
+    "gold_mom_60",
+    "dxy_ret_close",
+    "dxy_vol_20",
+    "dxy_mom_20",
 ]
 
 GAP_THRESHOLD_FACTOR = 6
@@ -275,11 +297,10 @@ def compute_cross_features(
     eurusd_dir: Path | None = None,
     usdjpy_dir: Path | None = None,
 ) -> pl.DataFrame:
-    """Add cross-asset ret_close features via time join.
+    """Add cross-asset OHLC returns + tick_count + spread via time join.
 
-    Loads M1 parquets from external directories, computes ret_close
-    for each, and joins backward onto the main DataFrame's timestamps.
-    Missing values are filled with 0.0.
+    For each cross asset, computes 6 features: ret_open, ret_high,
+    ret_low, ret_close, tick_count, spread. Joins backward on timestamps.
 
     Args:
         df: Main DataFrame with a 'time' column, sorted.
@@ -287,23 +308,91 @@ def compute_cross_features(
         usdjpy_dir: Directory with USD/JPY M1 parquets.
 
     Returns:
-        DataFrame with additional eurusd_ret_close, usdjpy_ret_close columns.
+        DataFrame with 12 additional cross-asset columns.
     """
     result = df
     for name, directory in [("eurusd", eurusd_dir), ("usdjpy", usdjpy_dir)]:
-        col_name = f"{name}_ret_close"
+        feature_cols = [
+            f"{name}_ret_open",
+            f"{name}_ret_high",
+            f"{name}_ret_low",
+            f"{name}_ret_close",
+            f"{name}_tick_count",
+            f"{name}_spread",
+        ]
         if directory is None:
-            result = result.with_columns(pl.lit(0.0).alias(col_name))
+            result = result.with_columns(
+                [pl.lit(0.0).alias(c) for c in feature_cols],
+            )
             continue
 
         cross = load_parquet_dir(directory)
         prev_close = cross["close"].shift(1)
         cross = cross.with_columns(
-            ((pl.col("close") - prev_close) / prev_close).alias(col_name),
-        ).select("time", col_name).sort("time")
+            ((pl.col("open") - prev_close) / prev_close).alias(feature_cols[0]),
+            ((pl.col("high") - prev_close) / prev_close).alias(feature_cols[1]),
+            ((pl.col("low") - prev_close) / prev_close).alias(feature_cols[2]),
+            ((pl.col("close") - prev_close) / prev_close).alias(feature_cols[3]),
+            pl.col("tick_count").cast(pl.Float64).alias(feature_cols[4]),
+            pl.col("spread").alias(feature_cols[5]),
+        ).select("time", *feature_cols).sort("time")
 
         result = result.join_asof(cross, on="time", strategy="backward")
-        result = result.with_columns(pl.col(col_name).fill_null(0.0))
+        result = result.with_columns(
+            [pl.col(c).fill_null(0.0) for c in feature_cols],
+        )
+
+    return result
+
+
+def compute_derived_features(df: pl.DataFrame) -> pl.DataFrame:
+    """Add derived features: rolling vol, momentum, DXY proxy.
+
+    Requires the main 'close' column and optionally eurusd/usdjpy
+    columns (added by compute_cross_features). DXY proxy uses ICE
+    weights: DXY ~= -0.58*EUR + 0.14*JPY (simplified).
+
+    Args:
+        df: DataFrame with 'close' and optionally cross-asset columns.
+
+    Returns:
+        DataFrame with 9 additional derived columns.
+    """
+    prev_close = df["close"].shift(1)
+    gold_ret = (pl.col("close") - prev_close) / prev_close
+
+    has_cross = "eurusd_ret_close" in df.columns and "usdjpy_ret_close" in df.columns
+
+    result = df.with_columns(
+        # Rolling volatility (std of returns)
+        gold_ret.rolling_std(window_size=5).fill_null(0.0).alias("gold_vol_5"),
+        gold_ret.rolling_std(window_size=20).fill_null(0.0).alias("gold_vol_20"),
+        gold_ret.rolling_std(window_size=60).fill_null(0.0).alias("gold_vol_60"),
+        # Rolling momentum (sum of returns)
+        gold_ret.rolling_sum(window_size=5).fill_null(0.0).alias("gold_mom_5"),
+        gold_ret.rolling_sum(window_size=20).fill_null(0.0).alias("gold_mom_20"),
+        gold_ret.rolling_sum(window_size=60).fill_null(0.0).alias("gold_mom_60"),
+    )
+
+    if has_cross:
+        # DXY proxy: stronger USD = EUR down + JPY up (when quoted as USD/JPY)
+        dxy_ret = (
+            -0.58 * pl.col("eurusd_ret_close")
+            + 0.14 * pl.col("usdjpy_ret_close")
+        )
+        result = result.with_columns(dxy_ret.alias("dxy_ret_close"))
+        result = result.with_columns(
+            pl.col("dxy_ret_close").rolling_std(window_size=20)
+            .fill_null(0.0).alias("dxy_vol_20"),
+            pl.col("dxy_ret_close").rolling_sum(window_size=20)
+            .fill_null(0.0).alias("dxy_mom_20"),
+        )
+    else:
+        result = result.with_columns(
+            pl.lit(0.0).alias("dxy_ret_close"),
+            pl.lit(0.0).alias("dxy_vol_20"),
+            pl.lit(0.0).alias("dxy_mom_20"),
+        )
 
     return result
 
@@ -466,6 +555,7 @@ class MorpheusDataset(Dataset[torch.Tensor]):
         use_m5: bool = False,
         eurusd_dir: Path | None = None,
         usdjpy_dir: Path | None = None,
+        use_derived: bool = False,
     ) -> None:
         df = load_parquet_dir(parquet_dir)
         if use_m5:
@@ -477,6 +567,9 @@ class MorpheusDataset(Dataset[torch.Tensor]):
         if use_cross:
             df = compute_cross_features(df, eurusd_dir, usdjpy_dir)
 
+        if use_derived:
+            df = compute_derived_features(df)
+
         obs_df = compute_observations(df)
 
         base_cols = BASE_OBS_COLUMNS.copy()
@@ -486,6 +579,8 @@ class MorpheusDataset(Dataset[torch.Tensor]):
             base_cols = base_cols + H1_OBS_COLUMNS
         if use_cross:
             base_cols = base_cols + CROSS_OBS_COLUMNS
+        if use_derived:
+            base_cols = base_cols + DERIVED_OBS_COLUMNS
         self._obs_columns = base_cols
         segments, close_segments = find_segments_with_close(
             obs_df, bucket_seconds, seq_len,

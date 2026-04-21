@@ -41,6 +41,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--m5", action="store_true")
     p.add_argument("--eurusd-dir", type=Path, default=None)
     p.add_argument("--usdjpy-dir", type=Path, default=None)
+    p.add_argument("--derived", action="store_true")
     p.add_argument("--seq-len", type=int, default=256)
     p.add_argument("--stride", type=int, default=64)
     p.add_argument("--bucket-seconds", type=int, default=10)
@@ -96,6 +97,7 @@ def main(argv: list[str] | None = None) -> None:
         use_m5=args.m5,
         eurusd_dir=args.eurusd_dir,
         usdjpy_dir=args.usdjpy_dir,
+        use_derived=args.derived,
     )
     n_samples = min(args.n_samples, len(dataset))
     logger.info("dataset_loaded", total_sequences=len(dataset), using=n_samples)
