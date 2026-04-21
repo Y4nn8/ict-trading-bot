@@ -53,7 +53,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--horizon", type=int, default=64)
     p.add_argument("--context-len", type=int, default=256)
     p.add_argument("--gamma", type=float, default=0.99)
-    p.add_argument("--lambda_", type=float, default=0.95, dest="lambda_")
     p.add_argument("--actor-lr", type=float, default=3e-4)
     p.add_argument("--critic-lr", type=float, default=1e-3)
     p.add_argument("--entropy-coef", type=float, default=0.0002)
@@ -127,7 +126,6 @@ def main(argv: list[str] | None = None) -> None:
         horizon=args.horizon,
         context_len=args.context_len,
         gamma=args.gamma,
-        lambda_=args.lambda_,
         actor_lr=args.actor_lr,
         critic_lr=args.critic_lr,
         entropy_coef=args.entropy_coef,

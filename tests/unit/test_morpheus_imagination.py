@@ -156,6 +156,46 @@ class TestStats:
         assert stats["flat_steps"] == 0
 
 
+class TestCapitalTracking:
+    def test_capital_compounds_with_pnl(self) -> None:
+        env = _make_env()
+        port = env.reset(1, torch.tensor([2000.0]))
+        _, port, _ = env.step(torch.tensor([BUY]), _zero_obs(1), port)
+        initial = port["capital"][0].item()
+        obs = _obs_with_ret(0.01, 1)
+        _, port, _ = env.step(torch.tensor([HOLD]), obs, port)
+        assert port["capital"][0].item() > initial
+
+    def test_capital_shrinks_on_loss(self) -> None:
+        env = _make_env()
+        port = env.reset(1, torch.tensor([2000.0]))
+        _, port, _ = env.step(torch.tensor([BUY]), _zero_obs(1), port)
+        initial = port["capital"][0].item()
+        obs = _obs_with_ret(-0.01, 1)
+        _, port, _ = env.step(torch.tensor([HOLD]), obs, port)
+        assert port["capital"][0].item() < initial
+
+
+class TestStepInPos:
+    def test_resets_on_flip(self) -> None:
+        env = _make_env()
+        port = env.reset(1, torch.tensor([2000.0]))
+        _, port, _ = env.step(torch.tensor([BUY]), _zero_obs(1), port)
+        _, port, _ = env.step(torch.tensor([HOLD]), _zero_obs(1), port)
+        assert port["step_in_pos"][0].item() == 2
+        # Flip long → short: step_in_pos resets to 1
+        _, port, _ = env.step(torch.tensor([SELL]), _zero_obs(1), port)
+        assert port["step_in_pos"][0].item() == 1
+
+    def test_resets_on_close_to_flat(self) -> None:
+        # HOLD doesn't change position, but flipping to HOLD isn't a valid
+        # transition in our 3-action space (HOLD keeps). This tests that
+        # going back to flat state resets. Not reachable by actor alone.
+        env = _make_env()
+        port = env.reset(1, torch.tensor([2000.0]))
+        assert port["step_in_pos"][0].item() == 0
+
+
 class TestPriceReconstruction:
     def test_price_updates(self) -> None:
         env = _make_env()

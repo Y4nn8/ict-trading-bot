@@ -35,7 +35,6 @@ class PolicyConfig:
     horizon: int = 64
     context_len: int = 256
     gamma: float = 0.99
-    lambda_: float = 0.95
     actor_lr: float = 3e-4
     critic_lr: float = 1e-3
     entropy_coef: float = 0.0002

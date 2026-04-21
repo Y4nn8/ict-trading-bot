@@ -141,8 +141,12 @@ class ImaginationEnv:
 
         rewards = rewards - spread_cost / self._initial_capital
 
-        # Update step counter
-        step_in = torch.where(new_pos != HOLD, step_in + 1, torch.zeros_like(step_in))
+        # Step counter: reset on position change, +1 while holding same non-HOLD
+        step_in = torch.where(
+            new_pos == HOLD,
+            torch.zeros_like(step_in),
+            torch.where(pos_changed, torch.ones_like(step_in), step_in + 1),
+        )
 
         # Idle penalty when flat
         idle = (new_pos == HOLD) & (actions == HOLD) & (pos == HOLD)
@@ -150,7 +154,11 @@ class ImaginationEnv:
             idle, rewards + self._config.idle_penalty, rewards,
         )
 
-        cum_pnl = cum_pnl + rewards * self._initial_capital
+        step_pnl_eur = rewards * self._initial_capital
+        cum_pnl = cum_pnl + step_pnl_eur
+        # Dynamic capital tracking: compound PnL so next step's size
+        # reflects current equity (profits grow exposure, losses shrink it)
+        capital = capital + step_pnl_eur
 
         stats = {
             "position_changes": int(pos_changed.sum().item()),

@@ -18,7 +18,10 @@ import torch
 import torch.nn.functional as f
 from torch import Tensor, nn
 
+from src.morpheus.dataset import BASE_OBS_COLUMNS
 from src.morpheus.world_model import WorldModelOutput
+
+_RET_CLOSE_IDX = BASE_OBS_COLUMNS.index("ret_close")
 
 
 def _apply_rotary(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
@@ -280,9 +283,10 @@ class TransformerWorldModel(nn.Module):
 
         # Auxiliary directional loss
         aux_loss = torch.zeros(1, device=obs_seq.device, dtype=obs_seq.dtype).squeeze()
+        kl_loss = torch.zeros(1, device=obs_seq.device, dtype=obs_seq.dtype).squeeze()
         seq_len = obs_seq.shape[1]
         if self.dir_head is not None and self.aux_horizon > 0 and seq_len > self.aux_horizon + 1:
-            ret_close = obs_seq[:, :, 3]
+            ret_close = obs_seq[:, :, _RET_CLOSE_IDX]
             cumsum = ret_close.cumsum(dim=1)
             future_sum = cumsum[:, self.aux_horizon :] - cumsum[:, : -self.aux_horizon]
             h_for_dir = h[:, : seq_len - self.aux_horizon]
@@ -295,8 +299,9 @@ class TransformerWorldModel(nn.Module):
         return WorldModelOutput(
             loss=loss,
             recon_loss=recon_loss,
-            kl_loss=aux_loss,
+            kl_loss=kl_loss,
             reconstructed=mean,
+            aux_loss=aux_loss,
         )
 
     @torch.no_grad()

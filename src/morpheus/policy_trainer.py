@@ -2,7 +2,7 @@
 
 Samples context windows from the dataset, generates imagined
 trajectories with the frozen world model, and trains actor/critic
-using policy gradient with lambda-returns.
+using policy gradient with Monte Carlo returns.
 """
 
 from __future__ import annotations
@@ -72,7 +72,9 @@ def compute_mc_returns(
     """
     _, horizon = rewards.shape
     returns = torch.zeros_like(rewards)
-    running = torch.zeros(rewards.shape[0], device=rewards.device)
+    running = torch.zeros(
+        rewards.shape[0], device=rewards.device, dtype=rewards.dtype,
+    )
 
     for t in reversed(range(horizon)):
         running = rewards[:, t] + gamma * running
@@ -87,7 +89,7 @@ class PolicyTrainer:
     The world model is frozen. Trajectories are pre-generated,
     hidden states extracted, then the actor steps through the
     ImaginationEnv collecting rewards. Actor and critic are
-    updated with policy gradient + lambda-returns.
+    updated with policy gradient + MC returns (no bootstrapping).
 
     Args:
         world_model: Frozen TransformerWorldModel.

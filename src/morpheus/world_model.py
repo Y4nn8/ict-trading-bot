@@ -20,12 +20,17 @@ from src.morpheus.rssm import RSSM, GaussianParams
 
 @dataclass(frozen=True)
 class WorldModelOutput:
-    """Training output bundle."""
+    """Training output bundle.
+
+    ``aux_loss`` is reserved for auxiliary objectives (e.g., directional
+    prediction on the transformer). Always 0 for RSSM.
+    """
 
     loss: Tensor
     recon_loss: Tensor
     kl_loss: Tensor
     reconstructed: Tensor  # (batch, seq_len, obs_dim)
+    aux_loss: Tensor | None = None
 
 
 def kl_divergence_gaussian(

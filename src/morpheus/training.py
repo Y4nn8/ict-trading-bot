@@ -379,9 +379,18 @@ def train(
 
     start_epoch = 0
     if resume_from is not None:
-        payload = load_checkpoint(
-            resume_from, model=model, map_location=device,
-        )
+        try:
+            payload = load_checkpoint(
+                resume_from, model=model, optimizer=optimizer,
+                map_location=device,
+            )
+        except (ValueError, RuntimeError) as exc:
+            # Optimizer state incompatible (e.g., added dir_head) —
+            # fall back to loading model weights only.
+            logger.warning("optimizer_state_incompatible", reason=str(exc))
+            payload = load_checkpoint(
+                resume_from, model=model, map_location=device,
+            )
         start_epoch = int(payload.get("epoch", 0))
 
     if config.compile and device.type == "cuda":
