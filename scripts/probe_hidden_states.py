@@ -24,12 +24,12 @@ from torch import nn
 from torch.optim import Adam
 
 from src.common.logging import get_logger
-from src.morpheus.dataset import MorpheusDataset, NormStats
+from src.morpheus.dataset import BASE_OBS_COLUMNS, MorpheusDataset, NormStats
 from src.morpheus.training import TrainConfig, build_model
 
 logger = get_logger(__name__)
 
-RET_CLOSE_IDX = 3
+RET_CLOSE_IDX = BASE_OBS_COLUMNS.index("ret_close")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

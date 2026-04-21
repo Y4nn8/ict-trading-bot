@@ -327,3 +327,77 @@ class TestLoadParquetDir:
         empty.mkdir()
         with pytest.raises(FileNotFoundError):
             load_parquet_dir(empty)
+
+
+# ---------------------------------------------------------------------------
+# Enriched dataset (M5, H1, cross-asset, derived)
+# ---------------------------------------------------------------------------
+
+class TestEnrichedDataset:
+    def _write_cross(
+        self, tmp_path: Path, name: str, start: datetime, n: int,
+    ) -> Path:
+        d = tmp_path / name
+        d.mkdir()
+        df = _make_candle_df(n, start=start)
+        df.write_parquet(d / "2025-01.parquet")
+        return d
+
+    def test_m5_features(self, parquet_dir: Path) -> None:
+        ds = MorpheusDataset(
+            parquet_dir=parquet_dir, seq_len=16, stride=1, use_m5=True,
+        )
+        assert ds.obs_dim == OBS_DIM + 6
+        assert not torch.any(torch.isnan(ds[0]))
+
+    def test_m5_and_h1(self, parquet_dir: Path) -> None:
+        ds = MorpheusDataset(
+            parquet_dir=parquet_dir, seq_len=16, stride=1,
+            use_m5=True, use_h1=True,
+        )
+        assert ds.obs_dim == OBS_DIM + 6 + 6
+
+    def test_cross_assets(self, parquet_dir: Path, tmp_path: Path) -> None:
+        eur_dir = self._write_cross(
+            tmp_path, "eurusd", datetime(2025, 1, 6, 8, 0, tzinfo=UTC), 60,
+        )
+        jpy_dir = self._write_cross(
+            tmp_path, "usdjpy", datetime(2025, 1, 6, 8, 0, tzinfo=UTC), 60,
+        )
+        ds = MorpheusDataset(
+            parquet_dir=parquet_dir, seq_len=16, stride=1,
+            eurusd_dir=eur_dir, usdjpy_dir=jpy_dir,
+        )
+        assert ds.obs_dim == OBS_DIM + 12
+        assert not torch.any(torch.isnan(ds[0]))
+
+    def test_derived_without_cross(self, parquet_dir: Path) -> None:
+        ds = MorpheusDataset(
+            parquet_dir=parquet_dir, seq_len=16, stride=1,
+            use_derived=True,
+        )
+        assert ds.obs_dim == OBS_DIM + 9
+        # dxy columns fallback to 0 when no cross assets
+        assert not torch.any(torch.isnan(ds[0]))
+
+    def test_full_stack(self, parquet_dir: Path, tmp_path: Path) -> None:
+        eur_dir = self._write_cross(
+            tmp_path, "eurusd_full", datetime(2025, 1, 6, 8, 0, tzinfo=UTC), 60,
+        )
+        jpy_dir = self._write_cross(
+            tmp_path, "usdjpy_full", datetime(2025, 1, 6, 8, 0, tzinfo=UTC), 60,
+        )
+        ds = MorpheusDataset(
+            parquet_dir=parquet_dir, seq_len=16, stride=1,
+            use_m5=True, use_h1=True,
+            eurusd_dir=eur_dir, usdjpy_dir=jpy_dir,
+            use_derived=True,
+        )
+        assert ds.obs_dim == OBS_DIM + 6 + 6 + 12 + 9
+        assert not torch.any(torch.isnan(ds[0]))
+
+    def test_get_close_matches_raw(self, parquet_dir: Path) -> None:
+        ds = MorpheusDataset(parquet_dir=parquet_dir, seq_len=16, stride=1)
+        price = ds.get_close(0)
+        assert price > 0
+        assert not np.isnan(price)

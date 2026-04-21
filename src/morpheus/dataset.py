@@ -346,11 +346,16 @@ def compute_cross_features(
 
 
 def compute_derived_features(df: pl.DataFrame) -> pl.DataFrame:
-    """Add derived features: rolling vol, momentum, DXY proxy.
+    """Add derived features: rolling vol, momentum, partial USD index.
 
     Requires the main 'close' column and optionally eurusd/usdjpy
-    columns (added by compute_cross_features). DXY proxy uses ICE
-    weights: DXY ~= -0.58*EUR + 0.14*JPY (simplified).
+    columns (added by compute_cross_features).
+
+    The "dxy_*" columns are a **partial** USD index — the real DXY has
+    6 components (EUR 57.6%, JPY 13.6%, GBP 11.9%, CAD 9.1%, SEK 4.2%,
+    CHF 3.6%). We only use EUR and JPY (~72% of the basket), so this is
+    a USD-strength proxy, not the true DXY. Weight signs match ICE
+    convention: stronger USD ⇒ EUR down (-) and USD/JPY up (+).
 
     Args:
         df: DataFrame with 'close' and optionally cross-asset columns.

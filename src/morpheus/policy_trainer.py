@@ -162,14 +162,14 @@ class PolicyTrainer:
         start_prices: torch.Tensor,
     ) -> tuple[
         torch.Tensor, torch.Tensor, torch.Tensor,
-        torch.Tensor, torch.Tensor, torch.Tensor,
+        torch.Tensor, torch.Tensor,
         dict[str, int | float],
     ]:
         """Run one batch of rollouts, collecting states, actions, rewards.
 
         Returns:
-            states, actions, rewards, final_capital, final_margin,
-            final_unrealized, rollout_stats.
+            states, actions, rewards, final_capital, final_cumulative_pnl,
+            rollout_stats.
         """
         imagined, hidden = self._generate_rollout_data(contexts)
         portfolio = self._env.reset(contexts.shape[0], start_prices)
@@ -211,7 +211,6 @@ class PolicyTrainer:
         return (
             states, actions, rewards,
             portfolio["capital"], portfolio["cumulative_pnl"],
-            torch.zeros_like(portfolio["capital"]),
             rollout_stats,
         )
 
@@ -234,7 +233,7 @@ class PolicyTrainer:
             batch_closes = closes[i : i + bs]
             (
                 states, actions, rewards,
-                final_capital, final_margin, final_unrealized,
+                final_capital, final_cumulative_pnl,
                 batch_stats,
             ) = self._rollout(batch_ctx, batch_closes)
 
@@ -282,9 +281,7 @@ class PolicyTrainer:
             all_rewards.append(rewards.sum(dim=1).mean().item())
             all_returns.append(sym_returns.mean().item())
             all_entropy.append(entropies.mean().item())
-            effective_capital = (
-                final_capital + final_margin + final_unrealized
-            )
+            effective_capital = final_capital + final_cumulative_pnl
             all_capital.append(effective_capital.mean().item())
             for k, v in batch_stats.items():
                 total_stats[k] = total_stats.get(k, 0) + v

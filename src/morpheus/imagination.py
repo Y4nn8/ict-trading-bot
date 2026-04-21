@@ -14,12 +14,13 @@ import torch
 from torch import Tensor
 
 from src.morpheus.actor_critic import BUY, HOLD, SELL, portfolio_features
+from src.morpheus.dataset import BASE_OBS_COLUMNS
 
 if TYPE_CHECKING:
     from src.morpheus.actor_critic import PolicyConfig
     from src.morpheus.dataset import NormStats
 
-RET_CLOSE_IDX = 3
+RET_CLOSE_IDX = BASE_OBS_COLUMNS.index("ret_close")
 
 
 class ImaginationEnv:
