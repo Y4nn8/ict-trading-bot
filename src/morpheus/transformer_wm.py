@@ -203,6 +203,8 @@ class TransformerWorldModel(nn.Module):
         max_seq_len: Maximum sequence length for RoPE precomputation.
     """
 
+    ret_close_mean: Tensor
+
     def __init__(
         self,
         obs_dim: int = 16,
@@ -214,12 +216,20 @@ class TransformerWorldModel(nn.Module):
         max_seq_len: int = 1024,
         aux_horizon: int = 0,
         aux_weight: float = 0.1,
+        ret_close_mean: float = 0.0,
     ) -> None:
         super().__init__()
         self.obs_dim = obs_dim
         self.max_seq_len = max_seq_len
         self.aux_horizon = aux_horizon
         self.aux_weight = aux_weight
+        # ret_close normalization offset — subtract from normalized returns
+        # so the directional target sign matches the real return sign
+        # (not the mean-shifted sign). Required because obs_seq is z-scored.
+        self.register_buffer(
+            "ret_close_mean",
+            torch.tensor(ret_close_mean, dtype=torch.float32),
+        )
         self.input_proj = nn.Linear(obs_dim, d_model)
         self.blocks = nn.ModuleList([
             TransformerBlock(d_model, n_heads, d_ff, dropout, max_seq_len)
@@ -285,8 +295,10 @@ class TransformerWorldModel(nn.Module):
         aux_loss = torch.zeros(1, device=obs_seq.device, dtype=obs_seq.dtype).squeeze()
         kl_loss = torch.zeros(1, device=obs_seq.device, dtype=obs_seq.dtype).squeeze()
         seq_len = obs_seq.shape[1]
-        if self.dir_head is not None and self.aux_horizon > 0 and seq_len > self.aux_horizon + 1:
-            ret_close = obs_seq[:, :, _RET_CLOSE_IDX]
+        if self.dir_head is not None and self.aux_horizon > 0 and seq_len > self.aux_horizon:
+            # Denormalize by subtracting the mean so sign(cumsum) matches
+            # the real cumulative return direction, not the z-scored one.
+            ret_close = obs_seq[:, :, _RET_CLOSE_IDX] - self.ret_close_mean
             cumsum = ret_close.cumsum(dim=1)
             future_sum = cumsum[:, self.aux_horizon :] - cumsum[:, : -self.aux_horizon]
             h_for_dir = h[:, : seq_len - self.aux_horizon]

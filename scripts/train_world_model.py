@@ -26,10 +26,12 @@ from pathlib import Path
 import torch
 
 from src.common.logging import get_logger
-from src.morpheus.dataset import MorpheusDataset
+from src.morpheus.dataset import BASE_OBS_COLUMNS, MorpheusDataset
 from src.morpheus.training import TrainConfig, chronological_split, train
 
 logger = get_logger(__name__)
+
+_RET_CLOSE_IDX = BASE_OBS_COLUMNS.index("ret_close")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -199,6 +201,11 @@ def main(argv: list[str] | None = None) -> None:
         max_seq_len=args.max_seq_len,
         aux_horizon=args.aux_horizon,
         aux_weight=args.aux_weight,
+        ret_close_mean=(
+            float(dataset.norm_stats.mean[_RET_CLOSE_IDX])
+            if dataset.norm_stats is not None
+            else 0.0
+        ),
         compile=args.compile,
         amp=args.amp,
         num_workers=args.num_workers,

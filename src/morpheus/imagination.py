@@ -154,6 +154,12 @@ class ImaginationEnv:
             idle, rewards + self._config.idle_penalty, rewards,
         )
 
+        # Step penalty while in position (time cost)
+        in_pos = new_pos != HOLD
+        rewards = torch.where(
+            in_pos, rewards + self._config.step_penalty, rewards,
+        )
+
         step_pnl_eur = rewards * self._initial_capital
         cum_pnl = cum_pnl + step_pnl_eur
         # Dynamic capital tracking: compound PnL so next step's size

@@ -28,7 +28,6 @@ class PolicyConfig:
 
     # Reward shaping
     step_penalty: float = -0.0001
-    invalid_penalty: float = -0.001
     idle_penalty: float = -0.0002
 
     # Training

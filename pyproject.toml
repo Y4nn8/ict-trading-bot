@@ -29,6 +29,7 @@ dependencies = [
     "lightgbm>=4.0",
     "numba>=0.60",
     "torch>=2.0",
+    "pandas-ta>=0.3",
     # Monitoring
     "python-telegram-bot>=21.0",
     "prometheus-client>=0.21",

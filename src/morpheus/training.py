@@ -66,6 +66,7 @@ class TrainConfig:
     max_seq_len: int = 1024
     aux_horizon: int = 0
     aux_weight: float = 0.1
+    ret_close_mean: float = 0.0
     # Training options
     compile: bool = False
     amp: bool = False
@@ -321,6 +322,7 @@ def build_model(config: TrainConfig) -> nn.Module:
             max_seq_len=config.max_seq_len,
             aux_horizon=config.aux_horizon,
             aux_weight=config.aux_weight,
+            ret_close_mean=config.ret_close_mean,
         )
 
     if config.model_type == "rssm":
