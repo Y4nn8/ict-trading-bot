@@ -621,6 +621,8 @@ async def run_nested_optuna(
         best_inner_wr = 0.0
         best_inner_pnl = 0.0
         best_inner_train_pnl = 0.0
+        best_inner_train_n_trades = 0
+        best_inner_train_wr = 0.0
         best_inner_params_local: dict[str, Any] = {}
         best_inner_trades_list: list[MidasTrade] = []
 
@@ -767,9 +769,14 @@ async def run_nested_optuna(
             )
 
             inner_train_pnl = 0.0
+            inner_train_n_trades = 0
+            inner_train_wr = 0.0
             if config.score_metric == "robust":
                 # Compute train backtest for the overfit penalty.
-                _, _, _, inner_train_pnl, _ = await _evaluate_oos_async(
+                (
+                    _, inner_train_n_trades, inner_train_wr,
+                    inner_train_pnl, _,
+                ) = await _evaluate_oos_async(
                     trainer, sim_config, db, config,
                     registry_factory, extractor_params,
                     eval_start=config.train_start,
@@ -796,6 +803,8 @@ async def run_nested_optuna(
                 best_inner_pnl = pnl
                 best_inner_trades_list = trades_list
                 best_inner_train_pnl = inner_train_pnl
+                best_inner_train_n_trades = inner_train_n_trades
+                best_inner_train_wr = inner_train_wr
 
         # Report to outer
         outer_study.tell(outer_trial, best_inner_score)
@@ -812,6 +821,8 @@ async def run_nested_optuna(
         if config.score_metric == "robust" and best_inner_trainer is not None:
             t_sc = best_inner_score
             t_pnl_val = best_inner_train_pnl
+            t_nt = best_inner_train_n_trades
+            t_wr_val = best_inner_train_wr
         elif (config.track_train_score
                 and best_inner_trainer is not None
                 and best_inner_params_local):
