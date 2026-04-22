@@ -29,7 +29,7 @@ from src.midas.replay_engine import (
     build_default_registry,
 )
 from src.midas.trade_simulator import MidasTrade, SimConfig, TradeSimulator
-from src.midas.trainer import META_COLUMNS, MidasTrainer, TrainerConfig
+from src.midas.trainer import MidasTrainer, TrainerConfig
 from src.midas.types import ATR_COLUMN_DEFAULT
 
 if TYPE_CHECKING:
@@ -208,6 +208,7 @@ class OptimizerConfig:
     slippage_seed: int | None = None
     importance_threshold: float = 0.0
     use_meta_labeling: bool = False
+    track_train_score: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +232,10 @@ class TrialRecord:
     val_n_trades: int = 0
     val_win_rate: float = 0.0
     val_pnl: float = 0.0
+    train_score: float | None = None
+    train_n_trades: int = 0
+    train_win_rate: float = 0.0
+    train_pnl: float = 0.0
 
 
 @dataclass
@@ -339,6 +344,47 @@ def _suggest_inner_params(
     }
 
 
+def compute_robust_score(
+    test_pnl: float,
+    train_pnl: float,
+    train_days: float,
+    test_days: float,
+) -> float:
+    """Apply an overfit penalty to the test PnL.
+
+    A trial is "overfit" when its train PnL is much higher than the
+    pro-rata expected level given the test result. Concretely:
+
+        expected_ratio = train_days / test_days       (e.g. 14/2 = 7)
+        actual_ratio   = train_pnl / test_pnl
+        penalty        = max(0, actual_ratio - expected_ratio) / expected_ratio
+        robust_score   = test_pnl / (1 + penalty)
+
+    The penalty is only applied when both PnLs are positive — a trial
+    where the train was negative or the test was non-positive is left
+    unchanged (the score is just ``test_pnl``). This penalises configs
+    that look unrealistically good on train (likely overfit) while
+    leaving "modest, balanced" trials intact.
+
+    Args:
+        test_pnl: PnL on the OOS test window.
+        train_pnl: PnL on the train window (replay through the model).
+        train_days: Number of trading days in the train window.
+        test_days: Number of trading days in the test window.
+
+    Returns:
+        The penalised score.
+    """
+    if test_pnl <= 0 or train_pnl <= 0 or test_days <= 0:
+        return test_pnl
+    expected_ratio = train_days / test_days
+    actual_ratio = train_pnl / test_pnl
+    if actual_ratio <= expected_ratio:
+        return test_pnl
+    penalty = (actual_ratio - expected_ratio) / expected_ratio
+    return test_pnl / (1.0 + penalty)
+
+
 async def _evaluate_oos_async(
     trainer: MidasTrainer,
     sim_config: SimConfig,
@@ -346,8 +392,16 @@ async def _evaluate_oos_async(
     config: OptimizerConfig,
     registry_factory: Any,
     extractor_params: dict[str, Any],
+    *,
+    eval_start: datetime | None = None,
+    eval_end: datetime | None = None,
 ) -> tuple[float, int, float, float, list[MidasTrade]]:
-    """Run OOS test and return (score, n_trades, win_rate, total_pnl, trades)."""
+    """Run OOS test and return (score, n_trades, win_rate, total_pnl, trades).
+
+    By default evaluates on ``config.test_start`` → ``config.test_end``.
+    Pass ``eval_start``/``eval_end`` to evaluate on a different window
+    (e.g. the train window for a train-vs-OOS correlation study).
+    """
     simulator = TradeSimulator(sim_config)
     _trainer = trainer
     _simulator = simulator
@@ -398,12 +452,14 @@ async def _evaluate_oos_async(
     registry = registry_factory()
     registry.configure_all(extractor_params)
 
+    start = eval_start if eval_start is not None else config.test_start
+    end = eval_end if eval_end is not None else config.test_end
     engine = ReplayEngine(
         db, registry,
         ReplayConfig(
             instrument=config.instrument,
-            start=config.test_start,
-            end=config.test_end,
+            start=start,
+            end=end,
             sample_on_candle=config.sample_on_candle,
             sample_rate=config.sample_rate,
         ),
@@ -428,7 +484,7 @@ async def _evaluate_oos_async(
         win_rate = wins / n_trades
 
     # Trade deficit penalty (applies to composite and pnl metrics)
-    trading_days = _count_trading_days(config.test_start, config.test_end)
+    trading_days = _count_trading_days(start, end)
     min_trades = config.min_daily_trades * trading_days
     deficit_penalty = (
         max(0, min_trades - n_trades) * config.trade_deficit_penalty
@@ -439,7 +495,9 @@ async def _evaluate_oos_async(
     elif config.score_metric == "pnl_per_trade":
         score = total_pnl / n_trades if n_trades > 0 else -1000.0
     else:
-        # "composite" and "pnl" both use PnL - deficit penalty
+        # "composite", "pnl", and "robust" all start from PnL - deficit.
+        # "robust" applies an additional train-overfit penalty in the
+        # inner loop after computing train_pnl.
         score = total_pnl - deficit_penalty
 
     return score, n_trades, win_rate, total_pnl, trades
@@ -562,6 +620,7 @@ async def run_nested_optuna(
         best_inner_trades = 0
         best_inner_wr = 0.0
         best_inner_pnl = 0.0
+        best_inner_train_pnl = 0.0
         best_inner_params_local: dict[str, Any] = {}
         best_inner_trades_list: list[MidasTrade] = []
 
@@ -633,10 +692,10 @@ async def run_nested_optuna(
 
             # Train meta model (Lopez de Prado gate on primary signal)
             if config.use_meta_labeling and trainer._entry_model is not None:
-                feature_cols = [
-                    c for c in df_filtered.columns if c not in META_COLUMNS
-                ]
-                x_train = df_filtered.select(feature_cols).to_numpy()
+                # Use the feature list the primary actually trained on
+                # (importance_threshold may have filtered some out).
+                primary_features = trainer._entry_features
+                x_train = df_filtered.select(primary_features).to_numpy()
                 proba = np.asarray(trainer._entry_model.predict(x_train))
                 p_buy = proba[:, 1]
                 p_sell = proba[:, 2]
@@ -707,6 +766,25 @@ async def run_nested_optuna(
                 registry_factory, extractor_params,
             )
 
+            inner_train_pnl = 0.0
+            if config.score_metric == "robust":
+                # Compute train backtest for the overfit penalty.
+                _, _, _, inner_train_pnl, _ = await _evaluate_oos_async(
+                    trainer, sim_config, db, config,
+                    registry_factory, extractor_params,
+                    eval_start=config.train_start,
+                    eval_end=config.train_end,
+                )
+                train_days = _count_trading_days(
+                    config.train_start, config.train_end,
+                )
+                test_days = _count_trading_days(
+                    config.test_start, config.test_end,
+                )
+                score = compute_robust_score(
+                    pnl, inner_train_pnl, train_days, test_days,
+                )
+
             inner_study.tell(inner_trial, score)
 
             if score > best_inner_score:
@@ -717,10 +795,52 @@ async def run_nested_optuna(
                 best_inner_wr = wr
                 best_inner_pnl = pnl
                 best_inner_trades_list = trades_list
+                best_inner_train_pnl = inner_train_pnl
 
         # Report to outer
         outer_study.tell(outer_trial, best_inner_score)
         result.total_inner_trials += config.inner_trials
+
+        # Train backtest: evaluate the best-inner model on the TRAIN window.
+        # Lets callers measure train/OOS correlation to detect overfitting.
+        t_sc: float | None = None
+        t_nt = 0
+        t_wr_val = 0.0
+        t_pnl_val = 0.0
+        # If robust scoring already computed train_pnl in the inner loop,
+        # reuse it instead of replaying.
+        if config.score_metric == "robust" and best_inner_trainer is not None:
+            t_sc = best_inner_score
+            t_pnl_val = best_inner_train_pnl
+        elif (config.track_train_score
+                and best_inner_trainer is not None
+                and best_inner_params_local):
+            t_sim = SimConfig(
+                sl_points=best_inner_params_local.get("sl_fallback", 3.0),
+                tp_points=best_inner_params_local.get("tp_fallback", 3.0),
+                k_sl=best_inner_params_local.get("k_sl", 1.0),
+                k_tp=best_inner_params_local.get("k_tp", 1.0),
+                max_spread=2.0,
+                gamma=best_inner_params_local.get("gamma", 1.0),
+                max_margin_proba=best_inner_params_local.get(
+                    "max_margin_proba", 0.80,
+                ),
+                sizing_threshold=best_inner_params_local.get(
+                    "entry_threshold", 0.5,
+                ),
+                min_risk_pct=best_inner_params_local.get(
+                    "min_risk_pct", 0.005,
+                ),
+                slippage_min_pts=config.slippage_min_pts,
+                slippage_max_pts=config.slippage_max_pts,
+                slippage_seed=config.slippage_seed,
+            )
+            t_sc, t_nt, t_wr_val, t_pnl_val, _ = await _evaluate_oos_async(
+                best_inner_trainer, t_sim, db, config,
+                registry_factory, extractor_params,
+                eval_start=config.train_start,
+                eval_end=config.train_end,
+            )
 
         # Validation pass for this outer trial
         v_sc: float | None = None
@@ -779,6 +899,10 @@ async def run_nested_optuna(
             val_n_trades=v_nt,
             val_win_rate=v_wr_val,
             val_pnl=v_pnl_val,
+            train_score=t_sc,
+            train_n_trades=t_nt,
+            train_win_rate=t_wr_val,
+            train_pnl=t_pnl_val,
         ))
 
         val_str = ""
@@ -864,8 +988,11 @@ def write_trial_logs(
 
     # --- Trials CSV ---
     has_val = any(r.val_score is not None for r in records)
+    has_train = any(r.train_score is not None for r in records)
     trial_fields = (
         ["window_idx", "outer_idx", "score", "n_trades", "win_rate", "pnl"]
+        + (["train_score", "train_n_trades", "train_win_rate", "train_pnl"]
+           if has_train else [])
         + (["val_score", "val_n_trades", "val_win_rate", "val_pnl"]
            if has_val else [])
         + [f"outer__{k}" for k in outer_sorted]
@@ -883,6 +1010,14 @@ def write_trial_logs(
                 "win_rate": round(r.win_rate, 4),
                 "pnl": round(r.pnl, 2),
             }
+            if has_train:
+                row["train_score"] = (
+                    round(r.train_score, 2)
+                    if r.train_score is not None else ""
+                )
+                row["train_n_trades"] = r.train_n_trades
+                row["train_win_rate"] = round(r.train_win_rate, 4)
+                row["train_pnl"] = round(r.train_pnl, 2)
             if has_val:
                 row["val_score"] = (
                     round(r.val_score, 2) if r.val_score is not None else ""

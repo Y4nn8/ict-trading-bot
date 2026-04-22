@@ -543,6 +543,7 @@ class WalkForwardOptunaConfig:
     stability_warn_ratio: float = 0.30
     importance_threshold: float = 0.0
     use_meta_labeling: bool = False
+    track_train_score: bool = False
 
 
 async def run_midas_wf_optuna(
@@ -629,6 +630,7 @@ async def run_midas_wf_optuna(
             slippage_seed=config.slippage_seed,
             importance_threshold=config.importance_threshold,
             use_meta_labeling=config.use_meta_labeling,
+            track_train_score=config.track_train_score,
         )
 
         result = await run_nested_optuna(opt_config, db, window_idx=i)
@@ -648,6 +650,9 @@ async def run_midas_wf_optuna(
             cv_threshold=config.stability_cv_threshold,
             warn_ratio=config.stability_warn_ratio,
         )
+
+    if config.track_train_score:
+        _print_train_test_correlation(results)
 
     _check_range_saturation(results, config)
 
@@ -722,6 +727,107 @@ class ParamStabilityReport:
     def converged_ratio(self) -> float:
         """Fraction of params classified as stable (0 if no params)."""
         return self.converged / self.total if self.total > 0 else 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class TrainTestCorrelation:
+    """Train vs OOS PnL correlation across trials.
+
+    Attributes:
+        n_trials: Number of trials with both train and test PnL.
+        correlation: Pearson correlation coefficient (NaN if < 3 trials
+            or zero variance).
+        train_mean: Mean train PnL across trials.
+        test_mean: Mean test PnL across trials.
+        train_std: Std of train PnL.
+        test_std: Std of test PnL.
+    """
+
+    n_trials: int
+    correlation: float
+    train_mean: float
+    test_mean: float
+    train_std: float
+    test_std: float
+
+
+def compute_train_test_correlation(
+    results: list[OptimizationResult],
+) -> TrainTestCorrelation:
+    """Pearson correlation between train PnL and test PnL across trials.
+
+    A strong positive correlation (> 0.3) suggests that selecting
+    hyperparameters based on train PnL will generalize to OOS. Near-zero
+    or negative correlation indicates overfitting — the model's success
+    on the train window does not carry to test.
+    """
+    train_pnls: list[float] = []
+    test_pnls: list[float] = []
+    for r in results:
+        for rec in r.trial_records:
+            if rec.train_score is None:
+                continue
+            train_pnls.append(rec.train_pnl)
+            test_pnls.append(rec.pnl)
+
+    n = len(train_pnls)
+    if n < 3:
+        return TrainTestCorrelation(
+            n_trials=n, correlation=float("nan"),
+            train_mean=0.0, test_mean=0.0,
+            train_std=0.0, test_std=0.0,
+        )
+
+    train_arr = np.array(train_pnls)
+    test_arr = np.array(test_pnls)
+    train_std = float(np.std(train_arr))
+    test_std = float(np.std(test_arr))
+
+    if train_std < 1e-9 or test_std < 1e-9:
+        corr = float("nan")
+    else:
+        corr = float(np.corrcoef(train_arr, test_arr)[0, 1])
+
+    return TrainTestCorrelation(
+        n_trials=n,
+        correlation=corr,
+        train_mean=float(np.mean(train_arr)),
+        test_mean=float(np.mean(test_arr)),
+        train_std=train_std,
+        test_std=test_std,
+    )
+
+
+def _print_train_test_correlation(
+    results: list[OptimizationResult],
+) -> None:
+    """Print train/OOS correlation diagnostic if tracking is enabled."""
+    corr = compute_train_test_correlation(results)
+    if corr.n_trials < 3:
+        return
+    print(f"\n{'='*70}")
+    print("TRAIN vs OOS CORRELATION")
+    print(f"{'='*70}")
+    print(f"Trials analysed:    {corr.n_trials}")
+    print(f"Train PnL mean:     {corr.train_mean:>10.2f}  (std {corr.train_std:.2f})")
+    print(f"OOS PnL mean:       {corr.test_mean:>10.2f}  (std {corr.test_std:.2f})")
+    r = corr.correlation
+    if np.isnan(r):
+        print("Correlation:        N/A (zero variance)")
+        return
+    print(f"Pearson r:          {r:>10.3f}")
+    if r > 0.3:
+        print("→ STRONG POSITIVE: train score is predictive of OOS. "
+              "Train-based selection is viable.")
+    elif r > 0.1:
+        print("→ WEAK POSITIVE: marginal signal. Selection may help but "
+              "variance is high.")
+    elif r > -0.1:
+        print("→ NO CORRELATION: train performance does not transfer to OOS. "
+              "Any selection is noise.")
+    else:
+        print("→ NEGATIVE CORRELATION: overfitting signal. Trials that look "
+              "best on train do worst on OOS.")
 
 
 def compute_param_stability(

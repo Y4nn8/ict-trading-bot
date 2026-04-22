@@ -102,6 +102,7 @@ async def main(args: argparse.Namespace) -> None:
             stability_cv_threshold=args.stability_cv_threshold,
             stability_warn_ratio=args.stability_warn_ratio,
             use_meta_labeling=args.meta_labeling,
+            track_train_score=args.track_train_score,
         )
 
         prefix = args.output or default_output_prefix()
@@ -133,8 +134,13 @@ def cli() -> None:
     parser.add_argument("--inner-trials", type=int, default=20)
     parser.add_argument("--sample-on-tick", action="store_true",
                         help="Sample every tick instead of on candle close")
-    parser.add_argument("--score", default="composite",
-                        choices=["composite", "pnl", "win_rate", "pnl_per_trade"])
+    parser.add_argument(
+        "--score", default="composite",
+        choices=["composite", "pnl", "win_rate", "pnl_per_trade", "robust"],
+        help="'robust' adds an overfit penalty: trials whose train PnL "
+             "is much higher than the time-pro-rata expected level get "
+             "down-weighted, favoring train/test consistency.",
+    )
     parser.add_argument("--min-daily-trades", type=int, default=10,
                         help="Min trades/day for trade deficit penalty (default: 10)")
     parser.add_argument("--trade-deficit-penalty", type=float, default=10.0,
@@ -165,6 +171,11 @@ def cli() -> None:
         "--meta-labeling", action="store_true",
         help="Train a binary meta model that gates primary entry "
              "signals (Lopez de Prado)",
+    )
+    parser.add_argument(
+        "--track-train-score", action="store_true",
+        help="Backtest each best-inner model on the TRAIN window and "
+             "report Pearson correlation between train and OOS PnL",
     )
     parser.add_argument(
         "--stability-cv-threshold", type=float, default=15.0,

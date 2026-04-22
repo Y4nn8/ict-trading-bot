@@ -15,6 +15,7 @@ from src.midas.optimizer import (
     _print_result,
     _suggest_inner_params,
     _suggest_outer_params,
+    compute_robust_score,
     default_output_prefix,
     load_fixed_inner_params,
     load_outer_param_ranges,
@@ -531,3 +532,79 @@ class TestPrintResult:
         assert "Validation" in captured.out
         assert "+35.00" in captured.out
         assert "+120.00" in captured.out
+
+
+class TestComputeRobustScore:
+    def test_balanced_trial_unchanged(self) -> None:
+        # train_pnl/test_pnl ratio = 7 (matches expected 14/2), no penalty
+        score = compute_robust_score(
+            test_pnl=100.0, train_pnl=700.0,
+            train_days=14, test_days=2,
+        )
+        assert score == 100.0
+
+    def test_train_below_expected_unchanged(self) -> None:
+        # train under-performs vs test; not flagged as overfit
+        score = compute_robust_score(
+            test_pnl=100.0, train_pnl=300.0,
+            train_days=14, test_days=2,
+        )
+        assert score == 100.0
+
+    def test_overfit_penalised(self) -> None:
+        # train 100x test → severe penalty
+        score = compute_robust_score(
+            test_pnl=100.0, train_pnl=10000.0,
+            train_days=14, test_days=2,
+        )
+        # ratio=100, expected=7, penalty=(100-7)/7=13.29
+        # score = 100/(1+13.29) = ~7.0
+        assert 5.0 < score < 9.0
+
+    def test_extreme_overfit_near_zero(self) -> None:
+        score = compute_robust_score(
+            test_pnl=100.0, train_pnl=1_000_000.0,
+            train_days=14, test_days=2,
+        )
+        # massive penalty
+        assert score < 1.0
+        assert score > 0
+
+    def test_negative_test_unchanged(self) -> None:
+        score = compute_robust_score(
+            test_pnl=-50.0, train_pnl=10000.0,
+            train_days=14, test_days=2,
+        )
+        assert score == -50.0
+
+    def test_negative_train_unchanged(self) -> None:
+        score = compute_robust_score(
+            test_pnl=100.0, train_pnl=-500.0,
+            train_days=14, test_days=2,
+        )
+        assert score == 100.0
+
+    def test_zero_test_unchanged(self) -> None:
+        score = compute_robust_score(
+            test_pnl=0.0, train_pnl=1000.0,
+            train_days=14, test_days=2,
+        )
+        assert score == 0.0
+
+    def test_w4_t1_real_data(self) -> None:
+        # From actual smoke test: best trial, balanced
+        score = compute_robust_score(
+            test_pnl=4497.67, train_pnl=6470.86,
+            train_days=14, test_days=2,
+        )
+        # ratio 1.44 < expected 7 → no penalty
+        assert score == 4497.67
+
+    def test_w4_t2_real_data_killed(self) -> None:
+        # From actual smoke test: extreme overfit
+        score = compute_robust_score(
+            test_pnl=100.0, train_pnl=85380.0,
+            train_days=14, test_days=2,
+        )
+        # ratio ~854, penalty ~120, score ~ 0.83
+        assert score < 1.0
