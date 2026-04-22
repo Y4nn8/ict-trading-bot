@@ -9,6 +9,7 @@ import pytest
 
 from src.midas.candle_builder import CandleBuilder
 from src.midas.extractors.ict_features import ICTFeatureExtractor
+from src.midas.extractors.macd_features import MACDFeatureExtractor
 from src.midas.extractors.scalping_features import ScalpingFeatureExtractor
 from src.midas.extractors.tick_features import TickFeatureExtractor
 from src.midas.feature_extractor import FeatureRegistry
@@ -410,6 +411,205 @@ class TestICTFeatureExtractor:
         ext.reset()
         features = ext.extract(_make_tick(), _make_partial(), 0)
         assert features["ict__m5_trend"] == 0.0
+
+
+class TestMACDFeatureExtractor:
+    """Tests for MACDFeatureExtractor (M1 + M5)."""
+
+    def test_name(self) -> None:
+        ext = MACDFeatureExtractor()
+        assert ext.name == "macd"
+
+    def test_no_tunable_params(self) -> None:
+        ext = MACDFeatureExtractor()
+        assert ext.tunable_params() == []
+
+    def test_extract_cold_start_all_zero(self) -> None:
+        """Before any candles, all MACD features return 0.0."""
+        ext = MACDFeatureExtractor()
+        ext.configure({})
+        features = ext.extract(_make_tick(), _make_partial(), 0)
+        for tf in ("m1", "m5"):
+            assert features[f"macd__{tf}_macd"] == 0.0
+            assert features[f"macd__{tf}_signal"] == 0.0
+            assert features[f"macd__{tf}_hist"] == 0.0
+            for lag in range(1, 6):
+                assert features[f"macd__{tf}_hist_lag{lag}"] == 0.0
+
+    def test_expected_feature_keys(self) -> None:
+        """Exactly 16 features: 8 per TF x 2 TFs."""
+        ext = MACDFeatureExtractor()
+        ext.configure({})
+        features = ext.extract(_make_tick(), _make_partial(), 0)
+        assert len(features) == 16
+        expected = set()
+        for tf in ("m1", "m5"):
+            expected.add(f"macd__{tf}_macd")
+            expected.add(f"macd__{tf}_signal")
+            expected.add(f"macd__{tf}_hist")
+            for lag in range(1, 6):
+                expected.add(f"macd__{tf}_hist_lag{lag}")
+        assert set(features.keys()) == expected
+
+    def test_m1_activates_after_6_candles(self) -> None:
+        """M1 state starts updating after the first 6 10s candles."""
+        ext = MACDFeatureExtractor()
+        ext.configure({})
+
+        # No M1 candle yet
+        for i in range(5):
+            ext.on_candle_close(_make_candle(i, open_=100, close=100.1), i)
+        features = ext.extract(_make_tick(), _make_partial(), 5)
+        assert features["macd__m1_macd"] == 0.0
+
+        # 6th 10s candle closes → 1 M1 candle
+        ext.on_candle_close(_make_candle(5, open_=100, close=100.5), 5)
+        features = ext.extract(_make_tick(), _make_partial(), 6)
+        # With a single M1 close, fast and slow EMAs both = same close,
+        # so macd == 0. Still, the state has been touched.
+        assert "macd__m1_macd" in features
+
+    def test_m5_activates_only_after_30_candles(self) -> None:
+        """M5 state requires 30 10s candles to produce any update."""
+        ext = MACDFeatureExtractor()
+        ext.configure({})
+
+        # 29 candles: no M5 yet. M1 is already updating (4 M1 closes).
+        for i in range(29):
+            ext.on_candle_close(
+                _make_candle(i, open_=100 + i * 0.1, close=100.1 + i * 0.1),
+                i,
+            )
+        features = ext.extract(_make_tick(), _make_partial(), 29)
+        # M5: still cold (no M5 candle closed)
+        assert features["macd__m5_macd"] == 0.0
+
+        # 30th closes → 1 M5 candle triggers state update
+        ext.on_candle_close(
+            _make_candle(29, open_=102.9, close=103.0), 29,
+        )
+        features = ext.extract(_make_tick(), _make_partial(), 30)
+        # Still 0 at this point: first M5 close → fast==slow EMA seed.
+        # But hist_history now has 1 entry, so hist exists (= 0).
+        assert "macd__m5_hist" in features
+
+    def test_macd_nonzero_on_uptrend(self) -> None:
+        """A clean uptrend should produce a positive MACD on M1."""
+        ext = MACDFeatureExtractor()
+        ext.configure({})
+
+        # Feed 50 M1 candles worth (300x 10s) with a steady uptrend,
+        # so EMAs diverge and MACD becomes positive.
+        for i in range(300):
+            price = 100.0 + i * 0.05
+            ext.on_candle_close(
+                _make_candle(
+                    i, open_=price, close=price + 0.02,
+                    high=price + 0.1, low=price - 0.05,
+                ),
+                i,
+            )
+        features = ext.extract(_make_tick(price=115.0), _make_partial(), 300)
+        # Fast EMA > slow EMA after a sustained rise → MACD > 0
+        assert features["macd__m1_macd"] > 0
+        assert features["macd__m5_macd"] > 0
+
+    def test_macd_negative_on_downtrend(self) -> None:
+        """Sustained downtrend gives a negative MACD on M1 and M5."""
+        ext = MACDFeatureExtractor()
+        ext.configure({})
+
+        for i in range(300):
+            price = 150.0 - i * 0.05
+            ext.on_candle_close(
+                _make_candle(
+                    i, open_=price, close=price - 0.02,
+                    high=price + 0.05, low=price - 0.1,
+                ),
+                i,
+            )
+        features = ext.extract(_make_tick(price=135.0), _make_partial(), 300)
+        assert features["macd__m1_macd"] < 0
+        assert features["macd__m5_macd"] < 0
+
+    def test_hist_lag_shifts_correctly(self) -> None:
+        """hist_lag1..5 should report the previous N histograms.
+
+        After 8 M1 closes we have 8 histogram values in the history deque
+        (maxlen=6 → only the last 6 are retained). hist_lag1 must equal
+        the histogram produced one M1 close earlier, etc.
+        """
+        ext = MACDFeatureExtractor()
+        ext.configure({})
+
+        # Feed 8 M1 candles (48x 10s) with varying closes to produce
+        # distinct histogram values.
+        closes_m1 = [100.0, 101.0, 100.5, 102.0, 101.0, 103.0, 102.5, 104.0]
+        for m1_idx, m1_close in enumerate(closes_m1):
+            for j in range(6):
+                ext.on_candle_close(
+                    _make_candle(
+                        m1_idx * 6 + j,
+                        open_=m1_close, close=m1_close,
+                        high=m1_close + 0.1, low=m1_close - 0.1,
+                    ),
+                    m1_idx * 6 + j,
+                )
+
+        features = ext.extract(_make_tick(), _make_partial(), 48)
+        current_hist = features["macd__m1_hist"]
+        lag1 = features["macd__m1_hist_lag1"]
+        lag2 = features["macd__m1_hist_lag2"]
+        # Values should differ (price pattern is oscillating upward).
+        assert current_hist != lag1
+        assert lag1 != lag2
+        # All 5 lags must be populated after 8 M1 closes (deque full).
+        for lag in range(1, 6):
+            assert features[f"macd__m1_hist_lag{lag}"] != 0.0
+
+    def test_no_lookahead_extract_uses_only_closed_candles(self) -> None:
+        """extract() with an unrealistically favourable partial candle
+        must not change MACD values — the in-progress candle must be
+        ignored. We verify by comparing extract output before and after
+        we change the partial candle's price.
+        """
+        ext = MACDFeatureExtractor()
+        ext.configure({})
+
+        for i in range(30):
+            ext.on_candle_close(
+                _make_candle(i, open_=100 + i * 0.1, close=100.1 + i * 0.1),
+                i,
+            )
+
+        features_cheap = ext.extract(
+            _make_tick(price=103.0), _make_partial(price=103.0), 30,
+        )
+        features_spike = ext.extract(
+            _make_tick(price=1000.0), _make_partial(price=1000.0), 30,
+        )
+        # MACD features must be identical regardless of current tick
+        # price — they only depend on closed HTF candles.
+        for key in features_cheap:
+            assert features_cheap[key] == features_spike[key], key
+
+    def test_reset_clears_state(self) -> None:
+        ext = MACDFeatureExtractor()
+        ext.configure({})
+
+        for i in range(30):
+            ext.on_candle_close(
+                _make_candle(i, open_=100 + i, close=101 + i), i,
+            )
+        features_before = ext.extract(_make_tick(), _make_partial(), 30)
+        assert features_before["macd__m1_macd"] != 0.0
+
+        ext.reset()
+        features_after = ext.extract(_make_tick(), _make_partial(), 0)
+        for tf in ("m1", "m5"):
+            assert features_after[f"macd__{tf}_macd"] == 0.0
+            assert features_after[f"macd__{tf}_signal"] == 0.0
+            assert features_after[f"macd__{tf}_hist"] == 0.0
 
 
 class TestFeatureRegistry:

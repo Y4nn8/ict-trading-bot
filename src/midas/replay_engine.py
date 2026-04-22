@@ -284,6 +284,7 @@ def build_default_registry(instrument: str = "XAUUSD") -> FeatureRegistry:
         Configured FeatureRegistry.
     """
     from src.midas.extractors.ict_features import ICTFeatureExtractor
+    from src.midas.extractors.macd_features import MACDFeatureExtractor
     from src.midas.extractors.scalping_features import ScalpingFeatureExtractor
     from src.midas.extractors.tick_features import TickFeatureExtractor
 
@@ -291,4 +292,5 @@ def build_default_registry(instrument: str = "XAUUSD") -> FeatureRegistry:
     registry.register(TickFeatureExtractor())
     registry.register(ScalpingFeatureExtractor())
     registry.register(ICTFeatureExtractor(instrument=instrument))
+    registry.register(MACDFeatureExtractor())
     return registry

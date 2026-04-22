@@ -168,9 +168,11 @@ def cli() -> None:
              "fraction after pass 1, then retrain (0 = disabled)",
     )
     parser.add_argument(
-        "--meta-labeling", action="store_true",
+        "--meta-labeling",
+        action=argparse.BooleanOptionalAction,
+        default=False,
         help="Train a binary meta model that gates primary entry "
-             "signals (Lopez de Prado)",
+             "signals (Lopez de Prado). Use --no-meta-labeling to disable.",
     )
     parser.add_argument(
         "--track-train-score", action="store_true",
