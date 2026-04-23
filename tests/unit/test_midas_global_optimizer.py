@@ -98,6 +98,53 @@ class TestGenerateDisjointWindows:
             assert ws[i].test_start >= ws[i - 1].test_end
             assert ws[i].val_start >= ws[i - 1].val_end
 
+    def test_business_days_mode_skips_weekends(self) -> None:
+        """All window boundaries should land on Mon-Fri in business-days mode."""
+        # Jan 1 2025 = Wednesday → starts on Wed
+        ws = generate_disjoint_windows(
+            datetime(2025, 1, 1, tzinfo=UTC),
+            datetime(2025, 12, 31, tzinfo=UTC),
+            train_days=15, test_days=1, val_days=1,
+            step_days=2, n_windows=20,
+            business_days=True,
+        )
+        assert len(ws) == 20
+        for w in ws:
+            for dt in (w.train_start, w.train_end, w.test_start,
+                       w.test_end, w.val_start, w.val_end):
+                # Mon=0 .. Fri=4 (Sat=5, Sun=6)
+                assert dt.weekday() < 5, (
+                    f"boundary {dt} landed on weekday {dt.weekday()}"
+                )
+
+    def test_business_days_15j_train_equals_3_weeks(self) -> None:
+        """15 business days from Monday = 21 calendar days (3 weeks)."""
+        # 2025-01-06 is a Monday
+        ws = generate_disjoint_windows(
+            datetime(2025, 1, 6, tzinfo=UTC),
+            datetime(2025, 12, 31, tzinfo=UTC),
+            train_days=15, test_days=1, val_days=1, n_windows=1,
+            business_days=True,
+        )
+        assert len(ws) == 1
+        # 15 business days past Mon Jan 6 lands on Mon Jan 27 (3 full weeks)
+        assert ws[0].train_end.weekday() == 0  # Monday
+        assert (ws[0].train_end - ws[0].train_start).days == 21
+
+    def test_business_days_start_snapped_to_monday(self) -> None:
+        """A Saturday start should snap forward to the next business day."""
+        # 2025-01-04 = Saturday
+        ws = generate_disjoint_windows(
+            datetime(2025, 1, 4, tzinfo=UTC),
+            datetime(2025, 12, 31, tzinfo=UTC),
+            train_days=5, test_days=1, val_days=1, n_windows=1,
+            business_days=True,
+        )
+        assert len(ws) == 1
+        # Should start on Monday Jan 6 (first business day after Sat Jan 4)
+        assert ws[0].train_start.weekday() == 0  # Monday
+        assert ws[0].train_start.day == 6
+
     def test_custom_step_larger_than_span(self) -> None:
         """step > span → gaps between windows are allowed."""
         ws = generate_disjoint_windows(

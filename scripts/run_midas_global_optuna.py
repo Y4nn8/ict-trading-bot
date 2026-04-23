@@ -64,6 +64,7 @@ async def main(args: argparse.Namespace) -> None:
             train_days=args.train_days, test_days=args.test_days,
             val_days=args.val_days, step_days=args.step_days,
             n_windows=args.n_windows,
+            business_days=args.business_days,
         )
         if not windows:
             print("No windows fit in the given range.")
@@ -147,6 +148,14 @@ def cli() -> None:
         help="During the validation pass (best trial only), also backtest "
              "each window on its train slice to compute robust scores. "
              "Adds ~10-15 min per window.",
+    )
+    parser.add_argument(
+        "--business-days",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Count train/test/val/step in business days (skip weekends). "
+             "Default True ensures test/val days never land on Sat/Sun. "
+             "Use --no-business-days for raw calendar days.",
     )
     parser.add_argument("--sl-range", type=float, nargs=2, default=[1.5, 8.0])
     parser.add_argument("--tp-range", type=float, nargs=2, default=[1.5, 8.0])

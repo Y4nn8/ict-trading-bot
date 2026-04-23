@@ -145,6 +145,27 @@ class GlobalOptunaResult:
     trial_records: list[TrialAggregate] = field(default_factory=list)
 
 
+def _add_days(dt: datetime, n: int, business_days: bool) -> datetime:
+    """Add ``n`` days to ``dt``. In business-days mode, skip Sat/Sun."""
+    if not business_days:
+        return dt + timedelta(days=n)
+    current = dt
+    added = 0
+    while added < n:
+        current = current + timedelta(days=1)
+        if current.weekday() < 5:  # Mon=0 .. Fri=4
+            added += 1
+    return current
+
+
+def _next_business_day(dt: datetime) -> datetime:
+    """Return the first Mon-Fri at or after ``dt``."""
+    current = dt
+    while current.weekday() >= 5:
+        current = current + timedelta(days=1)
+    return current
+
+
 def generate_disjoint_windows(
     data_start: datetime,
     data_end: datetime,
@@ -153,6 +174,7 @@ def generate_disjoint_windows(
     val_days: int = 1,
     step_days: int | None = None,
     n_windows: int | None = None,
+    business_days: bool = False,
 ) -> list[Window]:
     """Build windows covering ``data_start..data_end``.
 
@@ -163,15 +185,19 @@ def generate_disjoint_windows(
     Args:
         data_start: Earliest date available.
         data_end: Latest date available (exclusive end).
-        train_days: Length of each train slice in days.
-        test_days: Length of each test slice in days.
-        val_days: Length of each validation slice in days.
+        train_days: Length of each train slice (in business days if
+            ``business_days=True``, else calendar days).
+        test_days: Length of each test slice.
+        val_days: Length of each validation slice.
         step_days: Stride between consecutive window starts. Defaults
             to ``train_days + test_days + val_days`` (fully disjoint).
             Must be ``>= test_days + val_days`` so test/val slices stay
             disjoint across windows.
         n_windows: Max number of windows to produce. If ``None``, fit
             as many as possible in the available range.
+        business_days: If True, advance all slices by Mon-Fri only,
+            skipping Saturdays and Sundays. Ensures test/val days
+            never land on a market-closed weekend (useful for FX/CFDs).
     """
     window_span = train_days + test_days + val_days
     if step_days is None:
@@ -185,14 +211,16 @@ def generate_disjoint_windows(
         raise ValueError(msg)
 
     windows: list[Window] = []
-    cursor = data_start
-    while cursor + timedelta(days=window_span) <= data_end:
+    cursor = _next_business_day(data_start) if business_days else data_start
+    while True:
         train_start = cursor
-        train_end = train_start + timedelta(days=train_days)
+        train_end = _add_days(train_start, train_days, business_days)
         test_start = train_end
-        test_end = test_start + timedelta(days=test_days)
+        test_end = _add_days(test_start, test_days, business_days)
         val_start = test_end
-        val_end = val_start + timedelta(days=val_days)
+        val_end = _add_days(val_start, val_days, business_days)
+        if val_end > data_end:
+            break
         windows.append(Window(
             train_start=train_start, train_end=train_end,
             test_start=test_start, test_end=test_end,
@@ -200,7 +228,7 @@ def generate_disjoint_windows(
         ))
         if n_windows is not None and len(windows) >= n_windows:
             break
-        cursor = cursor + timedelta(days=step_days)
+        cursor = _add_days(cursor, step_days, business_days)
     return windows
 
 
