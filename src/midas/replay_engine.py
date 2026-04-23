@@ -67,9 +67,10 @@ class ReplayConfig:
         output_path: Path to write Parquet output.
             None means features are collected in memory.
         sample_on_candle: Extract features on each candle close (recommended).
-            When True, sample_rate is ignored.
-        sample_rate: Legacy: extract features every N ticks.
-            Only used when sample_on_candle is False.
+            Combined with sample_rate, extraction happens every N-th close.
+        sample_rate: Subsampling factor. When sample_on_candle is True,
+            extract features every N candle closes (e.g. rate=6 on 10s
+            base = M1 sampling). When False, extract every N ticks.
     """
 
     instrument: str = "XAUUSD"
@@ -152,6 +153,7 @@ class ReplayEngine:
                 cfg.instrument, cfg.start, cfg.end,
             )
 
+            candle_close_counter = 0
             while True:
                 rows = await cursor.fetch(cfg.chunk_size)
                 if not rows:
@@ -183,16 +185,24 @@ class ReplayEngine:
                             closed, self._builder.candle_index - 1,
                         )
                         candle_just_closed = True
+                        candle_close_counter += 1
 
                     # Only extract features within the nominal window
                     in_window = tick.time < cfg.end
 
-                    # Determine if we should extract features
-                    should_extract = (
-                        candle_just_closed
-                        if cfg.sample_on_candle
-                        else (tick_counter % cfg.sample_rate == 0)
-                    )
+                    # Determine if we should extract features. In
+                    # candle-close mode, sample_rate subsamples candle
+                    # closes (e.g. rate=6 on 10s base = M1 sampling).
+                    # In tick mode, sample_rate subsamples ticks.
+                    if cfg.sample_on_candle:
+                        should_extract = (
+                            candle_just_closed
+                            and candle_close_counter % cfg.sample_rate == 0
+                        )
+                    else:
+                        should_extract = (
+                            tick_counter % cfg.sample_rate == 0
+                        )
 
                     if in_window and should_extract:
                         partial = self._builder.partial
