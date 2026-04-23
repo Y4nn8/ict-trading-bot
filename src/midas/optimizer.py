@@ -330,12 +330,15 @@ def _suggest_inner_params(
             config.min_risk_pct_range[0],
             config.min_risk_pct_range[1],
         ),
-        # LightGBM hyperparams (shared entry + exit)
-        "n_estimators": _int("n_estimators", 50, 1000),
-        "learning_rate": _float("learning_rate", 0.01, 0.3, log=True),
-        "max_depth": _int("max_depth", 3, 10),
-        "num_leaves": _int("num_leaves", 15, 127),
-        "min_child_samples": _int("min_child_samples", 10, 300),
+        # LightGBM hyperparams (shared entry + exit).
+        # Ranges sized for ~1M-row training sets (650j x M1 panel mode).
+        # num_leaves <= 2^max_depth keeps depth as the effective constraint;
+        # min_child_samples scales with dataset size to avoid leaf overfit.
+        "n_estimators": _int("n_estimators", 100, 1500),
+        "learning_rate": _float("learning_rate", 0.005, 0.2, log=True),
+        "max_depth": _int("max_depth", 4, 12),
+        "num_leaves": _int("num_leaves", 31, 255),
+        "min_child_samples": _int("min_child_samples", 50, 1000),
         "subsample": _float("subsample", 0.5, 1.0),
         "colsample_bytree": _float("colsample_bytree", 0.5, 1.0),
         "entry_threshold": _float("entry_threshold", 0.25, 0.60),
