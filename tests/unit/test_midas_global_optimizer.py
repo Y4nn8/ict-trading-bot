@@ -74,13 +74,29 @@ class TestGenerateDisjointWindows:
         )
         assert ws == []
 
-    def test_step_shorter_than_span_rejected(self) -> None:
+    def test_step_shorter_than_test_val_rejected(self) -> None:
+        """step must be >= test_days + val_days to keep test/val disjoint."""
         with pytest.raises(ValueError, match="step_days"):
             generate_disjoint_windows(
                 datetime(2025, 1, 1, tzinfo=UTC),
                 datetime(2026, 1, 1, tzinfo=UTC),
-                train_days=14, test_days=1, val_days=1, step_days=10,
+                train_days=14, test_days=2, val_days=2, step_days=3,
             )
+
+    def test_overlapping_trains_allowed(self) -> None:
+        """step < train+test+val → trains overlap but tests/vals stay disjoint."""
+        ws = generate_disjoint_windows(
+            datetime(2025, 1, 1, tzinfo=UTC),
+            datetime(2025, 6, 1, tzinfo=UTC),
+            train_days=14, test_days=1, val_days=1, step_days=2,
+        )
+        assert len(ws) > 5
+        # Trains overlap: W1.train_start < W0.train_end
+        assert ws[1].train_start < ws[0].train_end
+        # Tests stay disjoint: W1.test_start >= W0.test_end
+        for i in range(1, len(ws)):
+            assert ws[i].test_start >= ws[i - 1].test_end
+            assert ws[i].val_start >= ws[i - 1].val_end
 
     def test_custom_step_larger_than_span(self) -> None:
         """step > span → gaps between windows are allowed."""
@@ -89,9 +105,7 @@ class TestGenerateDisjointWindows:
             datetime(2025, 4, 1, tzinfo=UTC),
             train_days=14, test_days=1, val_days=1, step_days=30,
         )
-        # With 90 days and step 30: starts at day 0, 30, 60 → 3 windows fit
         assert len(ws) == 3
-        # Gap between window 0 val_end and window 1 train_start = 30 - 16 = 14
         gap = (ws[1].train_start - ws[0].val_end).days
         assert gap == 14
 

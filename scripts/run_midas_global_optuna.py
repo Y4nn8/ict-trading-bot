@@ -91,6 +91,7 @@ async def main(args: argparse.Namespace) -> None:
             n_trials=args.n_trials,
             objective=args.objective,
             sample_on_candle=not args.sample_on_tick,
+            sample_rate=args.sample_rate,
             sl_range=tuple(args.sl_range),
             tp_range=tuple(args.tp_range),
             k_sl_range=tuple(args.k_sl_range),
@@ -103,6 +104,7 @@ async def main(args: argparse.Namespace) -> None:
             slippage_seed=args.slippage_seed,
             importance_threshold=args.importance_threshold,
             use_meta_labeling=args.meta_labeling,
+            compute_train_robust=args.compute_train_robust,
         )
 
         prefix = args.output or default_output_prefix()
@@ -134,6 +136,18 @@ def cli() -> None:
         help="Aggregate metric to maximise. Others are logged.",
     )
     parser.add_argument("--sample-on-tick", action="store_true")
+    parser.add_argument(
+        "--sample-rate", type=int, default=1,
+        help="Output 1 feature row every N candles (e.g. 6 → M1 on 10s base). "
+             "Does NOT affect replay speed (still processes every tick), but "
+             "shrinks the training dataset so LightGBM fits faster.",
+    )
+    parser.add_argument(
+        "--compute-train-robust", action="store_true",
+        help="During the validation pass (best trial only), also backtest "
+             "each window on its train slice to compute robust scores. "
+             "Adds ~10-15 min per window.",
+    )
     parser.add_argument("--sl-range", type=float, nargs=2, default=[1.5, 8.0])
     parser.add_argument("--tp-range", type=float, nargs=2, default=[1.5, 8.0])
     parser.add_argument("--k-sl-range", type=float, nargs=2, default=[0.5, 3.0])
